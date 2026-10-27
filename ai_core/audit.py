@@ -23,6 +23,7 @@ from typing import Dict, Iterable, Optional
 SENSITIVE_KEYS = frozenset(
     {
         "content",
+        "spec",
         "password",
         "passphrase",
         "token",

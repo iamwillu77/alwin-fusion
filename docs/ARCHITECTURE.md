@@ -1,6 +1,6 @@
 # Alwin Fusion — Architecture
 
-Version: 0.1.0 — Milestone: Local AI Core Prototype
+Version: 0.2.0 — Milestone: Local Document and Spreadsheet Automation
 
 Alwin Fusion is an open-source, offline-first AI-native operating
 system in the making. This document describes what exists today, how
@@ -29,6 +29,8 @@ ai_core/                 Trusted application core (pure Python, stdlib only)
     __init__.py          Version marker
     config.py            Configuration from env/args, validated roots
     command_parser.py    Deterministic natural-language -> ParsedIntent
+    specs.py             Structured content validation (reports, specs,
+                         formulas) — closed schemas, bounded sizes
     planner.py           Intent/model proposal -> validated Action (allowlist)
     permissions.py       Path resolution, containment, symlink/traversal gates
     executor.py          Runs validated actions via the dispatcher
@@ -42,9 +44,16 @@ ai_runtime/              Local AI runtime integration
 integrations/            Pluggable action handlers (the extension point)
     __init__.py          ActionDispatcher + build_default_dispatcher()
     filesystem/tools.py  list/read/create-only filesystem tools
+    documents/           v0.2 document generation
+        deps.py          lazy optional-dependency loading + clear errors
+        report.py        deterministic plain-text rendering (stdlib)
+        pdf.py           reportlab rendering + stdlib PDF validation
+        spreadsheet.py   openpyxl workbook build + reopen/inspect
+        tools.py         O_EXCL create-only handlers re-checking security
 tests/                   unittest suite (temporary sandboxes only)
 docs/                    ARCHITECTURE.md, SECURITY.md
 scripts/run_tests.sh     Test entry point
+requirements.txt         optional v0.2 document dependencies
 ```
 
 Note on naming: the original scaffold used `ai-core/` and
@@ -62,7 +71,9 @@ command_parser.parse_command()          deterministic, offline
     |  ParsedIntent {intent, slots}
     v
 planner.plan_from_intent()              (+ optional plan_via_llm())
-    |  Action dict  -- validated by planner.validate_action()
+    |  content_loader(source.json)          permission-checked JSON read,
+    |  Action dict  -- validated by          512 KiB limit, strict UTF-8
+    |  planner.validate_action()             (+ ai_core.specs content rules)
     v
 permissions.PermissionChecker           path resolved, realpath applied,
     |  PermissionDecision               containment + symlink checks
@@ -70,11 +81,11 @@ permissions.PermissionChecker           path resolved, realpath applied,
 approval callback (CLI: interactive y/N)   required for mutating actions
     v
 executor.execute()  -> ActionDispatcher -> integrations.filesystem.tools
-    |  ExecutionResult (real errors, no fakes)
+    |  ExecutionResult (real errors, no fakes)   or integrations.documents.tools
     v
 verifier.verify()   -> re-resolves paths, re-checks the filesystem
-    |  VerificationResult {passed|failed|skipped}
-    v
+    |  VerificationResult {passed|failed|skipped}  (re-renders reports,
+    v                                              reopens workbooks, validates PDFs)
 audit.record()      -> <state_dir>/audit.jsonl (0600, content redacted)
     v
 cli.print_report()  -> human-readable outcome + exit code
@@ -91,6 +102,9 @@ future GUI or MCP server can drive the same `TaskPipeline`.
 |-----------------------|---------------------------|---------|----------|
 | `create_directory`    | `path`                    | yes     | yes      |
 | `create_text_file`    | `path`, `content`         | yes     | yes      |
+| `create_report`       | `path` (.txt), `content`  | yes     | yes      |
+| `create_pdf`          | `path` (.pdf), `content`  | yes     | yes      |
+| `create_spreadsheet`  | `path` (.xlsx), `spec`    | yes     | yes      |
 | `list_directory`      | `path`                    | no      | no       |
 | `read_file`           | `path`                    | no      | no       |
 | `explain`             | `target` (nested action)  | no      | no       |
@@ -98,6 +112,19 @@ future GUI or MCP server can drive the same `TaskPipeline`.
 There is **no** delete, overwrite, move, shell or network action in
 this milestone, by construction. Path strings are validated (length,
 null bytes, `..`) before the permission checker even runs.
+
+The three v0.2 document actions carry *structured* payloads instead of
+free text: `content` is a report/PDF document (`{"title": ..., "blocks":
+[heading|paragraph|list]}`) and `spec` is a workbook specification
+(sheets, headers, rows, formulas, number formats, column widths,
+styles). Both are validated field-by-field in `ai_core/specs.py`
+before and after planning — closed key sets, bounded sizes, scalar
+cells only, and a conservative spreadsheet formula grammar
+(allow-listed functions; no external-workbook links, cross-sheet
+references or references outside the declared grid). Generated files
+have fixed extensions (`.txt`/`.pdf`/`.xlsx`); a wrong extension or
+unsafe file name is rejected. The model-proposal path receives no
+`source` key, so it can never trigger a file read from model output.
 
 Paths in actions are **relative to the user's home directory**
 (e.g. `Documents/Business Reports`); `.` means the primary permitted
@@ -156,25 +183,44 @@ CLI flags: `--dry-run`, `--llm`, `--root DIR` (repeatable),
 
 `scripts/run_tests.sh` runs the unittest suite (stdlib only). Every
 test constructs a temporary home/root/state sandbox — the developer's
-real `~/Documents` is never touched. Coverage includes supported and
-unsupported commands, traversal, symlink escapes, permission denial,
-approval rejection, verification failure, Ollama-unavailable
-behaviour, no-overwrite/no-delete capability, dry-run inertness and
-audit redaction/permissions.
+real `~/Documents` is never touched. The v0.2 suite is **241 tests**
+(137 from v0.1 plus 104 new ones) covering supported and unsupported
+commands, traversal, symlink escapes, permission denial, approval
+rejection, verification failure, Ollama-unavailable behaviour,
+no-overwrite/no-delete capability, dry-run inertness and audit
+redaction/permissions, plus the document features:
+
+* report rendering is deterministic and byte-compared by the verifier;
+* PDF generation and structural validation (`%PDF-` signature,
+  catalog, object count, `startxref`, `%%EOF`);
+* workbook creation, reopening and cell-by-cell comparison against
+  the spec, with formulas preserved as text;
+* formula-grammar rejection (network/hyperlink functions,
+  external-workbook and cross-sheet links, out-of-grid references);
+* content-source files: permission checks, size limit, strict UTF-8,
+  single-object JSON, invalid-spec rejection;
+* content/spec validation idempotency (the tools layer re-validates
+  the planner's normalized output);
+* lying or tampering handlers failing verification.
+
+The spreadsheet/PDF pipeline tests skip themselves politely when
+`openpyxl`/`reportlab` is not installed; the pure-stdlib validator
+tests always run.
 
 ## Future compatibility
 
 The prototype intentionally stops short of the full vision. Extension
 points already in place:
 
-* **New application integrations (LibreOffice Writer/Calc, PDF,
-  application discovery, desktop automation, MCP servers):** create
+* **New application integrations (LibreOffice Writer/Calc, application
+  discovery, desktop automation, MCP servers):** create
   `integrations/<name>/` with handlers shaped like
   `handler(action, dry_run=...) -> ToolResult`, register them in a
   dispatcher factory, and add their action names/schemas to
   `planner.ACTION_SCHEMA` (plus `MUTATING_ACTIONS` and approval
   metadata). The pipeline, permissions, verification, audit and CLI
-  then work unchanged.
+  then work unchanged. `integrations/documents/` (v0.2) is the worked
+  example of exactly this pattern.
 * **Model management:** `ai_runtime` is already the seam for
   additional runtimes and model lifecycle helpers (explicit user
   action only — no silent downloads).

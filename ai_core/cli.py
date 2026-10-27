@@ -31,7 +31,7 @@ from ai_core.pipeline import (
 from ai_core.permissions import PermissionChecker
 from ai_runtime.ollama_client import OllamaClient, OllamaError
 
-BANNER = "ALWIN FUSION v0.1\nLocal AI Core"
+BANNER = "ALWIN FUSION v0.2\nLocal AI Core + Documents"
 
 EXIT_OK = 0
 EXIT_FAILURE = 1
@@ -91,7 +91,13 @@ def _print_success(report) -> None:
         alwin_print(explanation.splitlines() or ["Explanation unavailable."])
         return
 
-    if name in ("create_directory", "create_text_file"):
+    if name in (
+        "create_directory",
+        "create_text_file",
+        "create_report",
+        "create_pdf",
+        "create_spreadsheet",
+    ):
         alwin_print(verification.get("message", "Completed."))
         return
 

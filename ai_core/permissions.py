@@ -233,7 +233,16 @@ class PermissionChecker:
                 resolved=decision.resolved,
                 reason=decision.reason,
             )
-        if name in ("create_directory", "create_text_file"):
+        # Defence in depth: this mapping duplicates planner.MUTATING_ACTIONS
+        # on purpose (the planner imports this module, so it cannot be
+        # imported back without a cycle).  tests/ pins both sets.
+        if name in (
+            "create_directory",
+            "create_text_file",
+            "create_report",
+            "create_pdf",
+            "create_spreadsheet",
+        ):
             operation = "create"
         elif name in ("list_directory", "read_file"):
             operation = "read"

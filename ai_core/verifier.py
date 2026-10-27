@@ -12,8 +12,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from ai_core import specs
 from ai_core.executor import ExecutionResult
 from ai_core.permissions import PermissionChecker
+from integrations.documents.pdf import validate_pdf_bytes
+from integrations.documents.report import render_text_report
+from integrations.documents.spreadsheet import inspect_workbook
 
 STATUS_PASSED = "passed"
 STATUS_FAILED = "failed"
@@ -198,6 +202,9 @@ class Verifier:
                 checks=checks,
             )
 
+        if name in ("create_report", "create_pdf", "create_spreadsheet"):
+            return self._verify_document(name, action, checks)
+
         if name == "explain":
             explanation = execution.data.get("explanation")
             self._add(
@@ -218,5 +225,184 @@ class Verifier:
         return VerificationResult(
             status=STATUS_FAILED,
             message=f"No verification rule for action '{name}'.",
+            checks=checks,
+        )
+
+    # ------------------------------------------------------------------ #
+    # Generated documents (v0.2)
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _grid_cell(grid: List[List], a1: str):
+        """Value at an A1-style coordinate in an inspected grid."""
+        row, col = specs.parse_a1(a1)
+        if row - 1 < len(grid):
+            row_values = grid[row - 1]
+            if col - 1 < len(row_values):
+                return row_values[col - 1]
+        return None
+
+    @staticmethod
+    def _expected_grid(sheet: dict) -> List[List]:
+        """Grid the sheet must contain: headers row + data rows, padded."""
+        rows: List[List] = []
+        if sheet["headers"]:
+            rows.append(list(sheet["headers"]))
+        rows.extend(list(r) for r in sheet["rows"])
+        width = max((len(r) for r in rows), default=0)
+        return [list(r) + [None] * (width - len(r)) for r in rows]
+
+    def _verify_spreadsheet(
+        self, action: dict, actual: bytes, checks: List[Dict]
+    ) -> bool:
+        """Reopen the workbook and compare it with the approved spec."""
+        try:
+            inspected = inspect_workbook(actual)
+        except Exception as exc:  # noqa: BLE001 - a bad file fails verification
+            return self._add(
+                checks, "workbook_reopens", False, f"{type(exc).__name__}: {exc}"
+            )
+        if not self._add(
+            checks,
+            "workbook_reopens",
+            True,
+            f"{len(inspected['sheets'])} sheet(s) re-read from disk",
+        ):
+            return False
+
+        spec = action.get("spec") or {}
+        expected_names = [s["name"] for s in spec.get("sheets", [])]
+        names_ok = self._add(
+            checks,
+            "sheet_names_match",
+            inspected["sheetnames"] == expected_names,
+            f"expected {expected_names}, found {inspected['sheetnames']}",
+        )
+
+        cells_ok = True
+        formulas_ok = True
+        for sheet in spec.get("sheets", []):
+            match = next(
+                (s for s in inspected["sheets"] if s["name"] == sheet["name"]), None
+            )
+            if match is None:
+                cells_ok = formulas_ok = False
+                continue
+            expected_grid = self._expected_grid(sheet)
+            # Formula cells overlay whatever the data rows declared there.
+            for entry in sheet["formulas"]:
+                row, col = specs.parse_a1(entry["cell"])
+                if row - 1 < len(expected_grid) and col - 1 < len(expected_grid[row - 1]):
+                    expected_grid[row - 1][col - 1] = entry["formula"]
+            actual_grid = match["grid"]
+            # Compare the expected rectangle and require nothing outside it.
+            for r_index, expected_row in enumerate(expected_grid):
+                actual_row = actual_grid[r_index] if r_index < len(actual_grid) else []
+                for c_index, expected_value in enumerate(expected_row):
+                    actual_value = (
+                        actual_row[c_index] if c_index < len(actual_row) else None
+                    )
+                    if actual_value != expected_value:
+                        cells_ok = False
+            for extra_row in actual_grid[len(expected_grid) :]:
+                if any(value is not None for value in extra_row):
+                    cells_ok = False
+            for entry in sheet["formulas"]:
+                stored = self._grid_cell(actual_grid, entry["cell"])
+                if stored != entry["formula"]:
+                    formulas_ok = False
+
+        self._add(
+            checks,
+            "cells_match",
+            cells_ok,
+            "headers and rows re-read from the workbook",
+        )
+        self._add(
+            checks,
+            "formulas_preserved",
+            formulas_ok,
+            "formula strings are stored as text; they are not calculated here",
+        )
+        return names_ok and cells_ok and formulas_ok
+
+    def _verify_document(
+        self, name: str, action: dict, checks: List[Dict]
+    ) -> VerificationResult:
+        resolved = self._resolve(action, "create")
+        exists = self._add(checks, "path_exists", resolved.exists(), str(resolved))
+        is_file = False
+        if exists:
+            is_file = self._add(
+                checks,
+                "is_file",
+                resolved.is_file() and not resolved.is_symlink(),
+                str(resolved),
+            )
+        if not (exists and is_file):
+            return VerificationResult(
+                status=STATUS_FAILED,
+                message=f"Verification failed: {resolved} is not a new file.",
+                checks=checks,
+            )
+        try:
+            actual = resolved.read_bytes()
+        except OSError as exc:
+            return VerificationResult(
+                status=STATUS_FAILED,
+                message=f"Verification failed: cannot re-read {resolved}: {exc}",
+                checks=checks,
+            )
+        nonempty = self._add(
+            checks, "nonempty", len(actual) > 0, f"{len(actual)} bytes on disk"
+        )
+
+        if name == "create_report":
+            expected = render_text_report(
+                specs.validate_report_content(action.get("content"))
+            ).encode("utf-8")
+            matches = self._add(
+                checks,
+                "content_matches",
+                actual == expected,
+                "re-rendered from the approved content and compared byte-for-byte",
+            )
+            ok = nonempty and matches
+            return VerificationResult(
+                status=STATUS_PASSED if ok else STATUS_FAILED,
+                message=(
+                    "Text report created and verified byte-for-byte."
+                    if ok
+                    else "Verification failed: the file does not match the rendered report."
+                ),
+                checks=checks,
+            )
+
+        if name == "create_pdf":
+            valid, detail = validate_pdf_bytes(actual)
+            structure_ok = self._add(checks, "pdf_structure_valid", valid, detail)
+            ok = nonempty and structure_ok
+            return VerificationResult(
+                status=STATUS_PASSED if ok else STATUS_FAILED,
+                message=(
+                    "PDF created and structurally verified (the bytes are not "
+                    "re-rendered because PDFs embed creation metadata)."
+                    if ok
+                    else f"Verification failed: {detail}."
+                ),
+                checks=checks,
+            )
+
+        # create_spreadsheet
+        ok = nonempty and self._verify_spreadsheet(action, actual, checks)
+        return VerificationResult(
+            status=STATUS_PASSED if ok else STATUS_FAILED,
+            message=(
+                "Workbook created, reopened and verified (formula cells are "
+                "stored as text; open it in a spreadsheet application to "
+                "calculate them)."
+                if ok
+                else "Verification failed: the workbook does not match the specification."
+            ),
             checks=checks,
         )

@@ -22,6 +22,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable, Dict
 
+from integrations.documents.tools import DocumentTools, make_doc_handlers
 from integrations.filesystem.tools import FileSystemTools, ToolResult, make_fs_handlers
 
 
@@ -87,9 +88,11 @@ class ActionDispatcher:
 
 
 def build_default_dispatcher(checker) -> ActionDispatcher:
-    """Dispatcher with the milestone-0 filesystem integration attached."""
+    """Dispatcher with the filesystem and document integrations attached."""
     tools = FileSystemTools(checker)
     handlers = make_fs_handlers(tools)
+    doc_tools = DocumentTools(checker)
+    doc_handlers = make_doc_handlers(doc_tools)
 
     dispatcher = ActionDispatcher()
     dispatcher.register(
@@ -117,6 +120,27 @@ def build_default_dispatcher(checker) -> ActionDispatcher:
         "create_text_file",
         handlers["create_text_file"],
         description="Create a new UTF-8 text file (never overwrites).",
+        mutates=True,
+        requires_approval=True,
+    )
+    dispatcher.register(
+        "create_report",
+        doc_handlers["create_report"],
+        description="Create a formatted plain-text report (never overwrites).",
+        mutates=True,
+        requires_approval=True,
+    )
+    dispatcher.register(
+        "create_pdf",
+        doc_handlers["create_pdf"],
+        description="Create a PDF document with reportlab (never overwrites).",
+        mutates=True,
+        requires_approval=True,
+    )
+    dispatcher.register(
+        "create_spreadsheet",
+        doc_handlers["create_spreadsheet"],
+        description="Create an .xlsx workbook with openpyxl (never overwrites).",
         mutates=True,
         requires_approval=True,
     )

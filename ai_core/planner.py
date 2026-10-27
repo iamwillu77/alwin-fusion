@@ -14,11 +14,12 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
-from ai_core import command_parser
+from ai_core import command_parser, specs
 from ai_core.command_parser import ParsedIntent
 from ai_core.permissions import pretty_path
+from ai_core.specs import SpecError
 
 # --------------------------------------------------------------------------- #
 # Action allowlist and per-action schema
@@ -30,13 +31,39 @@ ACTION_SCHEMA: dict[str, frozenset] = {
     "list_directory": frozenset({"action", "path"}),
     "read_file": frozenset({"action", "path"}),
     "create_text_file": frozenset({"action", "path", "content"}),
+    "create_report": frozenset({"action", "path", "content"}),
+    "create_pdf": frozenset({"action", "path", "content"}),
+    "create_spreadsheet": frozenset({"action", "path", "spec"}),
     "explain": frozenset({"action", "target"}),
 }
 
-PATH_ACTIONS = ("create_directory", "list_directory", "read_file", "create_text_file")
+PATH_ACTIONS = (
+    "create_directory",
+    "list_directory",
+    "read_file",
+    "create_text_file",
+    "create_report",
+    "create_pdf",
+    "create_spreadsheet",
+)
 
 #: Actions that change the filesystem and therefore need user approval.
-MUTATING_ACTIONS = frozenset({"create_directory", "create_text_file"})
+MUTATING_ACTIONS = frozenset(
+    {
+        "create_directory",
+        "create_text_file",
+        "create_report",
+        "create_pdf",
+        "create_spreadsheet",
+    }
+)
+
+#: Generated-document actions and the only file extension each produces.
+DOCUMENT_EXTENSIONS = {
+    "create_report": ".txt",
+    "create_pdf": ".pdf",
+    "create_spreadsheet": ".xlsx",
+}
 
 MAX_PATH_LENGTH = 1024
 MAX_CONTENT_CHARS = 64 * 1024
@@ -44,6 +71,14 @@ MAX_CONTENT_CHARS = 64 * 1024
 
 class PlanValidationError(Exception):
     """Raised when a proposed action is not valid or not allowed."""
+
+
+class ContentSourceError(Exception):
+    """The structured content source ('using file.json') could not be used.
+
+    Raised by the pipeline's content loader for a file that exists
+    inside the permitted roots but cannot be read, decoded or parsed.
+    """
 
 
 def _validate_path(value: object) -> str:
@@ -112,6 +147,27 @@ def validate_action(payload: object) -> dict:
             )
         return {"action": action, "path": path, "content": content}
 
+    if action in DOCUMENT_EXTENSIONS:
+        # Extension and file-name rules for generated documents.
+        try:
+            path = specs.ensure_extension(path, DOCUMENT_EXTENSIONS[action])
+            specs.validate_output_filename(path)
+        except SpecError as exc:
+            raise PlanValidationError(str(exc)) from exc
+
+        if action == "create_spreadsheet":
+            try:
+                spec = specs.validate_spreadsheet_spec(payload.get("spec"))
+            except SpecError as exc:
+                raise PlanValidationError(str(exc)) from exc
+            return {"action": action, "path": path, "spec": spec}
+
+        try:
+            content = specs.validate_report_content(payload.get("content"))
+        except SpecError as exc:
+            raise PlanValidationError(str(exc)) from exc
+        return {"action": action, "path": path, "content": content}
+
     return {"action": action, "path": path}
 
 
@@ -139,13 +195,90 @@ def _join_path(location: str, name: str) -> str:
     return f"{location.rstrip('/')}/{name}"
 
 
-def plan_from_intent(intent: ParsedIntent, *, default_location: str = "") -> dict:
+def _source_stem(source: str) -> str:
+    """File-name stem of a content source path ('a/b/spec.json' -> 'spec')."""
+    base = source.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
+    if "." in base:
+        base = base.rsplit(".", 1)[0]
+    return base
+
+
+def _resolve_document_content(
+    slots: dict,
+    *,
+    action: str,
+    source: str,
+    content_loader: Optional[Callable[[str], dict]],
+) -> dict:
+    """Resolve structured content for a document action from its slots.
+
+    Sources, in order of trust: a JSON file read through the
+    permission-checked ``content_loader``, inline JSON already parsed by
+    the deterministic parser, or simple ``titled``/``containing`` text
+    (reports and PDFs only) turned into a minimal content structure.
+    """
+    inline = slots.get("inline")
+
+    if source:
+        if content_loader is None:
+            raise ContentSourceError(
+                "Reading a content file is not available in this context."
+            )
+        loaded = content_loader(source)
+        if not isinstance(loaded, dict):
+            raise ContentSourceError(
+                "The content file must contain a single JSON object."
+            )
+        return loaded
+
+    if inline is not None:
+        if not isinstance(inline, dict):
+            raise PlanValidationError(
+                "Inline JSON must be a JSON object."
+            )
+        return inline
+
+    if action == "create_spreadsheet":
+        # The parser already rejects this; keep the guard as defence in depth.
+        raise PlanValidationError(
+            "A spreadsheet needs a JSON specification ('using file.json' or "
+            "inline 'from {...}')."
+        )
+
+    title = (slots.get("title") or "").strip()
+    text = (slots.get("text") or "").strip()
+    if not title and not text:
+        raise PlanValidationError(
+            "Report content is empty: add 'titled ...', 'containing ...' or "
+            "a 'using <file.json>' source."
+        )
+    blocks = []
+    if text:
+        blocks.append({"type": "paragraph", "text": text})
+    return {"title": title or None, "blocks": blocks}
+
+
+_INTENT_TO_ACTION = {
+    command_parser.CREATE_REPORT: "create_report",
+    command_parser.CREATE_PDF: "create_pdf",
+    command_parser.CREATE_SPREADSHEET: "create_spreadsheet",
+}
+
+
+def plan_from_intent(
+    intent: ParsedIntent,
+    *,
+    default_location: str = "",
+    content_loader: Optional[Callable[[str], dict]] = None,
+) -> dict:
     """Turn a parsed intent into a validated action dict.
 
     ``default_location`` is the home-relative location used when the
     command does not name one (the pipeline passes the primary
-    permitted root).  Raises :class:`PlanValidationError` for
-    unsupported intents.
+    permitted root).  ``content_loader`` reads a 'using file.json'
+    source through the caller's permission checks.  Raises
+    :class:`PlanValidationError` for unsupported intents and
+    :class:`ContentSourceError` when a content source cannot be read.
     """
     slots = intent.slots or {}
 
@@ -173,6 +306,36 @@ def plan_from_intent(intent: ParsedIntent, *, default_location: str = "") -> dic
             {"action": "create_text_file", "path": path, "content": slots.get("content", "")}
         )
 
+    if intent.intent in _INTENT_TO_ACTION:
+        action_name = _INTENT_TO_ACTION[intent.intent]
+        source = (slots.get("source") or "").strip()
+        name = (slots.get("name") or "").strip()
+        if not name and source:
+            # Derive the output name from the JSON source file stem.
+            name = _source_stem(source) + DOCUMENT_EXTENSIONS[action_name]
+        if not name:
+            example = {
+                "create_report": "summary.txt",
+                "create_pdf": "summary.pdf",
+                "create_spreadsheet": "sales.xlsx",
+            }[action_name]
+            raise PlanValidationError(
+                f"Please include a file name, e.g. 'named {example}'."
+            )
+        location = (slots.get("location") or default_location or "").strip()
+        if source and not source.startswith(("/", "~")) and "/" not in source and location:
+            # A bare 'using spec.json' is read from the same folder the
+            # document is written to.  The loader still permission-checks
+            # the final path like every other filesystem access.
+            source = f"{location.strip('/')}/{source}"
+        path = _join_path(location, name)
+        content = _resolve_document_content(
+            slots, action=action_name, source=source, content_loader=content_loader
+        )
+        payload = {"action": action_name, "path": path}
+        payload["spec" if action_name == "create_spreadsheet" else "content"] = content
+        return validate_action(payload)
+
     if intent.intent == command_parser.EXPLAIN:
         inner = command_parser.parse_command(slots.get("target", ""))
         if inner.intent == command_parser.UNSUPPORTED:
@@ -180,7 +343,9 @@ def plan_from_intent(intent: ParsedIntent, *, default_location: str = "") -> dic
                 "Nothing to explain: "
                 + (inner.slots.get("reason") or "unsupported operation.")
             )
-        target = plan_from_intent(inner, default_location=default_location)
+        target = plan_from_intent(
+            inner, default_location=default_location, content_loader=content_loader
+        )
         return validate_action({"action": "explain", "target": target})
 
     if intent.intent == command_parser.EXIT:
@@ -215,6 +380,15 @@ def describe_action(
         content = action.get("content", "")
         size = len(content.encode("utf-8"))
         return f"Create text file {display} ({size} bytes of content)"
+    if name == "create_report":
+        blocks = (action.get("content") or {}).get("blocks") or []
+        return f"Create text report {display} ({len(blocks)} blocks)"
+    if name == "create_pdf":
+        blocks = (action.get("content") or {}).get("blocks") or []
+        return f"Create PDF document {display} ({len(blocks)} blocks)"
+    if name == "create_spreadsheet":
+        sheets = (action.get("spec") or {}).get("sheets") or []
+        return f"Create spreadsheet {display} ({len(sheets)} sheets)"
     if name == "list_directory":
         return f"List contents of {display}"
     if name == "read_file":
@@ -234,11 +408,26 @@ SYSTEM_PROMPT = (
     '{"action": "list_directory", "path": "..."}\n'
     '{"action": "read_file", "path": "..."}\n'
     '{"action": "create_text_file", "path": "...", "content": "..."}\n'
+    '{"action": "create_report", "path": "...", '
+    '"content": {"title": "...", "blocks": [{"type": "heading", "level": 1, '
+    '"text": "..."}, {"type": "paragraph", "text": "..."}, {"type": "list", '
+    '"style": "bullet", "items": ["..."]}]} }\n'
+    '{"action": "create_pdf", "path": "...", "content": { ...same as '
+    "create_report... }}\n"
+    '{"action": "create_spreadsheet", "path": "...", "spec": {"title": "...", '
+    '"sheets": [{"name": "Sheet1", "headers": ["A", "B"], "rows": [[1, 2]], '
+    '"formulas": [{"cell": "C2", "formula": "=SUM(A1:B1)"}]}]}}\n'
     '{"action": "explain", "target": { ...one of the above... }}\n'
     "Rules:\n"
     "- 'path' is relative to the user's home directory, e.g. "
     '"Documents/Business Reports".\n'
     "- Never use absolute paths or '..'.\n"
+    "- File extensions are fixed: .txt for reports, .pdf for PDFs, "
+    ".xlsx for spreadsheets.\n"
+    "- Structured content is validated field by field; formulas are stored "
+    "as text and are never calculated here.\n"
+    "- You can never read files: never reference a file path as content "
+    "source; inline the full content instead.\n"
     "- No other action ever exists: never propose delete, move, shell, "
     "network or code-execution actions.\n"
     "- If the request cannot be mapped, reply with "

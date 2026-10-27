@@ -9,6 +9,7 @@ output: model proposals re-enter through ``planner.validate_action``.
 
 from __future__ import annotations
 
+import json
 import uuid
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional
@@ -17,9 +18,10 @@ from ai_core.audit import AuditError, AuditLogger
 from ai_core.command_parser import EXIT, UNSUPPORTED, parse_command
 from ai_core.config import Config
 from ai_core.executor import ExecutionResult, Executor
-from ai_core.permissions import PermissionChecker
+from ai_core.permissions import PathSecurityError, PermissionChecker
 from ai_core.planner import (
     MUTATING_ACTIONS,
+    ContentSourceError,
     PlanValidationError,
     describe_action,
     plan_from_intent,
@@ -38,6 +40,9 @@ STATUS_EXIT = "exit"
 
 #: statuses that count as "the user got what they asked for"
 OK_STATUSES = (STATUS_SUCCESS, STATUS_DRY_RUN, STATUS_EXIT)
+
+#: Size limit for a 'using file.json' structured content source.
+MAX_SOURCE_CONTENT_BYTES = 512 * 1024
 
 
 @dataclass
@@ -104,20 +109,62 @@ class TaskPipeline:
         return uuid.uuid4().hex[:12]
 
     @staticmethod
+    def _sensitive_strings(action: Optional[dict]) -> List[str]:
+        """User-supplied text values carried by a validated action."""
+        if not action:
+            return []
+        found: List[str] = []
+        content = action.get("content")
+        if isinstance(content, str):
+            found.append(content)
+        elif isinstance(content, dict):
+            title = content.get("title")
+            if isinstance(title, str):
+                found.append(title)
+            for block in content.get("blocks") or []:
+                if not isinstance(block, dict):
+                    continue
+                text = block.get("text")
+                if isinstance(text, str):
+                    found.append(text)
+                items = block.get("items")
+                if isinstance(items, list):
+                    found.extend(i for i in items if isinstance(i, str))
+        return [s for s in found if s]
+
+    @staticmethod
     def _mask_command(command: str, action: Optional[dict]) -> str:
         """Remove user-provided file content from the logged command."""
-        content = (action or {}).get("content")
-        if not isinstance(content, str) or not content:
+        if not action:
             return command
-        if content in command:
-            return command.replace(content, f"<content redacted: {len(content)} chars>")
-        # The parser collapses whitespace, so match a collapsed copy too.
-        collapsed = " ".join(command.split())
-        if content in collapsed:
-            return collapsed.replace(
-                content, f"<content redacted: {len(content)} chars>"
-            )
-        return "<command redacted: content could not be located safely>"
+        strings = TaskPipeline._sensitive_strings(action)
+        had_str_content = isinstance(action.get("content"), str)
+
+        masked = command
+        for value in strings:
+            marker = f"<content redacted: {len(value)} chars>"
+            if value in masked:
+                masked = masked.replace(value, marker)
+                continue
+            # The parser collapses whitespace, so match a collapsed copy too.
+            collapsed = " ".join(masked.split())
+            if value in collapsed:
+                masked = collapsed.replace(value, marker)
+            elif had_str_content and value == strings[0]:
+                # Plain-text content that cannot be located safely is
+                # redacted wholesale rather than risk logging it.
+                return "<command redacted: content could not be located safely>"
+
+        # Inline structured JSON (spreadsheet specs / report JSON) is
+        # redacted as a single region.
+        structured = isinstance(action.get("spec"), dict) or isinstance(
+            action.get("content"), dict
+        )
+        if structured:
+            start, end = masked.find("{"), masked.rfind("}")
+            if 0 <= start < end:
+                masked = masked[:start] + "<structured content redacted>" + masked[end + 1 :]
+        return masked
 
     def _record_audit(self, report: TaskReport, command: str) -> None:
         execution = report.execution.as_dict() if report.execution else None
@@ -143,6 +190,57 @@ class TaskPipeline:
             # Never hide an audit failure, but do not corrupt the real task
             # result either: the failure is surfaced as a report note.
             report.notes.append(f"Audit log write failed: {exc}")
+
+    # ------------------------------------------------------------------ #
+
+    # ------------------------------------------------------------------ #
+    # Structured content sources ('using file.json')
+    # ------------------------------------------------------------------ #
+
+    def _load_content_source(self, source: str) -> dict:
+        """Read a structured content JSON file inside the permitted roots.
+
+        The read is permission-checked like any other filesystem access,
+        bounded in size and strictly decoded.  Raises
+        :class:`PathSecurityError` (from the checker) when the file
+        escapes the roots and :class:`ContentSourceError` for missing,
+        oversized, non-UTF-8 or non-JSON files.
+        """
+        resolved = self.checker.resolve(source, operation="read")
+        if not resolved.exists() or not resolved.is_file():
+            raise ContentSourceError(
+                f"The content file '{source}' does not exist or is not a file."
+            )
+        try:
+            size = resolved.stat().st_size
+        except OSError as exc:
+            raise ContentSourceError(f"Cannot inspect the content file: {exc}") from exc
+        if size > MAX_SOURCE_CONTENT_BYTES:
+            raise ContentSourceError(
+                f"The content file is {size} bytes; the limit is "
+                f"{MAX_SOURCE_CONTENT_BYTES} bytes."
+            )
+        try:
+            raw = resolved.read_bytes()
+        except OSError as exc:
+            raise ContentSourceError(f"Cannot read the content file: {exc}") from exc
+        try:
+            text = raw.decode("utf-8")  # strict: no replacement characters
+        except UnicodeDecodeError as exc:
+            raise ContentSourceError(
+                "The content file is not valid UTF-8 text."
+            ) from exc
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise ContentSourceError(
+                f"The content file is not valid JSON ({exc.msg})."
+            ) from exc
+        if not isinstance(data, dict):
+            raise ContentSourceError(
+                "The content file must contain a single JSON object."
+            )
+        return data
 
     # ------------------------------------------------------------------ #
 
@@ -177,9 +275,18 @@ class TaskPipeline:
                 intent.slots.get("reason", "Unsupported command."),
             )
         try:
-            action = plan_from_intent(intent, default_location=self.default_location)
+            action = plan_from_intent(
+                intent,
+                default_location=self.default_location,
+                content_loader=self._load_content_source,
+            )
         except PlanValidationError as exc:
             return None, STATUS_UNSUPPORTED, str(exc)
+        except PathSecurityError as exc:
+            # A content source ('using ...') that escapes the roots.
+            return None, STATUS_DENIED, str(exc)
+        except ContentSourceError as exc:
+            return None, STATUS_FAILED, str(exc)
         return action, None, None
 
     def run(self, command: str, *, dry_run: bool = False) -> TaskReport:

@@ -1,6 +1,6 @@
 # Alwin Fusion — Security Model and Limitations
 
-Version: 0.1.0 — Milestone: Local AI Core Prototype
+Version: 0.2.0 — Milestone: Local Document and Spreadsheet Automation
 
 This document states what the prototype defends against, how, and —
 importantly — **what it does not defend against**. Passing tests does
@@ -47,18 +47,64 @@ process racing the filesystem (see TOCTOU below).
   (covered by tests).
 * Defence in depth: the pipeline checks permissions *and* every
   filesystem tool re-checks them itself before touching disk.
+* **Content sources (v0.2):** a `using spec.json` file is read
+  through the same `PermissionChecker` (`operation="read"`), so
+  traversal, symlink escapes and paths outside the roots are denied
+  exactly like any other read (tested). Additionally the read is
+  bounded (512 KiB), strictly UTF-8 decoded (no replacement
+  characters), and must parse to a single JSON object.
 
 ### 2. No arbitrary execution
 
 * The action allowlist is closed: `create_directory`,
-  `create_text_file`, `list_directory`, `read_file`, `explain`.
+  `create_text_file`, `create_report`, `create_pdf`,
+  `create_spreadsheet`, `list_directory`, `read_file`, `explain`.
+  The exact set is pinned by tests (v0.2 deliberately extended it from
+  five to eight actions; all three new ones are create-only,
+  approval-gated and cannot delete, move, overwrite or execute code).
 * There is no delete, overwrite, move, chmod, or shell action — not
   disabled, simply absent (meta-tests assert this).
 * Model output is parsed with `json.loads` and validated by the same
   code as the deterministic parser. Nothing is ever `eval`/`exec`-ed,
   formatted into a shell command, or passed to `subprocess`.
 * File creation uses `os.open(..., O_CREAT|O_EXCL)`, so an existing
-  file can never be clobbered even by a race.
+  file can never be clobbered even by a race. All v0.2 document
+  writes go through the same `O_EXCL` path.
+
+### 2b. Structured content validation (v0.2)
+
+Document and spreadsheet payloads are untrusted data (user text, a
+JSON file, or a model proposal) and are validated in
+`ai_core/specs.py` **before** planning and again in the tools layer
+before rendering:
+
+* Closed key sets per structure — unknown fields are rejected, so a
+  future dangerous option can never be smuggled in.
+* Bounded sizes: sheet/header/row/formula/format counts, per-cell
+  length, a 200 000-cell global cap, and 64 KiB inline content.
+* Cell values are scalars only (no nested objects), and row strings
+  may not start with `=` — openpyxl would silently turn those into
+  formulas, bypassing formula validation.
+* Spreadsheet formulas are checked against a conservative grammar:
+  allow-listed functions only (no `WEBSERVICE`, `HYPERLINK`, `RTD`,
+  `CALL`, ...), no external-workbook links (`[Book1]...`), no
+  cross-sheet references, no undefined names, balanced parentheses,
+  and every referenced cell must lie inside the declared data grid.
+* Output file names are constrained: fixed extensions
+  (`.txt`/`.pdf`/`.xlsx`), no hidden/leading-dot names, no `..`,
+  length-limited — enforced by the planner and re-enforced by the
+  tools.
+* The model-proposal path never receives a `source` key, so model
+  output cannot trigger a file read; a content source can only come
+  from the deterministic parser (which then goes through the
+  permission-checked loader).
+* Validation is idempotent (normalized output re-validates cleanly),
+  so the defence-in-depth re-check cannot desync from planning.
+* The optional libraries (`openpyxl`, `reportlab`) are imported
+  lazily and only ever receive already-validated data; a missing
+  package produces a clean, actionable error, never an import-time
+  crash of the core. Nothing is auto-installed — the error only shows
+  the `pip install` command for the user to run themselves.
 
 ### 3. Explicit approval before modification
 
@@ -73,10 +119,17 @@ process racing the filesystem (see TOCTOU below).
 * The verifier re-resolves paths and re-inspects the filesystem
   independently of the executor's claim: exists, is a directory, is
   a file, content matches, listing matches.
+* v0.2 documents are verified against what was actually approved:
+  text reports are re-rendered from the approved content and compared
+  **byte-for-byte**; PDFs are structurally validated (signature,
+  catalog, object count, `startxref`, `%%EOF`) — not byte-compared,
+  because PDFs embed creation metadata; workbooks are **reopened** and
+  compared sheet-by-sheet, cell-by-cell (formula strings included)
+  against the approved spec.
 * If execution failed, or verification finds the world missing or
   altered, the task is reported as **failed** with the real error.
-  A handler that "claims" success without doing the work fails
-  verification (tested).
+  A handler that "claims" success without doing the work — or that
+  writes different bytes than approved — fails verification (tested).
 
 ### 5. Audit log
 
@@ -85,9 +138,10 @@ process racing the filesystem (see TOCTOU below).
   0600, written via `os.open` with `0600`.
 * Fields: task id, UTC timestamp, parser, proposed action,
   permission decision, approval, execution, verification, status.
-* Redaction: `content`, passwords, tokens and similar keys become
-  `<redacted:N chars>`; user-file content embedded in the raw command
-  string is masked too; all strings are truncated at 400 chars.
+* Redaction: `content`, `spec`, passwords, tokens and similar keys
+  become `<redacted:N chars>`; user-file content embedded in the raw
+  command string is masked too (inline structured JSON is redacted as
+  a whole `{...}` region); all strings are truncated at 400 chars.
 * Audit-write failures are surfaced to the user as a visible note —
   never swallowed silently.
 
@@ -103,13 +157,20 @@ process racing the filesystem (see TOCTOU below).
   to the deterministic parser.
 * Even when the LLM proposes an action, it goes through
   `validate_action()`; an out-of-allowlist proposal is discarded.
+* The system prompt explicitly forbids referencing files as content
+  sources, and the schema gives model proposals no `source` key at
+  all — a model can never trigger a file read, only inline content.
 
 ### 7. Operational
 
 * Never run Alwin Fusion with `sudo`. Nothing in the code requires
   or attempts privilege escalation.
-* Dependencies: Python 3 standard library only (tests too). Nothing
-  to install from the network to run the core.
+* The core, all v0.1 features, text reports and every security
+  control run on the Python standard library alone. `openpyxl` and
+  `reportlab` are optional, loaded lazily, and only ever fed
+  already-validated data. Alwin Fusion **never installs packages
+  itself**; `requirements.txt` documents the pinned versions and the
+  user installs them explicitly.
 * Tests run in temporary sandboxes (`ALWIN_HOME`-style injection) and
   never modify the real home directory.
 
@@ -140,19 +201,54 @@ process racing the filesystem (see TOCTOU below).
    bug in `PermissionChecker` would be a security bug; the checks are
    unit-tested but this is application-level, not kernel-level,
    confinement.
-7. **Reads can be large-ish but bounded** (1 MiB) — there is no
-   streaming; a future PDF/office integration must revisit limits.
+7. **Reads are bounded but not streamed** (1 MiB for `read_file`,
+   512 KiB for `using *.json` content sources). The source file for a
+   document is read in one go; very large structured content must be
+   split across files or reduced.
 8. **`~/Documents` may not exist** on a fresh system; creating the
    root itself is permitted, but only with an explicit approved
    action.
 9. **Content redaction is best-effort string matching.** If a command
    is rewritten by a future parser in a way that hides the content
    substring, the audit falls back to replacing the whole command
-   with a redaction marker.
+   with a redaction marker. Inline structured JSON is masked as a
+   `{...}` region; if a command contained JSON-like text *before* the
+   content region, the mask could start too early (it errs toward
+   over-redacting, never under-redacting, but review `audit.jsonl`
+   after unusual commands).
 10. **No delete/overwrite yet** — this is a deliberate milestone
     restriction, not a oversight; when added, it must reuse the same
     approval + verification + audit stages with extra safeguards.
-11. **Not a sandboxed OS yet.** No process isolation, no MAC policy,
+11. **Formulas are stored, never calculated.** openpyxl (like Alwin
+    Fusion) writes formula text without computing results; the
+    verifier confirms the formula *strings* survive a round-trip but
+    cannot check a computed value. A spreadsheet application must
+    open the file to calculate. Verification never claims a
+    calculated result.
+12. **PDF verification is structural, not semantic.** PDFs embed
+    creation timestamps and IDs, so byte-for-byte comparison is
+    impossible; the validator checks signature, catalog, object
+    count, `startxref` and `%%EOF`, which proves the file is a
+    structurally sound PDF — not that every glyph matches the
+    approved text. Text is drawn with built-in Helvetica fonts and
+    encoded latin-1: characters outside that set (CJK, emoji, most
+    accents) are replaced with `?` rather than rejected (tested that
+    it does not crash). Also, the PDF *content* a user approves is
+    the JSON they supplied; reportlab's interpretation of it is
+    trusted.
+13. **Formula validation is a grammar, not an evaluator.** The
+    allowlist-based tokenizer rejects known-dangerous constructs
+    (network functions, external/cross-sheet links, out-of-grid
+    references, macros), but it is not a full Excel formula parser.
+    An exotic construct it fails to recognise is rejected (fail
+    closed), so the residual risk is a *weird but harmless* formula
+    getting through, not a dangerous one — still, this is
+    application-level assurance only.
+14. **Optional dependencies are trusted code.** `openpyxl` and
+    `reportlab` run with full user privileges once installed; a
+    compromised package would be outside Alwin Fusion's control.
+    Versions are pinned in `requirements.txt` to make review easier.
+15. **Not a sandboxed OS yet.** No process isolation, no MAC policy,
     no signed boot, no reproducible image — all future work under
     `os-build/`.
 

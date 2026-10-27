@@ -177,6 +177,11 @@ class TestUnsupportedCommands(unittest.TestCase):
 
 class TestActionValidation(unittest.TestCase):
     def test_allowlist_is_exactly_expected(self):
+        # v0.2 extension: create_report / create_pdf / create_spreadsheet
+        # were added to the pinned set.  This is an explicit extension of
+        # the allowlist, not a weakening: all eight actions are validated
+        # per-schema, mutating ones require approval, and none can
+        # delete, move, overwrite, shell out or execute code.
         self.assertEqual(
             set(ACTION_SCHEMA),
             {
@@ -184,6 +189,9 @@ class TestActionValidation(unittest.TestCase):
                 "list_directory",
                 "read_file",
                 "create_text_file",
+                "create_report",
+                "create_pdf",
+                "create_spreadsheet",
                 "explain",
             },
         )

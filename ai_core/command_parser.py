@@ -10,6 +10,7 @@ else becomes an ``unsupported`` intent with a helpful reason.
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, field
 from typing import Dict, Optional
@@ -21,6 +22,9 @@ from typing import Dict, Optional
 LIST_DIRECTORY = "list_directory"
 CREATE_DIRECTORY = "create_directory"
 CREATE_TEXT_FILE = "create_text_file"
+CREATE_REPORT = "create_report"
+CREATE_PDF = "create_pdf"
+CREATE_SPREADSHEET = "create_spreadsheet"
 READ_FILE = "read_file"
 EXPLAIN = "explain"
 EXIT = "exit"
@@ -30,6 +34,9 @@ INTENTS = (
     LIST_DIRECTORY,
     CREATE_DIRECTORY,
     CREATE_TEXT_FILE,
+    CREATE_REPORT,
+    CREATE_PDF,
+    CREATE_SPREADSHEET,
     READ_FILE,
     EXPLAIN,
     EXIT,
@@ -41,6 +48,11 @@ SUPPORTED_COMMAND_EXAMPLES = (
     "Create a folder named Business Reports in my Documents.",
     "Create a file named todo.txt in Documents containing buy milk.",
     "Read notes.txt in Documents.",
+    'Create a report named summary.txt in Documents containing "Sales rose 12 percent."',
+    "Create a report named summary.txt in Documents using report.json",
+    "Create a pdf named summary.pdf in Documents using report.json",
+    'Create a pdf named readme.pdf in Documents titled "Readme" containing "Welcome to Alwin Fusion."',
+    "Create a spreadsheet named sales.xlsx in Documents using sales.json",
     "Explain create a folder named Archive in Documents.",
 )
 
@@ -51,10 +63,14 @@ class ParseError(Exception):
 
 @dataclass(frozen=True)
 class ParsedIntent:
-    """Structured result of parsing a single command line."""
+    """Structured result of parsing a single command line.
+
+    ``slots`` values are normally strings; the document intents may
+    also carry a parsed inline JSON object under ``"inline"``.
+    """
 
     intent: str
-    slots: Dict[str, str] = field(default_factory=dict)
+    slots: Dict[str, object] = field(default_factory=dict)
     raw: str = ""
 
 
@@ -202,6 +218,175 @@ _EXIT_RE = re.compile(
     re.IGNORECASE,
 )
 
+# ---- v0.2 document commands -------------------------------------------- #
+
+_SOURCE_USING_RE = re.compile(
+    r"\s+using\s+(?P<source>\"[^\"]+\"|'[^']+'|\S+?)"
+    r"(?:\s+(?:in|inside|under)\s+(?P<location>.+?))?\s*[.]?$",
+    re.IGNORECASE,
+)
+_SOURCE_FROM_RE = re.compile(r"\s+from\s+(?P<inline>\{.*\})\s*[.]?$", re.IGNORECASE)
+_TITLE_RE = re.compile(
+    r"\s+titled\s+(?P<title>\"[^\"]*\"|'[^']*'|\S+)", re.IGNORECASE
+)
+_CONTAINING_RE = re.compile(r"\s+containing\s+(?P<text>.+)$", re.IGNORECASE)
+_DOC_NOUN_RE = re.compile(
+    r"^(?:create|make|new|write|generate)\s+(?:a|an|my|the)?\s*(?:new\s+)?"
+    r"(?P<kind>report|pdf|spreadsheet|workbook|excel\s+sheet)\b\s*"
+    r"(?:(?:named|called)\s+(?P<name>.+?))?"
+    r"(?:\s+(?:in|inside|under)\s+(?P<location>.+))?$",
+    re.IGNORECASE,
+)
+
+#: Verb + document-kind noun must be adjacent ("create a report ..."),
+#: so v0.1 commands that merely mention a document word inside a file
+#: name ("create a file named report.txt ...") keep their old meaning.
+_DOC_HEAD_RE = re.compile(
+    r"^(?:create|make|new|write|generate)\s+(?:a|an|my|the)?\s*(?:new\s+)?"
+    r"(?:report|pdf|spreadsheet|workbook|excel\s+sheet)\b",
+    re.IGNORECASE,
+)
+
+_SPREADSHEET_SPEC_HELP = (
+    "A spreadsheet needs a JSON specification. Either save it as a file and "
+    "say 'using sales.json', or pass it inline, e.g. "
+    'from {"sheets": [{"name": "Sheet1", "headers": ["A"], "rows": [[1]]}]}'
+)
+_REPORT_CONTENT_HELP = (
+    "A report needs content: add 'using report.json' (a JSON file), inline "
+    'JSON \'from {"title": "...", "blocks": [...]}\', or simple text like '
+    'titled "Title" containing "Paragraph text".'
+)
+
+
+def _strip_quotes(value: str) -> str:
+    return value.strip().strip("\"'")
+
+
+def _parse_document(text: str, raw: str) -> Optional[ParsedIntent]:
+    """Parse report / PDF / spreadsheet creation commands (v0.2)."""
+    if not _DOC_HEAD_RE.match(text):
+        return None
+
+    body = text
+    source = ""
+    source_location = ""
+    inline = None
+
+    # 1. Structured source first: 'using <file>' XOR inline 'from {...}'.
+    using_any_m = re.search(r"\s+using\s+", body, re.IGNORECASE)
+    using_m = _SOURCE_USING_RE.search(body)
+    from_m = _SOURCE_FROM_RE.search(body)
+    if (using_m or using_any_m) and from_m:
+        return _unsupported(
+            "Use either a JSON file ('using sales.json') or inline JSON "
+            "('from {\"sheets\": [...]}'), not both.",
+            raw,
+        )
+    if using_m:
+        source = normalize_name(using_m.group("source"))
+        if not source:
+            return _unsupported("The file name after 'using' is empty.", raw)
+        source_location = using_m.group("location") or ""
+        body = (body[: using_m.start()] + body[using_m.end() :]).strip()
+    elif using_any_m:
+        return _unsupported(
+            "The 'using <file.json>' clause must be the last part of the "
+            "command; it cannot be combined with 'titled'/'containing' text "
+            "or inline JSON.",
+            raw,
+        )
+    elif from_m:
+        try:
+            inline = json.loads(from_m.group("inline"))
+        except json.JSONDecodeError as exc:
+            return _unsupported(
+                f"The inline JSON is not valid JSON ({exc.msg}).", raw
+            )
+        body = (body[: from_m.start()] + body[from_m.end() :]).strip()
+
+    # 2. Then 'titled "..."' (removed before 'containing' so the two
+    #    clauses cannot swallow each other).
+    title = ""
+    title_m = _TITLE_RE.search(body)
+    if title_m:
+        title = _strip_quotes(title_m.group("title"))
+        body = (body[: title_m.start()] + body[title_m.end() :]).strip()
+        if not title:
+            return _unsupported("The title after 'titled' is empty.", raw)
+
+    # 3. Then 'containing ...' greedily to the end of the command.
+    text_content = ""
+    cont_m = _CONTAINING_RE.search(body)
+    if cont_m:
+        text_content = _strip_quotes(cont_m.group("text"))
+        body = (body[: cont_m.start()] + body[cont_m.end() :]).strip()
+        if not text_content:
+            return _unsupported("The text after 'containing' is empty.", raw)
+
+    # 4. Finally the document noun, optional file name and location.
+    m = _DOC_NOUN_RE.match(body)
+    if not m:
+        return _unsupported(
+            "I could not find a document type or file name in that command. "
+            "Try: 'Create a report named summary.txt in Documents containing "
+            "Hello' or 'Create a spreadsheet named sales.xlsx in Documents "
+            "using sales.json'.",
+            raw,
+        )
+
+    kind = re.sub(r"\s+", " ", m.group("kind")).lower()
+    if kind == "report":
+        intent = CREATE_REPORT
+    elif kind == "pdf":
+        intent = CREATE_PDF
+    else:
+        intent = CREATE_SPREADSHEET
+
+    name = normalize_name(m.group("name"))
+    # The output folder may come from the noun clause or from a trailing
+    # 'using <file> in <folder>' clause.
+    location = normalize_location(m.group("location")) or normalize_location(
+        source_location
+    )
+
+    if intent == CREATE_SPREADSHEET:
+        if source == "" and inline is None:
+            return _unsupported(_SPREADSHEET_SPEC_HELP, raw)
+        if title or text_content:
+            return _unsupported(
+                "'titled'/'containing' describe reports and PDFs; a "
+                "spreadsheet takes its content from the JSON specification.",
+                raw,
+            )
+        slots: Dict[str, object] = {"name": name, "location": location, "source": source}
+        if inline is not None:
+            slots["inline"] = inline
+        return ParsedIntent(CREATE_SPREADSHEET, slots, raw)
+
+    # Report / PDF: a structured source XOR simple titled/containing text.
+    has_simple = bool(title or text_content)
+    has_structured = bool(source) or inline is not None
+    if has_structured and has_simple:
+        return _unsupported(
+            "Use either a JSON content file/inline JSON or simple "
+            "'titled ...' / 'containing ...' text, not both.",
+            raw,
+        )
+    if not has_structured and not has_simple:
+        return _unsupported(_REPORT_CONTENT_HELP, raw)
+
+    slots = {
+        "name": name,
+        "location": location,
+        "source": source,
+        "title": title,
+        "text": text_content,
+    }
+    if inline is not None:
+        slots["inline"] = inline
+    return ParsedIntent(intent, slots, raw)
+
 
 def _unsupported(reason: str, raw: str) -> ParsedIntent:
     return ParsedIntent(UNSUPPORTED, {"reason": reason}, raw)
@@ -318,6 +503,10 @@ def parse_command(command: str) -> ParsedIntent:
             raw,
         )
 
+    doc_intent = _parse_document(text, raw)
+    if doc_intent is not None:
+        return doc_intent
+
     file_intent = _parse_file(text, raw)
     if file_intent is not None:
         return file_intent
@@ -340,7 +529,8 @@ def parse_command(command: str) -> ParsedIntent:
 
     return _unsupported(
         "Supported commands are: list files, create a folder, create a text "
-        "file with content, read a text file, explain an operation. Type "
+        "file with content, read a text file, create a report, PDF or "
+        "spreadsheet from structured content, explain an operation. Type "
         "'help' for examples.",
         raw,
     )

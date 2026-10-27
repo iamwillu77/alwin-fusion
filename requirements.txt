@@ -1,0 +1,15 @@
+# Optional dependencies for ALWIN FUSION v0.2 document features.
+#
+# The core (all v0.1 features, text reports, and every security
+# control) runs on the Python standard library alone.  Alwin Fusion
+# NEVER installs packages by itself: review this file and install it
+# yourself, with your own approval:
+#
+#     python3 -m pip install --user -r requirements.txt
+#
+# Without these packages the create_spreadsheet / create_pdf actions
+# fail with a clear "dependency missing" message; everything else
+# keeps working.
+
+openpyxl==3.1.5     # .xlsx creation and inspection (create_spreadsheet)
+reportlab==5.1.0    # PDF rendering (create_pdf)
