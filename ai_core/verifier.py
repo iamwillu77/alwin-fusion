@@ -202,6 +202,80 @@ class Verifier:
                 checks=checks,
             )
 
+        if name == "open_file":
+            # Re-resolve the path: the file must still exist inside the
+            # permitted roots, and the handler must have reported a
+            # real process start (not a promise).
+            resolved = self._resolve(action, "open")
+            exists = self._add(checks, "path_exists", resolved.exists(), str(resolved))
+            is_file = False
+            if exists:
+                is_file = self._add(checks, "is_file", resolved.is_file(), str(resolved))
+            started = self._add(
+                checks,
+                "process_started",
+                execution.data.get("started") is True,
+                str(execution.data.get("detail") or "no launch detail reported"),
+            )
+            integration = self._add(
+                checks,
+                "integration_reported",
+                bool(execution.data.get("integration")),
+                str(execution.data.get("integration") or "missing"),
+            )
+            ok = exists and is_file and started and integration
+            return VerificationResult(
+                status=STATUS_PASSED if ok else STATUS_FAILED,
+                message=(
+                    "Verified: the file still exists inside the permitted roots "
+                    "and the application process was started. This confirms the "
+                    "launch only — Alwin Fusion does not inspect or control the "
+                    "application window."
+                    if ok
+                    else "Verification failed: the launch was not confirmed "
+                    "(file missing, not a file, or no process start reported)."
+                ),
+                checks=checks,
+            )
+
+        if name == "detect_applications":
+            # Detection is read-only; verification only confirms the
+            # report is well-formed (one status per requested
+            # integration) — nothing on disk is checked because nothing
+            # was changed.
+            integrations = execution.data.get("integrations")
+            well_formed = self._add(
+                checks,
+                "report_well_formed",
+                isinstance(integrations, list) and bool(integrations)
+                if not action.get("integration")
+                else isinstance(integrations, list) and len(integrations) == 1,
+                f"{len(integrations) if isinstance(integrations, list) else 0} "
+                f"integration(s) reported",
+            )
+            statuses_known = self._add(
+                checks,
+                "statuses_known",
+                isinstance(integrations, list)
+                and all(
+                    item.get("status")
+                    in ("available", "not_installed", "detection_failed")
+                    for item in integrations
+                ),
+                "every integration reports a known status",
+            )
+            ok = well_formed and statuses_known
+            return VerificationResult(
+                status=STATUS_PASSED if ok else STATUS_FAILED,
+                message=(
+                    "Detection report verified as read-only and well-formed; "
+                    "nothing was launched, installed or changed."
+                    if ok
+                    else "Verification failed: the detection report is malformed."
+                ),
+                checks=checks,
+            )
+
         if name in ("create_report", "create_pdf", "create_spreadsheet"):
             return self._verify_document(name, action, checks)
 

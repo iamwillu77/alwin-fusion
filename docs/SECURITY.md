@@ -1,6 +1,6 @@
 # Alwin Fusion — Security Model and Limitations
 
-Version: 0.2.0 — Milestone: Local Document and Spreadsheet Automation
+Version: 0.3.0 — Milestone: Application Integration Engine
 
 This document states what the prototype defends against, how, and —
 importantly — **what it does not defend against**. Passing tests does
@@ -18,7 +18,11 @@ interpreter, the OS, and the human user making approval decisions.
 
 Assumed-untrusted: natural-language input (it may be accidental or
 hostile), local LLM output (models can be wrong or prompt-injected),
-and anything a concurrent process does to the filesystem.
+anything a concurrent process does to the filesystem, application
+manifests and desktop-entry files (their *names* are used for
+detection only, after sanitizing; their contents are never read), and
+any file a user might drop in a directory claiming something is
+installed.
 
 Not defended against: a compromised OS account, a malicious
 `sitecustomize`/Python environment, kernel attacks, or another
@@ -58,18 +62,75 @@ process racing the filesystem (see TOCTOU below).
 
 * The action allowlist is closed: `create_directory`,
   `create_text_file`, `create_report`, `create_pdf`,
-  `create_spreadsheet`, `list_directory`, `read_file`, `explain`.
-  The exact set is pinned by tests (v0.2 deliberately extended it from
-  five to eight actions; all three new ones are create-only,
-  approval-gated and cannot delete, move, overwrite or execute code).
+  `create_spreadsheet`, `list_directory`, `read_file`,
+  `detect_applications`, `open_file`, `explain`. The exact set is
+  pinned by tests (v0.2 went from five to eight actions, all
+  create-only; v0.3 deliberately added exactly two: read-only
+  detection and an approval-gated launch — neither can delete, move,
+  overwrite or execute arbitrary code).
 * There is no delete, overwrite, move, chmod, or shell action — not
   disabled, simply absent (meta-tests assert this).
 * Model output is parsed with `json.loads` and validated by the same
-  code as the deterministic parser. Nothing is ever `eval`/`exec`-ed,
-  formatted into a shell command, or passed to `subprocess`.
+  code as the deterministic parser. Nothing is ever `eval`/`exec`-ed
+  and nothing is formatted into a shell command.
 * File creation uses `os.open(..., O_CREAT|O_EXCL)`, so an existing
   file can never be clobbered even by a race. All v0.2 document
   writes go through the same `O_EXCL` path.
+* `subprocess` appears in exactly one place — the v0.3 launch adapter
+  (`integrations/apps/launch.py`) — always with an argv **list**,
+  `shell=False`, and never with a string built from user, file or
+  model text (meta-tests pin the absence of `shell=True`,
+  `os.system`, `os.popen`, `subprocess.run/call/check_output` in the
+  apps package and in the planner).
+
+### 2c. Application integration (v0.3)
+
+**Registry — what may ever run.** Applications are referenced only by
+registered identifiers resolved against the closed builtin registry.
+Definitions are validated against a strict schema: closed key sets
+(unknown fields rejected), bare executable names only — no `/`, no
+absolute path, no `..` — argv templates whose alphabet excludes every
+shell metacharacter and which must contain exactly one `{path}`, and
+only reviewed strategies (`exec`; `process_started`). There is **no**
+manifest loading from disk or from model output, so an untrusted file
+or the LLM cannot introduce an executable, a flag, an import or a
+capability. Unknown tokens (including `soffice --calc`,
+`/usr/bin/rm`, `bash -c evil`) are rejected at planning time with the
+list of known ids.
+
+**Discovery — read-only, evidence-based.** Detection uses only
+`shutil.which` on registered executable names and the *file names* of
+`.desktop` entries in three fixed directories; entry **contents are
+never read or executed**, names are sanitized to a conservative
+character set, and listings are bounded. No process is spawned,
+nothing is installed/removed/updated. An application is `available`
+only when its launch executable resolves — a name in a user-supplied
+file is never evidence. A desktop entry without a working executable
+is reported `detection_failed`, not `available`.
+
+**Launch — constrained, approved, honest.** `open_file` re-resolves
+the target through `PermissionChecker` (traversal, symlink, roots —
+defence in depth), requires the file to already exist, supports only
+`.txt`/`.pdf`/`.xlsx` for registered file types, is in
+`MUTATING_ACTIONS` (explicit `y/N` approval per launch; `--dry-run`
+never launches and never asks), and starts the process with the
+reviewed argv template, `shell=False`, the path as its own argv
+element, std streams on `/dev/null`. A missing application is a clear
+failure ("never installs applications automatically") — not an
+install attempt. An immediate non-zero exit is a launch failure.
+Verification re-resolves the path and requires a reported process
+start; the message claims **only** that the process was started, and
+explicitly not that any window was inspected. Detection requires no
+approval because it is read-only.
+
+**Capability policy.** What this milestone allows end-to-end:
+detect (read-only), open one approved existing file with one
+registered application. What is prohibited/unsupported and simply
+absent: arbitrary application commands, model- or user-supplied
+executables/flags, GUI automation, keystroke injection, window
+inspection, software installation, reading or editing "application
+data" beyond the file being opened, and file deletion/overwrite by
+this path.
 
 ### 2b. Structured content validation (v0.2)
 
@@ -109,10 +170,13 @@ before rendering:
 ### 3. Explicit approval before modification
 
 * Mutating actions require interactive `y/N` approval after the
-  resolved operation is displayed.
+  resolved operation is displayed. `open_file` is mutating: every
+  application launch is individually approved; `detect_applications`
+  is not, because it reads fixed system locations and starts nothing.
 * EOF, Ctrl-C, or any input failure while approving = **no**.
 * There is deliberately no `--yes`/`--force` bypass in this milestone.
-* `--dry-run` performs no writes and never even asks for approval.
+* `--dry-run` performs no writes, launches no process, and never even
+  asks for approval.
 
 ### 4. Verification before success
 
@@ -130,6 +194,13 @@ before rendering:
   altered, the task is reported as **failed** with the real error.
   A handler that "claims" success without doing the work — or that
   writes different bytes than approved — fails verification (tested).
+* v0.3 `open_file` verification re-resolves the path (still inside
+  the roots, still a regular file) and requires the execution result
+  to contain a real reported process start; a lying launch adapter
+  that claims success without `started=True` fails verification
+  (tested). The verified claim is deliberately narrow: *"the process
+  was started"* — never that the application displayed, edited or
+  recalculated anything.
 
 ### 5. Audit log
 
@@ -137,7 +208,12 @@ before rendering:
   unsupported) in `<state_dir>/audit.jsonl`, directory 0700, file
   0600, written via `os.open` with `0600`.
 * Fields: task id, UTC timestamp, parser, proposed action,
-  permission decision, approval, execution, verification, status.
+  permission decision, approval, execution, verification, status,
+  and any failure reason. Application tasks therefore carry the
+  integration id, requested capability, permission operation
+  (`open`/`detect`), approval verdict, launch outcome (started flag,
+  executable path, pid, returncode) and verification verdict — but
+  never file contents.
 * Redaction: `content`, `spec`, passwords, tokens and similar keys
   become `<redacted:N chars>`; user-file content embedded in the raw
   command string is masked too (inline structured JSON is redacted as
@@ -156,7 +232,10 @@ before rendering:
   responses produce typed, actionable errors and a visible fallback
   to the deterministic parser.
 * Even when the LLM proposes an action, it goes through
-  `validate_action()`; an out-of-allowlist proposal is discarded.
+  `validate_action()`; an out-of-allowlist proposal is discarded. For
+  application actions, `application`/`integration` must be registered
+  ids — a model cannot name an executable, a path or a flag, and no
+  such field exists in the schema.
 * The system prompt explicitly forbids referencing files as content
   sources, and the schema gives model proposals no `source` key at
   all — a model can never trigger a file read, only inline content.
@@ -172,7 +251,10 @@ before rendering:
   itself**; `requirements.txt` documents the pinned versions and the
   user installs them explicitly.
 * Tests run in temporary sandboxes (`ALWIN_HOME`-style injection) and
-  never modify the real home directory.
+  never modify the real home directory. Application tests inject fake
+  `popen`/`which` callables, so the automated suite never starts a
+  real desktop application; the manual smoke test is a separate,
+  explicit opt-in (`ALWIN_MANUAL_SMOKE=1`).
 
 ## Known limitations (read this honestly)
 
@@ -251,6 +333,43 @@ before rendering:
 15. **Not a sandboxed OS yet.** No process isolation, no MAC policy,
     no signed boot, no reproducible image — all future work under
     `os-build/`.
+16. **A launched application runs with *your* full privileges and is
+    outside Alwin Fusion's control.** Approving a launch hands the
+    file to that program (or, via `xdg-open`, to whatever the desktop
+    associates with it — including a different program than you
+    expected). Alwin Fusion does not sandbox, monitor, constrain or
+    communicate with the application afterwards, and a hostile
+    document could exploit a vulnerability in the application itself.
+    This is inherent to opening files with apps, not a bug — but it
+    is why every launch requires explicit approval.
+17. **Launch verification proves only that a process started.**
+    `poll()` immediately after `Popen` cannot know whether a window
+    appeared, whether the file actually rendered, or whether the
+    application later crashed. There is deliberately no window
+    inspection, no accessibility-API query and no claim of visual
+    review or formula recalculation. A GUI that needs stronger
+    verification must add a reviewed accessibility adapter (future
+    milestone) rather than weaken this claim.
+18. **Detection is heuristic and metadata-driven.** It reads PATH
+    and `.desktop` file *names* only; a manually copied binary that
+    is not on PATH, a `.desktop` file in an unsearched location, or a
+    renamed wrapper can produce `not_installed` / `detection_failed`
+    for software that is actually present (and vice versa: a stale
+    `soffice` name on PATH with a broken install can report
+    `available` until the launch itself fails). Desktop-entry
+    *contents* are never read precisely so untrusted metadata cannot
+    influence decisions, at the cost of ignoring `Hidden=true` and
+    `NoDisplay=true` entries in reports.
+19. **TOCTOU applies to opened files too.** The target is resolved
+    and checked, then passed to the application by path; another
+    process could replace the file between the check and the
+    application's own open. Same root cause and mitigation as (2):
+    dirfd/`O_NOFOLLOW`-style APIs are future work.
+20. **Registry extensibility is code-reviewed, not enforced by the
+    OS.** The schema validation and closed enums are strong against
+    *untrusted* input, but a future change to `registry.py` itself
+    (reviewed code) could add a dangerous definition — the test pins
+    and review process, not cryptography, are what guard that.
 
 ## Reporting security issues
 

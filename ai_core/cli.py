@@ -31,7 +31,7 @@ from ai_core.pipeline import (
 from ai_core.permissions import PermissionChecker
 from ai_runtime.ollama_client import OllamaClient, OllamaError
 
-BANNER = "ALWIN FUSION v0.2\nLocal AI Core + Documents"
+BANNER = "ALWIN FUSION v0.3\nLocal AI Core + Documents + Applications"
 
 EXIT_OK = 0
 EXIT_FAILURE = 1
@@ -97,8 +97,22 @@ def _print_success(report) -> None:
         "create_report",
         "create_pdf",
         "create_spreadsheet",
+        "open_file",
     ):
         alwin_print(verification.get("message", "Completed."))
+        return
+
+    if name == "detect_applications" and execution is not None:
+        lines = [execution.message]
+        for item in execution.data.get("integrations", []):
+            lines.append(f"  {item.get('name', '?')}: {item.get('status', '?')}")
+        for item in execution.data.get("unsupported", []):
+            lines.append(
+                f"  {item.get('name', '?')}: {item.get('status', 'installed_but_unsupported')}"
+            )
+        for warning in execution.data.get("errors", []):
+            lines.append(f"  warning: {warning}")
+        alwin_print(lines)
         return
 
     if name == "read_file" and execution is not None:

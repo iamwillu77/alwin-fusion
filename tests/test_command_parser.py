@@ -177,11 +177,13 @@ class TestUnsupportedCommands(unittest.TestCase):
 
 class TestActionValidation(unittest.TestCase):
     def test_allowlist_is_exactly_expected(self):
-        # v0.2 extension: create_report / create_pdf / create_spreadsheet
-        # were added to the pinned set.  This is an explicit extension of
-        # the allowlist, not a weakening: all eight actions are validated
-        # per-schema, mutating ones require approval, and none can
-        # delete, move, overwrite, shell out or execute code.
+        # v0.3 extension: detect_applications (read-only) and open_file
+        # (approval-gated launch) joined the pinned set.  This is an
+        # explicit extension of the allowlist, not a weakening: all ten
+        # actions are validated per-schema, mutating ones require
+        # approval, and none can delete, move, overwrite, shell out or
+        # execute code.  open_file selects an application only through
+        # the reviewed registry — never an executable or flag.
         self.assertEqual(
             set(ACTION_SCHEMA),
             {
@@ -192,6 +194,8 @@ class TestActionValidation(unittest.TestCase):
                 "create_report",
                 "create_pdf",
                 "create_spreadsheet",
+                "detect_applications",
+                "open_file",
                 "explain",
             },
         )

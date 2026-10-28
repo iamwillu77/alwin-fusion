@@ -22,6 +22,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable, Dict
 
+from integrations.apps.tools import ApplicationTools, make_app_handlers
 from integrations.documents.tools import DocumentTools, make_doc_handlers
 from integrations.filesystem.tools import FileSystemTools, ToolResult, make_fs_handlers
 
@@ -87,12 +88,23 @@ class ActionDispatcher:
         return spec.handler(action, dry_run=dry_run)
 
 
-def build_default_dispatcher(checker) -> ActionDispatcher:
-    """Dispatcher with the filesystem and document integrations attached."""
+def build_default_dispatcher(
+    checker,
+    *,
+    app_tools: "ApplicationTools | None" = None,
+) -> ActionDispatcher:
+    """Dispatcher with the filesystem, document and application integrations.
+
+    ``app_tools`` may be supplied to inject a test double (fake
+    launcher, fake ``which``, fake desktop directories); the default
+    builds the real read-only/argv-only application tools.
+    """
     tools = FileSystemTools(checker)
     handlers = make_fs_handlers(tools)
     doc_tools = DocumentTools(checker)
     doc_handlers = make_doc_handlers(doc_tools)
+    apps = app_tools or ApplicationTools(checker)
+    app_handlers = make_app_handlers(apps)
 
     dispatcher = ActionDispatcher()
     dispatcher.register(
@@ -141,6 +153,26 @@ def build_default_dispatcher(checker) -> ActionDispatcher:
         "create_spreadsheet",
         doc_handlers["create_spreadsheet"],
         description="Create an .xlsx workbook with openpyxl (never overwrites).",
+        mutates=True,
+        requires_approval=True,
+    )
+    dispatcher.register(
+        "detect_applications",
+        app_handlers["detect_applications"],
+        description=(
+            "Detect registered desktop applications (read-only: no launch, "
+            "no install, no change)."
+        ),
+        mutates=False,
+        requires_approval=False,
+    )
+    dispatcher.register(
+        "open_file",
+        app_handlers["open_file"],
+        description=(
+            "Open an existing, permission-checked file with a registered "
+            "application (argv-only launch; approval required)."
+        ),
         mutates=True,
         requires_approval=True,
     )

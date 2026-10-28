@@ -20,6 +20,11 @@ from ai_core import command_parser, specs
 from ai_core.command_parser import ParsedIntent
 from ai_core.permissions import pretty_path
 from ai_core.specs import SpecError
+from integrations.apps.registry import (
+    BUILTIN_REGISTRY,
+    RegistryError,
+    resolve_integration_id,
+)
 
 # --------------------------------------------------------------------------- #
 # Action allowlist and per-action schema
@@ -34,6 +39,8 @@ ACTION_SCHEMA: dict[str, frozenset] = {
     "create_report": frozenset({"action", "path", "content"}),
     "create_pdf": frozenset({"action", "path", "content"}),
     "create_spreadsheet": frozenset({"action", "path", "spec"}),
+    "detect_applications": frozenset({"action", "integration"}),
+    "open_file": frozenset({"action", "path", "application"}),
     "explain": frozenset({"action", "target"}),
 }
 
@@ -45,9 +52,13 @@ PATH_ACTIONS = (
     "create_report",
     "create_pdf",
     "create_spreadsheet",
+    "open_file",
 )
 
-#: Actions that change the filesystem and therefore need user approval.
+#: Actions that change the filesystem or the world outside the sandbox
+#: and therefore need user approval.  ``open_file`` launches an
+#: external application process — read-only detection
+#: (``detect_applications``) is deliberately *not* in this set.
 MUTATING_ACTIONS = frozenset(
     {
         "create_directory",
@@ -55,6 +66,7 @@ MUTATING_ACTIONS = frozenset(
         "create_report",
         "create_pdf",
         "create_spreadsheet",
+        "open_file",
     }
 )
 
@@ -64,6 +76,10 @@ DOCUMENT_EXTENSIONS = {
     "create_pdf": ".pdf",
     "create_spreadsheet": ".xlsx",
 }
+
+#: The only file types the v0.3 open_file action accepts (each
+#: integration narrows this further with its own file_types).
+OPENABLE_FILE_EXTENSIONS = frozenset({".txt", ".pdf", ".xlsx"})
 
 MAX_PATH_LENGTH = 1024
 MAX_CONTENT_CHARS = 64 * 1024
@@ -133,6 +149,16 @@ def validate_action(payload: object) -> dict:
             raise PlanValidationError("Nested explanations are not allowed.")
         return {"action": "explain", "target": validated_target}
 
+    if action == "detect_applications":
+        # No path: detection is read-only and never touches files.
+        try:
+            integration = resolve_integration_id(
+                payload.get("integration", ""), BUILTIN_REGISTRY
+            )
+        except RegistryError as exc:
+            raise PlanValidationError(str(exc)) from exc
+        return {"action": action, "integration": integration}
+
     path = _validate_path(payload.get("path"))
 
     if action == "create_text_file":
@@ -167,6 +193,31 @@ def validate_action(payload: object) -> dict:
         except SpecError as exc:
             raise PlanValidationError(str(exc)) from exc
         return {"action": action, "path": path, "content": content}
+
+    if action == "open_file":
+        # 'application' is an *integration identifier* resolved against
+        # the trusted registry — never an executable, a path or a flag.
+        # The registry is the closed allowlist of launch mechanisms; an
+        # unknown token is rejected here, before anything is executed.
+        try:
+            application = resolve_integration_id(
+                payload.get("application"), BUILTIN_REGISTRY
+            )
+        except RegistryError as exc:
+            raise PlanValidationError(str(exc)) from exc
+        if not application:
+            raise PlanValidationError(
+                "'open_file' needs an 'application' integration id, e.g. "
+                "'libreoffice-calc' or 'default'."
+            )
+        suffix = Path(path).suffix.lower()
+        if suffix not in OPENABLE_FILE_EXTENSIONS:
+            supported = ", ".join(sorted(OPENABLE_FILE_EXTENSIONS))
+            raise PlanValidationError(
+                f"'open_file' supports only {supported} files in this "
+                f"milestone (got '{suffix or 'no extension'}')."
+            )
+        return {"action": action, "path": path, "application": application}
 
     return {"action": action, "path": path}
 
@@ -336,6 +387,35 @@ def plan_from_intent(
         payload["spec" if action_name == "create_spreadsheet" else "content"] = content
         return validate_action(payload)
 
+    if intent.intent == command_parser.OPEN_FILE:
+        location = slots.get("location") or default_location
+        path = _join_path(location, slots.get("name", ""))
+        try:
+            application = resolve_integration_id(
+                slots.get("application"), BUILTIN_REGISTRY
+            )
+        except RegistryError as exc:
+            raise PlanValidationError(str(exc)) from exc
+        if not application:
+            raise PlanValidationError(
+                "Please name the application, e.g. 'Open sales.xlsx in "
+                "Documents with LibreOffice Calc' (or 'with system default')."
+            )
+        return validate_action(
+            {"action": "open_file", "path": path, "application": application}
+        )
+
+    if intent.intent == command_parser.DETECT_APPLICATIONS:
+        try:
+            integration = resolve_integration_id(
+                slots.get("application"), BUILTIN_REGISTRY
+            )
+        except RegistryError as exc:
+            raise PlanValidationError(str(exc)) from exc
+        return validate_action(
+            {"action": "detect_applications", "integration": integration}
+        )
+
     if intent.intent == command_parser.EXPLAIN:
         inner = command_parser.parse_command(slots.get("target", ""))
         if inner.intent == command_parser.UNSUPPORTED:
@@ -389,11 +469,26 @@ def describe_action(
     if name == "create_spreadsheet":
         sheets = (action.get("spec") or {}).get("sheets") or []
         return f"Create spreadsheet {display} ({len(sheets)} sheets)"
+    if name == "open_file":
+        return f"Open {display} with {_application_name(action.get('application'))}"
+    if name == "detect_applications":
+        integration = action.get("integration") or ""
+        if integration:
+            return f"Detect application {_application_name(integration)} (read-only)"
+        return "Detect installed applications (read-only)"
     if name == "list_directory":
         return f"List contents of {display}"
     if name == "read_file":
         return f"Read file {display}"
     return f"Unknown action {name!r}"
+
+
+def _application_name(integration_id: str) -> str:
+    """Human-readable name for a registered integration id."""
+    try:
+        return BUILTIN_REGISTRY.get(integration_id).name
+    except RegistryError:
+        return integration_id or "?"
 
 
 # --------------------------------------------------------------------------- #
@@ -417,6 +512,10 @@ SYSTEM_PROMPT = (
     '{"action": "create_spreadsheet", "path": "...", "spec": {"title": "...", '
     '"sheets": [{"name": "Sheet1", "headers": ["A", "B"], "rows": [[1, 2]], '
     '"formulas": [{"cell": "C2", "formula": "=SUM(A1:B1)"}]}]}}\n'
+    '{"action": "detect_applications", "integration": "libreoffice-writer"} '
+    '  (omit "integration" or use "" to detect all)\n'
+    '{"action": "open_file", "path": "Documents/report.txt", "application": '
+    '"libreoffice-writer"}\n'
     '{"action": "explain", "target": { ...one of the above... }}\n'
     "Rules:\n"
     "- 'path' is relative to the user's home directory, e.g. "
@@ -428,6 +527,11 @@ SYSTEM_PROMPT = (
     "as text and are never calculated here.\n"
     "- You can never read files: never reference a file path as content "
     "source; inline the full content instead.\n"
+    f"- 'application' and 'integration' must be one of these exact ids: "
+    f"{', '.join(BUILTIN_REGISTRY.ids)}. Never invent an executable name, "
+    "path or command-line flag — no such field exists.\n"
+    "- 'open_file' only opens files that already exist inside the "
+    "permitted roots; the user approves every launch.\n"
     "- No other action ever exists: never propose delete, move, shell, "
     "network or code-execution actions.\n"
     "- If the request cannot be mapped, reply with "

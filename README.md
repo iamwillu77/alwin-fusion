@@ -2,27 +2,40 @@
 
 **Open-source, offline-first AI-native operating system — in progress.**
 
-Version **0.2.0** · Milestone: **Local Document and Spreadsheet Automation**
+Version **0.3.0** · Milestone: **Application Integration Engine**
 
 Alwin Fusion lets you control your computer through natural-language
-commands. v0.2 adds local document generation — plain-text reports,
-PDFs and `.xlsx` spreadsheets — on top of the trusted core: a
-lightweight Python CLI that turns commands into **validated, approved,
-executed and verified** filesystem actions — fully offline, with an
-optional local Ollama model that is never required and never
-auto-downloaded.
+commands. v0.3 adds a controlled application integration engine —
+read-only discovery of installed desktop applications (LibreOffice
+Writer/Calc, common PDF viewers) and approval-gated opening of an
+existing, permission-checked file with a registered application — on
+top of the trusted core: a lightweight Python CLI that turns commands
+into **validated, approved, executed and verified** actions — fully
+offline, with an optional local Ollama model that is never required
+and never auto-downloaded.
 
 ```
-ALWIN FUSION v0.2
-Local AI Core + Documents
+ALWIN FUSION v0.3
+Local AI Core + Documents + Applications
 
-You: create a report named summary.txt in Documents titled "Q1 Summary" containing "Sales rose 12 percent."
+You: which applications are installed?
+
+ALWIN: Detected 5 application(s): 1 available, 4 not_installed. Nothing was launched, installed or changed.
+         Desktop default application: available
+         Document Viewer (Evince): not_installed
+         LibreOffice Calc: not_installed
+         LibreOffice Writer: not_installed
+         Okular: not_installed
+
+You: open summary.txt in Documents with LibreOffice Writer
 
 ALWIN: Proposed action:
-       Create text report ~/Documents/summary.txt (1 blocks)
+       Open ~/Documents/summary.txt with LibreOffice Writer
        Approve? [y/N] y
 
-ALWIN: Text report created and verified byte-for-byte.
+ALWIN: Verified: the file still exists inside the permitted roots and the
+       application process was started. This confirms the launch only —
+       Alwin Fusion does not inspect or control the application window.
 ```
 
 ## Features
@@ -38,6 +51,14 @@ ALWIN: Text report created and verified byte-for-byte.
   - **create a PDF document** from the same content structures
   - **create an `.xlsx` spreadsheet** (sheets, headers, rows, formulas,
     number formats, column widths, styling) from a JSON specification
+  - **detect installed applications** (read-only: LibreOffice
+    Writer/Calc, Evince, Okular, the desktop default handler — statuses
+    `available` / `not_installed` / `installed_but_unsupported` /
+    `detection_failed`)
+  - **open an existing file with a registered application**
+    (`open report.txt in Documents with LibreOffice Writer`, or `with
+    the default application` via `xdg-open`) — approval required,
+    argv-only launch, `shell=False`
   - explain which operation would be performed
 - **Structured plans with an explicit action allowlist** — model
   output is JSON-parsed and validated by trusted code; it is never
@@ -65,6 +86,17 @@ ALWIN: Text report created and verified byte-for-byte.
 - **Optional local AI runtime**: stdlib-only Ollama HTTP client with
   precise errors for missing server/model/timeouts, visible fallback
   to the built-in parser, and **no model downloads, ever**.
+- **Application integration engine** (`integrations/apps/`): a closed,
+  schema-validated registry of application definitions — identifiers,
+  capabilities, detection/launch/verification strategies. Applications
+  are selected only by registered id; executables and command-line
+  flags come exclusively from the reviewed builtin registry, never
+  from a user, a file or the LLM. Detection is read-only (`PATH`
+  lookups + desktop-entry file names in fixed directories — no
+  process is ever spawned, installed, removed or updated), launching
+  uses argv lists with `shell=False`, and success is reported
+  honestly as *"the process was started"* — never as visual
+  inspection, editing or formula recalculation.
 
 ## Requirements
 
@@ -86,6 +118,11 @@ ALWIN: Text report created and verified byte-for-byte.
 
   Text reports (`create_report`) always work — they are pure stdlib.
 - Optional: [Ollama](https://ollama.com) running locally for `--llm`.
+- v0.3 application integration needs **no new Python packages**. To
+  actually *open* files you need a desktop application registered in
+  the builtin registry (LibreOffice Writer/Calc, Evince, Okular, or
+  the `xdg-open` desktop default handler) — detection and all tests
+  work without any of them; Alwin Fusion never installs applications.
 
 ## Quick start
 
@@ -109,6 +146,18 @@ python3 -m ai_core.cli "create a spreadsheet named sales.xlsx in Documents using
 
 # v0.2: PDF (needs reportlab)
 python3 -m ai_core.cli 'create a pdf named readme.pdf in Documents containing "Welcome to Alwin Fusion."'
+
+# v0.3: read-only application detection (nothing is launched or installed)
+python3 -m ai_core.cli "Which applications are installed?"
+python3 -m ai_core.cli "Is LibreOffice Calc installed?"
+
+# v0.3: open an existing file with a registered application (asks approval)
+python3 -m ai_core.cli "Open summary.txt in Documents with LibreOffice Writer"
+python3 -m ai_core.cli "Open sales.xlsx in Documents with LibreOffice Calc"
+python3 -m ai_core.cli "Open summary.pdf in Documents with the default application"
+
+# v0.3: see what a launch would do, without doing it (no approval prompt)
+python3 -m ai_core.cli --dry-run "Open summary.txt in Documents with LibreOffice Writer"
 
 # Show effective configuration / probe the local AI runtime
 python3 -m ai_core.cli --show-config
@@ -183,27 +232,52 @@ python3 -m unittest discover -s tests -v
 ```
 
 All tests run in temporary directories; they never modify your real
-`~/Documents`. The suite (241 tests) covers supported/unsupported
-commands, traversal and symlink escapes, permission denial, approval
-rejection, directory creation, verification failure, Ollama-unavailable
-operation, absence of overwrite/delete capability, dry-run inertness,
-audit redaction/permissions, and the v0.2 document features: report
-rendering, workbook creation with formula preservation, PDF structural
-validation, content-source permission/size/encoding checks,
-existing-file protection and lying/tampering handlers failing
-verification. The spreadsheet/PDF pipeline tests skip themselves
-politely when the optional package is not installed (the standard
-library validator tests always run).
+`~/Documents` and never start a real desktop application (the launch
+adapter's `popen`/`which` are injected fakes in tests). The suite
+(316 tests) covers supported/unsupported commands, traversal and
+symlink escapes, permission denial, approval rejection, directory
+creation, verification failure, Ollama-unavailable operation, absence
+of overwrite/delete capability, dry-run inertness, audit
+redaction/permissions, the v0.2 document features (report rendering,
+workbook creation with formula preservation, PDF structural
+validation, content-source checks, lying/tampering handlers), and the
+v0.3 application engine: registry schema validation, unknown
+integration ids, arbitrary-executable/flag/shell rejection,
+discovery statuses, discovery never spawning processes, argv-only
+launches with `shell=False`, opening permitted files, outside-root
+refusal, launch-failure reporting, verification failures, audit
+fields for launches, and preservation of v0.1/v0.2 behaviour. The
+spreadsheet/PDF pipeline tests skip themselves politely when the
+optional package is not installed (the standard library validator
+tests always run).
+
+### Manual smoke test (opt-in, real LibreOffice)
+
+For a developer who has LibreOffice installed and wants to watch one
+real, personally approved launch:
+
+```bash
+ALWIN_MANUAL_SMOKE=1 scripts/manual_smoke_apps.sh
+```
+
+Without the environment variable the script is a no-op. It runs
+detection first (read-only), then asks you to approve a single
+`open ... with LibreOffice Writer` inside a throwaway sandbox home
+(your real `~/Documents` is never touched) and prints the resulting
+audit record.
 
 ## How the local model is used
 
 The core works with **zero** AI runtime. With `--llm`, the pipeline
 asks Ollama (local HTTP only) for a single JSON action; the response
 goes through the same allowlist validation as the deterministic
-parser. If the server is down, the model is missing, the timeout
-expires, or the response is invalid, you get an explanatory note and
-the built-in parser handles the command instead. Alwin Fusion never
-downloads models and contains no cloud fallback.
+parser — including application proposals, where `application` /
+`integration` must be registered ids (a model cannot name an
+executable or a command-line flag). If the server is down, the model
+is missing, the timeout expires, or the response is invalid, you get
+an explanatory note and the built-in parser handles the command
+instead. Alwin Fusion never downloads models and contains no cloud
+fallback.
 
 ## Project layout
 
@@ -212,10 +286,11 @@ ai_core/        config · command_parser · specs · planner · permissions ·
                 executor · verifier · audit · pipeline · cli
 ai_runtime/     ollama_client (stdlib HTTP, never pulls models)
 integrations/   ActionDispatcher + filesystem tools + documents/
-                (report · pdf · spreadsheet · tools — extension point)
+                (report · pdf · spreadsheet · tools) + apps/
+                (registry · discovery · launch · tools — extension point)
 tests/          unittest suite (temporary sandboxes only)
 docs/           ARCHITECTURE.md · SECURITY.md
-scripts/        run_tests.sh
+scripts/        run_tests.sh · manual_smoke_apps.sh (opt-in)
 requirements.txt  optional v0.2 document dependencies (you install them)
 app-bridge/ desktop/ models/ os-build/   reserved for later milestones
 ```
@@ -229,11 +304,13 @@ app-bridge/ desktop/ models/ os-build/   reserved for later milestones
 ## Status and known limitations
 
 Implemented: the full parse → plan → permission → approval →
-execute → verify → audit loop for all eight actions (including
-`create_report`, `create_pdf`, `create_spreadsheet`), CLI (dry-run,
-single-command and interactive modes), structured-content validation,
-audit logging with structured-content redaction, local Ollama client
-with graceful degradation, and the automated test suite.
+execute → verify → audit loop for all ten actions (including
+`create_report`, `create_pdf`, `create_spreadsheet`,
+`detect_applications`, `open_file`), CLI (dry-run, single-command and
+interactive modes), structured-content validation, audit logging with
+structured-content redaction, local Ollama client with graceful
+degradation, the application registry/discovery/launch engine, and the
+automated test suite.
 
 Known limitations (details in `docs/SECURITY.md`):
 
@@ -245,10 +322,18 @@ Known limitations (details in `docs/SECURITY.md`):
   Helvetica fonts only — no CJK/emoji glyphs).
 - Optional dependencies are loaded lazily; without `openpyxl` /
   `reportlab` those actions fail cleanly with an install hint.
+- **A successful launch proves only that the process started** —
+  Alwin Fusion never inspects, controls or automates the application
+  window, never injects keystrokes, and never claims a document was
+  visually reviewed or a spreadsheet recalculated.
+- **Detection is heuristic** (PATH executables + desktop-entry file
+  names in fixed directories); a broken install can be reported as
+  `detection_failed`, and unknown viewers as `installed_but_unsupported`.
 - Still deliberately absent: file deletion/overwrite, shell or
-  arbitrary command execution, network operations, process
-  sandboxing, multi-user support, MCP/LibreOffice integrations,
-  desktop automation, GUI, and bootable OS images.
+  arbitrary command execution, arbitrary application flags/commands,
+  software installation, network operations, process sandboxing,
+  multi-user support, MCP integrations, GUI accessibility
+  automation, and bootable OS images.
 
 Passing tests does not by itself make a system secure — read
 `docs/SECURITY.md` for the actual threat model (TOCTOU races,

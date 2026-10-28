@@ -214,9 +214,12 @@ class TestNoDestructiveCapability(unittest.TestCase):
     def test_allowlist_has_no_destructive_actions(self):
         from ai_core.planner import ACTION_SCHEMA, MUTATING_ACTIONS
 
-        # v0.2 extension: three document actions joined the allowlist
-        # (each create-only, approval-gated, no overwrite).  The set is
-        # still pinned exactly so nothing new can slip in unnoticed.
+        # v0.3 extension: detect_applications (read-only detection, no
+        # approval needed) and open_file (opens an existing,
+        # permission-checked file via the reviewed registry; requires
+        # approval) joined the allowlist.  The set is still pinned
+        # exactly so nothing new can slip in unnoticed, and neither new
+        # action can delete, overwrite, or run arbitrary commands.
         self.assertEqual(
             set(ACTION_SCHEMA),
             {
@@ -227,10 +230,15 @@ class TestNoDestructiveCapability(unittest.TestCase):
                 "create_report",
                 "create_pdf",
                 "create_spreadsheet",
+                "detect_applications",
+                "open_file",
                 "explain",
             },
         )
-        # Every filesystem-changing action requires approval.
+        # Every filesystem-changing or world-changing action requires
+        # approval.  open_file joins because launching an application
+        # changes state outside the sandbox; detection stays out because
+        # it is strictly read-only.
         self.assertEqual(
             MUTATING_ACTIONS,
             {
@@ -239,6 +247,7 @@ class TestNoDestructiveCapability(unittest.TestCase):
                 "create_report",
                 "create_pdf",
                 "create_spreadsheet",
+                "open_file",
             },
         )
 

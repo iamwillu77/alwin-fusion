@@ -246,6 +246,24 @@ class PermissionChecker:
             operation = "create"
         elif name in ("list_directory", "read_file"):
             operation = "read"
+        elif name == "open_file":
+            # Opening a file with an application requires the same
+            # containment checks as any other access; the path must
+            # resolve inside the permitted roots before a launch can
+            # even be considered.  The launch itself additionally
+            # requires user approval (planner.MUTATING_ACTIONS).
+            operation = "open"
+        elif name == "detect_applications":
+            # Read-only detection never touches the filesystem through
+            # the pipeline (the tools use fixed system locations), so
+            # there is no path to check here.
+            return PermissionDecision(
+                allowed=True,
+                operation="detect",
+                requested=str(action.get("integration", "")),
+                resolved=None,
+                reason="application detection is read-only",
+            )
         else:
             return PermissionDecision(
                 allowed=False,

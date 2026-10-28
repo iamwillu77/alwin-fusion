@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 # --------------------------------------------------------------------------- #
 # Intents
@@ -26,6 +26,8 @@ CREATE_REPORT = "create_report"
 CREATE_PDF = "create_pdf"
 CREATE_SPREADSHEET = "create_spreadsheet"
 READ_FILE = "read_file"
+OPEN_FILE = "open_file"
+DETECT_APPLICATIONS = "detect_applications"
 EXPLAIN = "explain"
 EXIT = "exit"
 UNSUPPORTED = "unsupported"
@@ -38,6 +40,8 @@ INTENTS = (
     CREATE_PDF,
     CREATE_SPREADSHEET,
     READ_FILE,
+    OPEN_FILE,
+    DETECT_APPLICATIONS,
     EXPLAIN,
     EXIT,
     UNSUPPORTED,
@@ -53,6 +57,9 @@ SUPPORTED_COMMAND_EXAMPLES = (
     "Create a pdf named summary.pdf in Documents using report.json",
     'Create a pdf named readme.pdf in Documents titled "Readme" containing "Welcome to Alwin Fusion."',
     "Create a spreadsheet named sales.xlsx in Documents using sales.json",
+    "Which applications are installed?",
+    "Open summary.txt in Documents with LibreOffice Writer.",
+    "Open sales.xlsx in Documents with the default application.",
     "Explain create a folder named Archive in Documents.",
 )
 
@@ -261,6 +268,108 @@ _REPORT_CONTENT_HELP = (
 
 def _strip_quotes(value: str) -> str:
     return value.strip().strip("\"'")
+
+
+# ---- v0.3 application commands ------------------------------------------ #
+
+#: 'open/launch/start <file> [in <location>] with|via|using <app>'.
+#: The explicit application clause is *required*: without it the v0.1
+#: 'open <file>' (read_file) meaning is untouched.
+_OPEN_WITH_RE = re.compile(
+    r"^(?:open|launch|start)\s+(?:me\s+)?(?:the\s+)?(?:file\s+)?"
+    r"(?P<rest>.+?)\s+(?:with|using|via)\s+(?P<app>.+?)\s*[.?!]?$",
+    re.IGNORECASE,
+)
+
+#: Phrasings that mean "run read-only application detection".
+_DETECT_APPS_RES = (
+    re.compile(
+        r"^(?:detect|check|scan|list|show|find)"
+        r"(?:\s+(?:me|the|my|our|all))?(?:\s+(?:which|what))?"
+        r"\s+(?:supported\s+|known\s+|installed\s+|available\s+)?"
+        r"(?:applications?|apps?)"
+        r"(?:\s+(?:are\s+)?(?:installed|available))?\s*[.?!]?$",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^(?:which|what)"
+        r"\s+(?:supported\s+|installed\s+|available\s+)?"
+        r"(?:applications?|apps?)"
+        r"(?:\s+(?:are\s+)?(?:installed|available))?\s*[.?!]?$",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^what(?:'s| is)\s+(?:currently\s+)?installed\s*[.?!]?$", re.IGNORECASE
+    ),
+)
+
+#: 'is libreoffice calc installed?' -> detection filtered to that app.
+_IS_APP_INSTALLED_RE = re.compile(
+    r"^(?:is|are)\s+(?P<app>.+?)\s+installed\s*[.?!]?$", re.IGNORECASE
+)
+
+_APP_TOKEN_NOISE = re.compile(
+    r"^(?:the|a|an|my|our)\s+|\s+(?:application|app|program)s?$", re.IGNORECASE
+)
+
+
+def _clean_app_token(raw: Optional[str]) -> str:
+    """Reduce 'the default application' -> 'default', keep 'LibreOffice Calc'."""
+    token = normalize_name(raw)
+    token = _APP_TOKEN_NOISE.sub("", token)
+    return token.strip()
+
+
+def _split_read_target(rest: str) -> Tuple[str, str]:
+    """Split 'name [in|from location]' into (name, location)."""
+    rest = _trim(rest)
+    rest = re.sub(r"^(?:my|the)\s+", "", rest, flags=re.IGNORECASE)
+    quoted = _READ_QUOTED_RE.match(rest)
+    if quoted:
+        return quoted.group("name").strip(), quoted.group("location") or ""
+    plain = _READ_LOCATION_RE.match(rest)
+    if plain:
+        return plain.group("name").strip(), plain.group("location") or ""
+    return rest, ""
+
+
+def _parse_open_with(text: str, raw: str) -> Optional[ParsedIntent]:
+    """Parse 'open <file> with <application>' (v0.3)."""
+    m = _OPEN_WITH_RE.match(text)
+    if not m:
+        return None
+    application = _clean_app_token(m.group("app"))
+    if not application:
+        return _unsupported(
+            "Tell me which application should open the file, e.g. "
+            "'Open report.txt in Documents with LibreOffice Writer'.",
+            raw,
+        )
+    name, location = _split_read_target(m.group("rest"))
+    if not name:
+        return _unsupported(
+            "Tell me which file to open, e.g. "
+            "'Open report.txt in Documents with LibreOffice Writer'.",
+            raw,
+        )
+    return ParsedIntent(
+        OPEN_FILE,
+        {"name": name, "location": normalize_location(location), "application": application},
+        raw,
+    )
+
+
+def _parse_detect_apps(text: str, raw: str) -> Optional[ParsedIntent]:
+    """Parse read-only application detection commands (v0.3)."""
+    for pattern in _DETECT_APPS_RES:
+        if pattern.match(text):
+            return ParsedIntent(DETECT_APPLICATIONS, {}, raw)
+    m = _IS_APP_INSTALLED_RE.match(text)
+    if m:
+        application = _clean_app_token(m.group("app"))
+        if application:
+            return ParsedIntent(DETECT_APPLICATIONS, {"application": application}, raw)
+    return None
 
 
 def _parse_document(text: str, raw: str) -> Optional[ParsedIntent]:
@@ -486,6 +595,14 @@ def parse_command(command: str) -> ParsedIntent:
             )
         return ParsedIntent(EXPLAIN, {"target": inner}, raw)
 
+    detect_intent = _parse_detect_apps(text, raw)
+    if detect_intent is not None:
+        return detect_intent
+
+    open_intent = _parse_open_with(text, raw)
+    if open_intent is not None:
+        return open_intent
+
     m = _DIR_RE.match(text)
     if m:
         name = normalize_name(m.group("name"))
@@ -530,7 +647,8 @@ def parse_command(command: str) -> ParsedIntent:
     return _unsupported(
         "Supported commands are: list files, create a folder, create a text "
         "file with content, read a text file, create a report, PDF or "
-        "spreadsheet from structured content, explain an operation. Type "
+        "spreadsheet from structured content, detect installed applications, "
+        "open a file with an application, explain an operation. Type "
         "'help' for examples.",
         raw,
     )
