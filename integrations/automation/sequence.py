@@ -20,7 +20,7 @@ proposal shown to the user enumerates every step.
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 
 from ai_core.permissions import PermissionChecker
 from integrations.filesystem.tools import ToolResult
@@ -31,15 +31,42 @@ STATUS_DENIED = "denied"
 STATUS_SKIPPED = "skipped"
 STATUS_DRY_RUN = "dry_run"
 
+#: Statuses reported to an optional ``step_observer`` as the sequence
+#: progresses: ``running`` (step started), then ``ok``/``failed``/
+#: ``denied``/``skipped``/``dry_run`` once judged.
+STATUS_RUNNING = "running"
+
 
 class TaskSequenceRunner:
     """Executes a validated sequence with stop-on-failure semantics."""
 
-    def __init__(self, checker: PermissionChecker, dispatcher=None) -> None:
+    def __init__(
+        self,
+        checker: PermissionChecker,
+        dispatcher=None,
+        *,
+        step_observer: Optional[Callable[..., None]] = None,
+    ) -> None:
         self.checker = checker
         self.dispatcher = dispatcher
+        #: Optional ``(index, total, action_name, status, error=None)``
+        #: callback invoked at each step boundary.  Observation only:
+        #: the observer cannot influence, skip or approve anything.
+        self.step_observer = step_observer
 
     # ------------------------------------------------------------------ #
+
+    def _observe(
+        self, index: int, total: int, step: dict, status: str, error=None
+    ) -> None:
+        if self.step_observer is None:
+            return
+        try:
+            self.step_observer(
+                index, total, step.get("action", "?"), status, error=error
+            )
+        except Exception:  # noqa: BLE001 - an observer bug never stops a task
+            pass
 
     @staticmethod
     def _record(step: dict, status: str, **extra) -> Dict:
@@ -54,6 +81,7 @@ class TaskSequenceRunner:
     def _skip_rest(
         self, steps: List[dict], records: List[Dict], start: int, reason: str
     ) -> None:
+        total = len(steps)
         for offset, step in enumerate(steps[start:], start=start + 1):
             records.append(
                 self._record(
@@ -64,16 +92,20 @@ class TaskSequenceRunner:
                     error=f"not executed: {reason}",
                 )
             )
+            self._observe(offset, total, step, STATUS_SKIPPED)
 
     def run(self, action: dict, *, dry_run: bool = False) -> ToolResult:
         steps = list(action.get("steps") or [])
         total = len(steps)
 
         if dry_run:
-            records = [
-                self._record(step, STATUS_DRY_RUN, index=i, ok=None, error=None)
-                for i, step in enumerate(steps, start=1)
-            ]
+            records = []
+            for i, step in enumerate(steps, start=1):
+                records.append(
+                    self._record(step, STATUS_DRY_RUN, index=i, ok=None,
+                                 error=None)
+                )
+                self._observe(i, total, step, STATUS_DRY_RUN)
             return ToolResult(
                 ok=True,
                 message=(
@@ -92,6 +124,7 @@ class TaskSequenceRunner:
 
         for index, step in enumerate(steps, start=1):
             # 1. Permission re-check for this exact step.
+            self._observe(index, total, step, STATUS_RUNNING)
             try:
                 decision = self.checker.check_action(step)
             except Exception as exc:  # noqa: BLE001 - a check error denies
@@ -105,6 +138,7 @@ class TaskSequenceRunner:
                         step, STATUS_DENIED, index=index, ok=False, error=reason
                     )
                 )
+                self._observe(index, total, step, STATUS_DENIED, error=reason)
                 failed_step = index
                 failure = (
                     f"Step {index} of {total} was denied by the permission "
@@ -135,6 +169,7 @@ class TaskSequenceRunner:
             try:
                 result = self.dispatcher.dispatch(step, dry_run=False)
             except Exception as exc:  # noqa: BLE001 - reported, not hidden
+                error_text = f"{type(exc).__name__}: {exc}"
                 records.append(
                     self._record(
                         step,
@@ -144,9 +179,12 @@ class TaskSequenceRunner:
                         executed=False,
                         changed=False,
                         message="",
-                        error=f"{type(exc).__name__}: {exc}",
+                        error=error_text,
                         data={},
                     )
+                )
+                self._observe(
+                    index, total, step, STATUS_FAILED, error=error_text
                 )
                 failed_step = index
                 failure = (
@@ -158,10 +196,11 @@ class TaskSequenceRunner:
                 )
                 break
 
+            step_status = STATUS_OK if result.ok else STATUS_FAILED
             records.append(
                 self._record(
                     step,
-                    STATUS_OK if result.ok else STATUS_FAILED,
+                    step_status,
                     index=index,
                     ok=result.ok,
                     executed=bool(result.ok),
@@ -170,6 +209,13 @@ class TaskSequenceRunner:
                     error=result.error,
                     data=dict(result.data),
                 )
+            )
+            self._observe(
+                index,
+                total,
+                step,
+                step_status,
+                error=None if result.ok else (result.error or result.message),
             )
             if not result.ok:
                 failed_step = index

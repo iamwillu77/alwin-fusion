@@ -2,21 +2,23 @@
 
 **Open-source, offline-first AI-native operating system — in progress.**
 
-Version **0.4.0** · Milestone: **Desktop Automation Engine**
+Version **0.5.0** · Milestone: **Task Experience Engine**
 
 Alwin Fusion lets you control your computer through natural-language
-commands. v0.4 adds a safe, AT-SPI-based desktop automation engine —
-inspect the honest state of LibreOffice Writer/Calc, find and read
-controls, activate identified buttons, enter text into identified input
-fields, digest-confirmed saves, and validated multi-step task sequences
-— inside the unchanged trusted core: a lightweight Python CLI that
-turns commands into **validated, approved, executed and verified**
-actions — fully offline, with an optional local Ollama model that is
-never required and never auto-downloaded.
+commands. v0.5 adds the first user-facing **task experience** — a
+lightweight offline GTK4 desktop interface (`taskui`) where you submit
+a request, inspect the *real* plan the trusted core produced, approve
+or reject it, watch truthful per-step execution with verification
+evidence, and browse a persistent, validated, display-only local task
+history. It builds directly on the unchanged trusted core (parse →
+plan → permission → approval → execute → verify → audit); there is no
+second execution engine. Fully offline, with an optional local Ollama
+model that is never required and never auto-downloaded.
 
 ```
-ALWIN FUSION v0.4
+ALWIN FUSION v0.5
 Local AI Core + Documents + Applications + Desktop Automation
+Task experience: python3 -m taskui
 
 You: inspect the state of LibreOffice Writer
 
@@ -42,6 +44,31 @@ ALWIN: The Save control was activated, but ~/Documents/notes.txt did not
        change on disk within 2s. A save cannot be confirmed — state
        unknown (the active document may be a different file or
        unmodified).
+```
+
+The same core is now also driven by a desktop window:
+
+```
+$ python3 -m taskui
+┌──────────────────────────────────────────────────────────────┐
+│ ALWIN FUSION   [Local AI partial] [Automation available] [Works fully offline] │
+│ What should Alwin do?  [ Create a folder named Invoices…    ] [Submit] │
+│                                                              │
+│ Task plan                                                    │
+│ Planning…  ·  #4f2a9c                                        │
+│ 1. Create directory 'Invoices' in Documents.    [Changes…]   │
+│ • This task changes something on disk. Nothing runs until you │
+│   approve this exact plan; if the plan changes, the approval  │
+│   is invalidated.                                             │
+│ [Approve this plan] [Reject]                                  │
+│                                                              │
+│ Execution                                                    │
+│ ✔ Verified: Folder created and verified successfully.         │
+│    ✔ path_exists · ✔ is_directory · ✔ not_a_symlink           │
+│                                                              │
+│ History (local, display-only)                                │
+│ 4f2a9c  2026-10-27T18:02Z  Completed  Create a folder named…  │
+└──────────────────────────────────────────────────────────────┘
 ```
 
 ## Features
@@ -107,6 +134,38 @@ ALWIN: The Save control was activated, but ~/Documents/notes.txt did not
 - **Audit log** in `~/.local/state/alwin-fusion/audit.jsonl`,
   mode 0600/0700, with file content and structured `spec`/`content`
   redacted.
+- **Task experience** (`taskui/`, v0.5) — a lightweight, offline GTK4
+  desktop window (`python3 -m taskui`) on top of the *same* trusted
+  core: type a request, see the **actual structured plan** the planner
+  produced (annotated read-only / needs-approval / unverifiable — never
+  a more permissive UI-specific variant), approve or reject it, watch
+  live per-step progress, and inspect independently **verified**
+  outcomes or honest failures. Clear separation: `gtk_app` (thin view)
+  → `presenter` (pure view-model) → `manager` (one worker thread per
+  task) → the existing `ai_core`/`integrations` pipeline. The window
+  never executes anything itself, never grants itself permission, and
+  the core re-checks permissions at execution time even after the UI
+  approved. It stays useful with no AI and no desktop accessibility:
+  the deterministic parser handles every supported command and the
+  status area states honestly what is and is not available.
+- **Persistent local task history** (`taskui/history.py`, v0.5) —
+  `~/.local/state/alwin-fusion/task_history.jsonl` (mode 0600/0700),
+  one sanitized record per finished task (id, timestamps, masked
+  request, plan summary, per-step statuses, final result, verification
+  status). It is **display-only by construction** (no code path from a
+  record to execution, no automatic replay), validated against a
+  closed schema on read, and malformed records are skipped and counted
+  — never repaired or executed. It is a normal user-owned file, not
+  tamper-proof.
+- **Two-phase pipeline** (`preview()` + `run_previewed()`,
+  `ai_core/pipeline.py`) — the additive split the desktop UI needs:
+  `preview()` runs parse → plan → permission and **never executes**;
+  `run_previewed()` continues the *same* validated action through
+  approval → execute → verify → audit. `run()` is now their
+  composition (one implementation of every stage). Approvals are bound
+  to a `plan_digest()` via an `ApprovalToken`; a changed plan is an
+  honest rejection with nothing executed. A bare `True` approval is
+  deliberately not accepted.
 - **Optional local AI runtime**: stdlib-only Ollama HTTP client with
   precise errors for missing server/model/timeouts, visible fallback
   to the built-in parser, and **no model downloads, ever**.
@@ -190,8 +249,20 @@ ALWIN: The Save control was activated, but ~/Documents/notes.txt did not
   live and GNOME apps (Nautilus, gnome-shell) expose interfaces, but
   with `toolkit-accessibility=false` LibreOffice 26.2.6.3 does *not*
   register — ALWIN then reports `process_started` and refuses to fake
-  a window it cannot see. The core and all 404 tests work without any
-  of these; the automated suite never touches a real desktop.
+  a window it cannot see. The core and all tests work without any of
+  these; the automated suite never touches a real desktop.
+- v0.5 desktop task experience (`python3 -m taskui`) additionally
+  needs GTK4 via PyGObject. On the development machine this was
+  already present as part of the v0.4 automation dependency, so it
+  adds **no new Python package** to `requirements.txt`:
+
+  | Dependency | Enables | If missing |
+  |---|---|---|
+  | `python3-gi` + `gir1.2-gtk-4.0` (`gi.repository.Gtk` 4.0) | the task window | `python3 -m taskui --check` still works; launching the window prints an honest message and the CLI keeps working |
+
+  The rest of the task experience (lifecycle, manager, presenter,
+  history, status probes) is pure standard library and runs headless.
+  Alwin Fusion never installs any of these.
 
 ## Quick start
 
@@ -247,6 +318,16 @@ python3 -m ai_core.cli --dry-run "Inspect the state of LibreOffice Writer then f
 # Show effective configuration / probe the local AI runtime
 python3 -m ai_core.cli --show-config
 python3 -m ai_core.cli --ai-status
+
+# v0.5: the desktop task experience (GTK4 window)
+python3 -m taskui                 # submit a request, inspect the plan,
+                                  # approve/reject, watch verified progress
+python3 -m taskui --llm           # use the local Ollama model for proposals
+python3 -m taskui --dry-run       # every task runs as a dry run
+python3 -m taskui --check         # headless self-check (no window): prints
+                                  # AI/automation status + history location
+python3 -m taskui --smoke         # scripted headless walkthrough of the
+                                  # full lifecycle (used by the UI smoke test)
 
 # Use the local Ollama model to propose actions (always validated;
 # falls back to the built-in parser with a visible note)
@@ -321,7 +402,7 @@ All tests run in temporary directories; they never modify your real
 launch adapter's `popen`/`which`, the automation backend's AT-SPI
 session, adapter factory, clock and `/proc` root are all injected
 fakes; fake `/proc` trees are temporary directories of `<pid>/comm`
-files). The suite (404 tests) covers supported/unsupported commands,
+files). The suite (553 tests) covers supported/unsupported commands,
 traversal and symlink escapes, permission denial, approval rejection,
 directory creation, verification failure, Ollama-unavailable operation,
 absence of overwrite/delete capability, dry-run inertness,
@@ -332,7 +413,7 @@ v0.3 application engine (registry schema validation, unknown
 integration ids, arbitrary-executable/flag/shell rejection, discovery
 statuses, argv-only launches, opening permitted files, outside-root
 refusal, launch-failure reporting, verification failures, audit
-fields), and the v0.4 automation engine: unknown action/role/name
+fields), the v0.4 automation engine: unknown action/role/name
 rejections, capability-unavailable reporting, permission denial for
 applications without the `automate` capability, the honest state
 machine (`not_installed`/`installed_not_running`/`process_started`
@@ -344,9 +425,27 @@ verification, untrusted application text sanitization, audit redaction
 of entered text, per-step sequence verification with stop-on-failure
 and skipped dependents, source-level bans on keystroke/mouse/shell
 primitives in the automation package, and preservation of
-v0.1/v0.2/v0.3 behaviour. The spreadsheet/PDF pipeline tests skip
-themselves politely when the optional package is not installed (the
-standard library validator tests always run).
+v0.1/v0.2/v0.3 behaviour. The v0.5 task experience is covered by
+headless tests only (no window, no display, no desktop): the task
+lifecycle state machine (valid/invalid transitions, cancellation,
+failure, needs-attention), the two-phase pipeline (`preview()` +
+`run_previewed()` parity with `run()`, approval-token digest binding,
+plan-changed invalidation, permission re-check at execution time),
+the task manager (submission validation, read-only and approval flows,
+rejection cancelling with nothing executed, cancellation refused while
+running, execution-failure → failed, verification-failure →
+needs_attention never success, live per-step progress, history writes
+including for failures, and isolation from UI bugs), the history store
+(roundtrip, corruption/malformed-record skipping, content redaction,
+display-only/never-executable guarantee), the capability-status probes
+(mocked AI/automation availability), the presenter view-model (plan
+badges, approval affordances, step rendering, verification evidence,
+bounded untrusted text), and AST-based source meta-checks (no
+subprocess/os.system/eval/exec anywhere in `taskui/`, only the manager
+imports the execution engine, the GTK view never renders markup). The
+spreadsheet/PDF pipeline tests skip themselves politely when the
+optional package is not installed (the standard library validator
+tests always run).
 
 ### Manual smoke test (opt-in, real LibreOffice)
 
@@ -383,6 +482,29 @@ never touched (the sandbox is deleted on exit). If the desktop does
 not expose LibreOffice's accessibility interface, every step fails
 honestly instead of guessing; see Requirements above.
 
+### Manual task-experience smoke test (opt-in, real task window)
+
+For a developer who wants to confirm the whole v0.5 task experience
+works on a real display — the headless lifecycle walkthrough first,
+then the actual GTK4 window you can drive yourself:
+
+```bash
+ALWIN_UI_SMOKE=1 scripts/manual_smoke_ui.sh
+```
+
+Without the environment variable the script is a no-op. It runs the
+headless walkthrough (`python3 -m taskui --smoke`) against the real
+manager and trusted pipeline inside a throwaway sandbox home — a
+read-only task, then a mutating task you see *rejected* (nothing runs),
+then the same task *approved* (created and verified on disk) — prints
+the headless capability check and the history it wrote, and finally
+opens the real GTK4 window so you can submit a task, inspect the plan,
+approve or reject it, and inspect the verified result and history.
+Everything runs inside the sandbox; your real `~/Documents` and state
+directory are never touched, and the sandbox is deleted on exit. If
+GTK4 or a display is unavailable the window step is skipped with an
+honest message — the headless walkthrough still proves the lifecycle.
+
 ## How the local model is used
 
 The core works with **zero** AI runtime. With `--llm`, the pipeline
@@ -400,18 +522,25 @@ fallback.
 
 ```
 ai_core/        config · command_parser · specs · planner · permissions ·
-                executor · verifier · audit · pipeline · cli
+                executor · verifier · audit · pipeline (preview +
+                run_previewed + ApprovalToken) · cli
 ai_runtime/     ollama_client (stdlib HTTP, never pulls models)
 integrations/   ActionDispatcher + filesystem tools + documents/
                 (report · pdf · spreadsheet · tools) + apps/
                 (registry · discovery · launch · tools) + automation/
                 (base · processes · atspi_backend · libreoffice ·
-                 tools · sequence · mcp — extension point)
+                 tools · sequence — with optional step_observer ·
+                 mcp — extension point)
+taskui/         lifecycle (state machine) · history (validated,
+                display-only JSONL) · manager (worker-thread bridge to
+                the pipeline) · presenter (pure view-model) · status
+                (honest AI/automation probes) · gtk_app (thin GTK4
+                view) · __main__ entry point
 tests/          unittest suite (temporary sandboxes + in-memory
-                accessibility trees only)
+                accessibility trees only; no display, no desktop)
 docs/           ARCHITECTURE.md · SECURITY.md
 scripts/        run_tests.sh · manual_smoke_apps.sh ·
-                manual_smoke_automation.sh (opt-in)
+                manual_smoke_automation.sh · manual_smoke_ui.sh (opt-in)
 requirements.txt  optional v0.2 document dependencies (you install them)
 app-bridge/ desktop/ models/ os-build/   reserved for later milestones
 ```
@@ -435,10 +564,33 @@ application registry/discovery/launch engine, the AT-SPI desktop
 automation engine for LibreOffice Writer/Calc (honest state machine,
 control finding/reading, allowlisted activation and text entry,
 digest-confirmed saves, validated multi-step sequences), and the
-automated test suite (404 tests).
+automated test suite (553 tests). v0.5 adds the **task experience**:
+a two-phase pipeline (`preview()` + `run_previewed()` with
+digest-bound `ApprovalToken`s), the `taskui` package (validated task
+lifecycle, redacted display-only task history, worker-thread manager,
+pure presenter, honest capability probes, thin GTK4 window), and the
+opt-in UI smoke test.
 
 Known limitations (details in `docs/SECURITY.md`):
 
+- **The v0.5 task window is a thin view over the existing core** — it
+  exposes only the seventeen supported actions; there is no
+  document-editing or free-form "do anything" capability, and an
+  unsupported request is explained honestly with safe supported
+  alternatives shown.
+- **The task window requires GTK4 (PyGObject)**. It was exercised on
+  the development machine (Ubuntu 26.04.1, GNOME/Wayland) via the
+  opt-in smoke test; a clean installation has **not** been tested, so
+  no clean-install claim is made.
+- **Task history is a normal user-owned file** (`task_history.jsonl`,
+  mode 0600/0700) — it is validated and display-only, but it is **not
+  tamper-proof**, and nothing in Alwin Fusion ever replays it.
+- **One task at a time** — the manager runs a single worker thread and
+  refuses a second submission until the current task reaches a
+  terminal state (a deliberate simplicity, not a queue).
+- **Cancellation is honoured only before execution starts.** A running
+  action is never interrupted, and a cancelled task never claims
+  rollback (nothing is "undone" — nothing had run yet).
 - **Formulas are written as text and never calculated** — open a
   workbook in a spreadsheet application to compute results; Alwin
   Fusion never claims a calculated value.

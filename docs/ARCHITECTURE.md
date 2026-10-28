@@ -37,7 +37,15 @@ ai_core/                 Trusted application core (pure Python, stdlib only)
     verifier.py          Re-checks the world after execution
     audit.py             Redacting, restricted-permission JSONL audit log
     pipeline.py          Stage orchestration: parse -> plan -> permission
-                         -> approval -> execute -> verify -> audit
+                         -> approval -> execute -> verify -> audit.
+                         v0.5 split into two-phase: preview() (stages
+                         1-3, never executes, not audited) +
+                         run_previewed() (stages 4-7 on the SAME
+                         validated action); run() = composition of the
+                         two (one implementation per stage).  Adds
+                         plan_digest() + ApprovalToken (approval bound
+                         to one exact plan) and an optional progress
+                         callback ("executing"/"verifying").
     cli.py               `python3 -m ai_core.cli` interface
 ai_runtime/              Local AI runtime integration
     ollama_client.py     stdlib-only Ollama HTTP client (never pulls models)
@@ -64,8 +72,37 @@ integrations/            Pluggable action handlers (the extension point)
         libreoffice.py   LibreOfficeAdapter: Writer/Calc root discovery,
                          find/read/activate/enter/save with revalidation
         tools.py         the 7 automation handlers re-checking permissions
-        sequence.py      TaskSequenceRunner (stop-on-failure, per-step records)
+        sequence.py      TaskSequenceRunner (stop-on-failure, per-step
+                         records; optional step_observer for live progress)
         mcp.py           future-MCP tool descriptors only (no server/transport)
+taskui/                  v0.5 task experience (UI-agnostic core + thin view)
+    lifecycle.py         the task state machine (10 states) with a
+                         validated transition table; TaskRecord (curated,
+                         display-safe fields; the live pipeline preview
+                         is kept out of serialization)
+    history.py           TaskHistory: persistent, validated, display-only
+                         JSONL task history (<state_dir>/task_history.jsonl,
+                         0600/0700); schema-validated on read; malformed
+                         records skipped and counted, never executed
+    manager.py           TaskManager: the ONLY bridge between a UI and
+                         the trusted pipeline; one worker thread per task;
+                         approval gate blocks on an event the UI releases
+                         via approve()/reject()/cancel(); never executes
+                         anything itself
+    presenter.py         pure, headless view-model (no GTK, no I/O):
+                         submission validation, plan badges, risk notes,
+                         step rendering, verification evidence, history
+                         rows/detail, status labels, bounded untrusted text
+    status.py            honest capability probes (AI runtime reachable?
+                         model configured/installed? automation bindings
+                         importable? offline posture) — read-only, injectable
+    gtk_app.py           thin GTK4 (PyGObject) view: renders presenter
+                         dicts, forwards intents to the manager, marshals
+                         worker-thread updates with GLib.idle_add; inserts
+                         ALL dynamic text as plain text (never markup)
+    __main__.py          `python3 -m taskui` entry point (--llm, --dry-run,
+                         --check headless self-check, --smoke scripted
+                         headless lifecycle walkthrough)
 tests/                   unittest suite (temporary sandboxes + in-memory
                          accessibility trees only)
 docs/                    ARCHITECTURE.md, SECURITY.md
@@ -120,6 +157,128 @@ cli.print_report()  -> human-readable outcome + exit code
 
 Each stage is a separate object with a single responsibility, so a
 future GUI or MCP server can drive the same `TaskPipeline`.
+
+### Two-phase pipeline (v0.5)
+
+The desktop task experience needs to *show* a plan before anything
+runs, then continue the *same* validated action once the user decides.
+`TaskPipeline` therefore exposes the loop as two composable methods —
+with exactly one implementation of every stage:
+
+```
+ preview(command)  ->  TaskPreview                      (stages 1-3)
+   parse -> plan -> permission check
+   * NEVER executes
+   * NOT audited (nothing was attempted)
+   carries: the validated action, resolved target, proposal text,
+            requires_approval, plan_digest, and the shared TaskReport
+
+ run_previewed(preview, approval=..., progress=...)     (stages 4-7)
+   re-check permissions at execution time (defence in depth — the
+     world may have changed while the user was deciding)
+   approval  (None = interactive approver | ApprovalToken | False)
+   execute -> verify -> audit (one audit record per attempt)
+   progress("executing" / "verifying") for live status
+```
+
+`run(command)` is now simply
+`run_previewed(preview(command))` — the CLI path is unchanged and its
+behaviour is pinned by parity tests.
+
+**Approval binds to one exact plan.** `plan_digest(action)` is a
+sha256 of the canonical (sorted-key) JSON of the validated action,
+truncated to 16 hex chars. An `ApprovalToken(digest)` handed to
+`run_previewed` is honoured only while the digest of the action about
+to execute still equals the approved one; otherwise the run is an
+honest rejection (`approval="invalidated"`, nothing executed). A bare
+`True` is deliberately *not* an approval mechanism — approval must be
+bound to a plan, never granted to "whatever comes next".
+
+## Task experience (taskui/, v0.5)
+
+The task experience is the first user-facing surface. It sits **on
+top of** the trusted core and adds no second execution engine, no
+second permission system and no direct execution of anything.
+
+```
+ gtk_app.py       thin GTK4 view: renders presenter dicts, forwards
+    |             user intents (submit/approve/reject/cancel/history),
+    |             marshals worker-thread updates via GLib.idle_add.
+    |             Executes nothing; inserts all dynamic text as plain
+    |             text (never Pango markup).
+    v
+ presenter.py     pure view-model (headless, fully unit-tested):
+    |             submission validation, plan rows + badges, risk
+    |             notes, step rendering, verification evidence,
+    |             history rows/detail, status labels, honest
+    |             suggestions for unsupported requests.
+    v
+ manager.py       TaskManager — one worker thread per task.  Calls
+    |             pipeline.preview(), shows the plan, blocks on an
+    |             approval Event the UI releases via approve() (with
+    |             the displayed digest) / reject() / cancel(), then
+    |             pipeline.run_previewed(ApprovalToken(digest)) with
+    |             live progress transitions.  Maps the report onto the
+    |             lifecycle honestly and writes task history.
+    v
+ ai_core.pipeline + integrations  (the existing trusted core —
+    unchanged in responsibility: it still owns permissions, approval,
+    execution, verification and audit)
+```
+
+**Task lifecycle** (`taskui/lifecycle.py`). Ten states, one validated
+transition table; an impossible jump raises `InvalidTransition`:
+
+```
+ draft ──> planning ──┬──> awaiting_approval ──> approved ──> executing
+                      │                                │          │
+                      ├──> executing (read-only/dry)   │          v
+                      ├──> failed (unsupported/denied) │      verifying
+                      └──> cancelled                   │          │
+                             ^                         │          ├──> completed
+                             └─────────────────────────┴──────────┤
+                                                                  ├──> failed
+                                                       cancelled <┘
+                                                       needs_attention
+```
+
+Honesty rules encoded in the graph: *completed* is reachable **only
+from verifying** (never straight from executing — dispatching an
+action does not complete a task); *cancelled* is only reachable
+**before execution starts** (a running action is never interrupted and
+no rollback is ever claimed); *needs_attention* is the honest state for
+"the world may have changed but the result could not be fully
+verified" (failed verification after a successful execution, or a
+partially applied sequence).
+
+**Local task history** (`taskui/history.py`). One sanitized JSON line
+per finished task in `<state_dir>/task_history.jsonl` (0600 file in a
+0700 directory, beside the audit log). Each record carries the task
+id, timestamps, the **masked** request (the pipeline's own
+`_mask_command` replaces user-supplied file content with a length
+marker), a curated plan summary, per-step statuses, the final result
+and the verification status — reusing the audit log's redaction, never
+duplicating sensitive content. It is **display-only by construction**:
+the module never imports the executor, planner, dispatcher or
+sequence runner (a single documented local import of the pipeline's
+*masking helper* is the only pipeline reference), there is no function
+that can execute, re-run or interpret a record, and the manager exposes
+no "run this history entry" path. Records are validated against a
+closed schema on read; malformed, unknown-version or hostile records
+are **skipped and counted** — never repaired, never executed, and never
+able to become instructions. It is a normal user-owned file, explicitly
+**not** claimed to be tamper-proof.
+
+**Honest capability status** (`taskui/status.py`). Read-only probes,
+all injectable for tests: is the local Ollama runtime reachable, is a
+model configured and installed (distinct honest answers, reusing the
+typed `OllamaError`s; an unexpected bug surfaces rather than being
+masked as "offline")? Are the AT-SPI bindings importable (an *import*
+check only — probing never opens a live desktop session)? Offline is
+stated as a fact about the design (the only network client in the
+codebase talks to a local Ollama server), not as a network probe. When
+AI is unavailable the deterministic parser keeps working and the status
+says so.
 
 ## The action model
 
@@ -400,7 +559,8 @@ ever started by the automated suite**; automation tests inject a fake
 AT-SPI module (in-memory accessible trees), fake `/proc` directories
 (`<pid>/comm` files), and fake clock/sleep callables, so **no real
 desktop is ever inspected or driven by the automated suite**. The
-v0.4 suite is **404 tests**: the full v0.1/v0.2 set (242, preserved
+v0.4 suite is **404 tests**; v0.5 adds **149 more** for a total of
+**553 tests**: the full v0.1/v0.2 set (242, preserved
 unchanged — covering supported/unsupported commands, traversal,
 symlink escapes, permission denial, approval rejection, verification
 failure, Ollama-unavailable behaviour, no-overwrite/no-delete
@@ -488,8 +648,74 @@ The spreadsheet/PDF pipeline tests skip themselves politely when
 `openpyxl`/`reportlab` is not installed; the pure-stdlib validator
 tests always run.
 
-Two separate **opt-in** manual smoke tests exist and are never invoked
-by the automated suite:
+Plus the 149 v0.5 tests (all headless — no display, no desktop, no
+window; the task experience is covered through the presenter and
+manager with mocked/sandboxed dependencies):
+
+* two-phase pipeline (`test_pipeline_twophase.py`) — `preview()`
+  never executes and never audits; `preview()` + `run_previewed()`
+  is behaviourally identical to `run()` (parity for read-only,
+  approved, rejected, dry-run and unsupported outcomes); approval
+  tokens execute only with a matching plan digest, a wrong/stale/
+  cross-plan digest is an honest rejection with nothing executed;
+  a bare `True` approval is never honoured; permissions are
+  re-checked at execution time (a checker that denies after the
+  preview blocks execution); `progress` reports `executing` then
+  `verifying`;
+* task lifecycle (`test_task_lifecycle.py`) — every legal transition,
+  every illegal jump rejected (`draft→completed`, `draft→executing`,
+  `planning→completed`, `executing→completed`, `verifying→executing`,
+  `needs_attention` only from executing/verifying), terminal states
+  absorbing, completed reachable only via verifying, cancellation
+  refused while executing/verifying/terminal;
+* task manager (`test_task_manager.py`) — intake validation
+  (empty/over-long/busy), read-only tasks completing with no approval
+  gate, mutating tasks waiting at `awaiting_approval` with nothing on
+  disk, approve → execute → verify → complete, reject → cancel with
+  nothing changed, wrong-digest approval refused, approval outside the
+  gate refused, cancellation before execution (never claiming
+  rollback), refusal to cancel a running action, unsupported/denied →
+  failed (never completed), execution failure → failed, verification
+  failure → `needs_attention` (never success), live per-step progress
+  for sequences, legal-transition invariants under real runs, worker-
+  thread update delivery, history written for completed/cancelled/
+  failed outcomes, history-write failures surfaced (not hidden),
+  requests masked in history, and an exploding `on_update` unable to
+  kill a task;
+* task history (`test_task_history.py`) — save/reload roundtrip,
+  newest-first ordering, 0600/0700 permissions, corrupt/unknown-
+  version/unknown-state/non-dict lines skipped and counted, binary
+  garbage handled, malformed step entries dropped (not repaired),
+  command/content redaction, bounded fields on read, hostile records
+  inert (no execution surface), the display-only public API, and the
+  source-level guarantee that history imports no execution code;
+* capability status (`test_task_status.py`) — AI unreachable /
+  no-model-configured / model-missing / ready, short probe timeout,
+  typed `OllamaError` handling, unexpected bugs surfacing (not masked
+  as "offline"), automation binding presence/absence, finder errors,
+  and the offline statement being a design fact;
+* presenter (`test_task_presenter.py`) — submission validation,
+  plan badges (read-only / needs-approval / unverifiable), sequence
+  step rows, risk notes (approval-invalidated, dry-run, launch
+  honesty), approval affordances only while awaiting with the exact
+  digest, tones per state, step marks/labels, verification evidence,
+  failed verification never presented as verified, bounded untrusted
+  text preserved as inert text, cancel affordances, honest
+  suggestions for unsupported/denied requests, history rows/detail
+  (always `replayable: False`);
+* security meta-checks (`test_taskui_security.py`) — AST-based (not
+  substring) analysis of every `taskui` module: no banned imports
+  (subprocess, pickle, ctypes, ...), no banned calls (`eval`, `exec`,
+  `compile`, `__import__`, `os.system`, `subprocess.*`, `pty.spawn`,
+  `socket.socket`, ...); only the manager and entry point import the
+  execution engine (`ai_core.pipeline/executor/planner/permissions/
+  verifier`, `integrations`); history's only nested engine import is
+  the documented masking helper; the GTK view never imports the engine
+  and never calls `set_markup` (no Pango) — untrusted text can never
+  be rendered as markup; and the package imports headless.
+
+Three separate **opt-in** manual smoke tests exist and are never
+invoked by the automated suite:
 
 * `ALWIN_MANUAL_SMOKE=1 scripts/manual_smoke_apps.sh` — read-only
   detection and one real, personally approved launch of LibreOffice
@@ -503,6 +729,14 @@ by the automated suite:
   throwaway sandbox home. If the desktop does not expose LibreOffice
   on the accessibility bus, every step fails honestly instead of
   guessing (observed on the dev machine — see the automation section).
+* `ALWIN_UI_SMOKE=1 scripts/manual_smoke_ui.sh` — the v0.5 task
+  experience: the headless lifecycle walkthrough (`python3 -m taskui
+  --smoke`, real manager + trusted pipeline: read-only completion, a
+  rejected mutating task proving nothing runs, then the approved task
+  created and verified on disk), the headless capability check, the
+  history it wrote, and finally the real GTK4 window on the developer's
+  display. Everything inside a throwaway sandbox home; skipped with an
+  honest message if GTK4 or a display is missing.
 
 ## Future compatibility
 

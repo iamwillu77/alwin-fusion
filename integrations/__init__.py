@@ -95,6 +95,7 @@ def build_default_dispatcher(
     *,
     app_tools: "ApplicationTools | None" = None,
     automation_tools: "AutomationTools | None" = None,
+    step_observer: "Callable[..., None] | None" = None,
 ) -> ActionDispatcher:
     """Dispatcher with the filesystem, document, application and
     desktop-automation integrations.
@@ -103,6 +104,12 @@ def build_default_dispatcher(
     test doubles (fake launcher, fake accessibility session, fake
     adapters); the defaults build the real read-only probes and
     argv-only launchers.
+
+    ``step_observer`` (optional) receives
+    ``(index, total, action_name, status, error=None)`` at each
+    ``task_sequence`` step boundary — observation only, used by the
+    task experience (v0.5) for live progress.  It can neither
+    influence, skip nor approve any step.
     """
     tools = FileSystemTools(checker)
     handlers = make_fs_handlers(tools)
@@ -249,7 +256,9 @@ def build_default_dispatcher(
     )
     # The sequence runner closes over the dispatcher it dispatches
     # through (built above), re-checking permissions per step.
-    sequence_runner = TaskSequenceRunner(checker, dispatcher=dispatcher)
+    sequence_runner = TaskSequenceRunner(
+        checker, dispatcher=dispatcher, step_observer=step_observer
+    )
     dispatcher.register(
         "task_sequence",
         lambda action, *, dry_run=False: sequence_runner.run(

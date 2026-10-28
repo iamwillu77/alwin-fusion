@@ -9,6 +9,7 @@ output: model proposals re-enter through ``planner.validate_action``.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import uuid
 from dataclasses import dataclass, field
@@ -66,6 +67,64 @@ class TaskReport:
     @property
     def ok(self) -> bool:
         return self.status in OK_STATUSES
+
+
+def plan_digest(action: Optional[dict]) -> str:
+    """Stable digest of one validated action (the whole plan).
+
+    Used by the task-experience layer (v0.5) to bind a user approval
+    to the exact validated action that was displayed: if anything
+    changes the plan afterwards, the digest no longer matches and the
+    approval is invalidated.  ``None``/empty actions digest to ``""``.
+    """
+    if not action:
+        return ""
+    canonical = json.dumps(
+        action, sort_keys=True, ensure_ascii=False, separators=(",", ":")
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+
+
+@dataclass(frozen=True)
+class ApprovalToken:
+    """A user approval bound to one exact plan digest.
+
+    Handing a token to :meth:`TaskPipeline.run_previewed` is the
+    two-phase (GUI) equivalent of the interactive approver callback:
+    the pipeline recomputes the digest of the action it is about to
+    execute and refuses (honest rejection, nothing executed) when it
+    does not match the approved one.
+    """
+
+    digest: str
+
+
+@dataclass
+class TaskPreview:
+    """Result of pipeline stages 1-3 (parse, plan, permission).
+
+    A preview **never executes anything and is not audited** (nothing
+    was attempted).  It carries the actual validated action the
+    trusted core produced — a UI must display this, never a
+    re-derived or relaxed variant — plus everything
+    :meth:`TaskPipeline.run_previewed` needs to continue with the
+    *same* report (shared task id, parser, notes).
+    """
+
+    report: TaskReport
+    action: Optional[dict]
+    permission: Optional[dict]
+    proposal: Optional[str]
+    requires_approval: bool
+    status: Optional[str]  # None when planning succeeded
+    error: Optional[str]
+    plan_digest: str
+    clean_command: str
+
+    @property
+    def planned(self) -> bool:
+        """True when a validated action is ready for execution."""
+        return self.status is None and self.action is not None
 
 
 class TaskPipeline:
@@ -289,12 +348,23 @@ class TaskPipeline:
             return None, STATUS_FAILED, str(exc)
         return action, None, None
 
-    def run(self, command: str, *, dry_run: bool = False) -> TaskReport:
-        """Execute the full pipeline for *command*."""
+    def preview(self, command: str, *, dry_run: bool = False) -> TaskPreview:
+        """Stages 1-3 (parse -> plan -> permission).  Never executes.
+
+        This is what a GUI shows the user: the *actual* validated
+        action from the trusted core (never a re-derived variant), the
+        resolved target, and whether approval will be required.  A
+        preview never mutates the world and is not audited — nothing
+        was attempted yet; the audit record is written when
+        :meth:`run_previewed` completes the attempt.
+        """
         task_id = self._new_task_id()
         clean_command = (command or "").strip()
         report = TaskReport(
-            task_id=task_id, status=STATUS_FAILED, command=command or "", dry_run=dry_run
+            task_id=task_id,
+            status=STATUS_FAILED,
+            command=command or "",
+            dry_run=dry_run,
         )
 
         action, early_status, early_error = self._plan(clean_command, report)
@@ -302,13 +372,32 @@ class TaskPipeline:
 
         if early_status == STATUS_EXIT:
             report.status = STATUS_EXIT
-            return report
+            return TaskPreview(
+                report=report,
+                action=None,
+                permission=None,
+                proposal=None,
+                requires_approval=False,
+                status=STATUS_EXIT,
+                error=None,
+                plan_digest="",
+                clean_command=clean_command,
+            )
 
         if early_status is not None:
             report.status = early_status
             report.error = early_error
-            self._record_audit(report, clean_command)
-            return report
+            return TaskPreview(
+                report=report,
+                action=action,
+                permission=None,
+                proposal=None,
+                requires_approval=False,
+                status=early_status,
+                error=early_error,
+                plan_digest="",
+                clean_command=clean_command,
+            )
 
         # ---- Stage 3: permission check -------------------------------- #
         decision = self.checker.check_action(action)
@@ -320,8 +409,17 @@ class TaskPipeline:
         if not decision.allowed and not is_explain:
             report.status = STATUS_DENIED
             report.error = decision.reason
-            self._record_audit(report, clean_command)
-            return report
+            return TaskPreview(
+                report=report,
+                action=action,
+                permission=report.permission,
+                proposal=None,
+                requires_approval=False,
+                status=STATUS_DENIED,
+                error=decision.reason,
+                plan_digest=plan_digest(action),
+                clean_command=clean_command,
+            )
 
         if is_explain:
             report.proposal = describe_action(action, home=self.checker.home)
@@ -332,11 +430,90 @@ class TaskPipeline:
         else:
             report.proposal = describe_action(action, home=self.checker.home)
 
+        return TaskPreview(
+            report=report,
+            action=action,
+            permission=report.permission,
+            proposal=report.proposal,
+            requires_approval=is_mutating and not dry_run,
+            status=None,
+            error=None,
+            plan_digest=plan_digest(action),
+            clean_command=clean_command,
+        )
+
+    def run_previewed(
+        self,
+        preview: TaskPreview,
+        *,
+        approval=None,
+        progress: Optional[Callable[[str], None]] = None,
+    ) -> TaskReport:
+        """Stages 4-7 of a preview: approval -> execute -> verify -> audit.
+
+        ``approval`` selects how approval is obtained:
+
+        * ``None`` — the interactive ``approver`` callback (the CLI
+          path; anything but an explicit yes means no),
+        * an :class:`ApprovalToken` — the two-phase (GUI) path: the
+          approval is valid **only** while the digest of the action
+          about to execute still equals the digest the user approved;
+          a changed plan is an honest rejection with nothing executed,
+        * ``False`` — the user rejected the displayed plan.
+
+        A bare ``True`` is deliberately not accepted: approval must be
+        bound to a plan, never granted to "whatever comes next".
+
+        The permission decision is **re-checked here at execution
+        time**, even though :meth:`preview` already checked it — in the
+        two-phase flow the world may have changed while the user was
+        deciding.  ``progress`` (optional) receives stage names
+        (``"executing"``, ``"verifying"``) for honest live status.
+        """
+        report = preview.report
+
+        if preview.status == STATUS_EXIT:
+            return report
+        if preview.status is not None:
+            # Planning failed (unsupported / content-source problem):
+            # the attempt is audited exactly like it always was.
+            self._record_audit(report, preview.clean_command)
+            return report
+
+        action = preview.action
+        is_explain = action["action"] == "explain"
+        is_mutating = action["action"] in MUTATING_ACTIONS
+
+        # ---- Re-check permissions at execution time (defence in depth) ---- #
+        fresh = self.checker.check_action(action)
+        if not fresh.allowed and not is_explain:
+            report.status = STATUS_DENIED
+            report.error = fresh.reason
+            self._record_audit(report, preview.clean_command)
+            return report
+
         # ---- Stage 4: approval (only for mutating actions) ------------- #
         if is_mutating:
             self.on_proposal(report.proposal)
-            if dry_run:
+            if report.dry_run:
                 report.approval = "dry_run"
+            elif isinstance(approval, ApprovalToken):
+                if approval.digest != preview.plan_digest:
+                    report.approval = "invalidated"
+                    report.status = STATUS_REJECTED
+                    report.error = (
+                        "The plan changed after it was approved; the "
+                        "approval no longer applies. Nothing was executed."
+                    )
+                    self._record_audit(report, preview.clean_command)
+                    return report
+                report.approval = "approved"
+            elif approval is False:
+                report.approval = "rejected"
+                report.status = STATUS_REJECTED
+                report.error = "User rejected the proposed action."
+                self._record_audit(report, preview.clean_command)
+                return report
             else:
                 try:
                     approved = bool(self.approver(report.proposal))
@@ -346,14 +523,18 @@ class TaskPipeline:
                 if not approved:
                     report.status = STATUS_REJECTED
                     report.error = "User rejected the proposed action."
-                    self._record_audit(report, clean_command)
+                    self._record_audit(report, preview.clean_command)
                     return report
 
         # ---- Stage 5: execution ---------------------------------------- #
-        execution = self.executor.execute(action, dry_run=dry_run)
+        if progress is not None:
+            progress("executing")
+        execution = self.executor.execute(action, dry_run=report.dry_run)
         report.execution = execution
 
         # ---- Stage 6: verification ------------------------------------- #
+        if progress is not None:
+            progress("verifying")
         verification = self.verifier.verify(action, execution)
         report.verification = verification.as_dict()
 
@@ -363,11 +544,27 @@ class TaskPipeline:
         elif verification.status == "failed":
             report.status = STATUS_FAILED
             report.error = verification.message
-        elif dry_run:
+        elif report.dry_run:
             report.status = STATUS_DRY_RUN
         else:
             report.status = STATUS_SUCCESS
 
         # ---- Stage 7: audit -------------------------------------------- #
-        self._record_audit(report, clean_command)
+        self._record_audit(report, preview.clean_command)
         return report
+
+    def run(
+        self,
+        command: str,
+        *,
+        dry_run: bool = False,
+        progress: Optional[Callable[[str], None]] = None,
+    ) -> TaskReport:
+        """Execute the full pipeline for *command* (one-phase path).
+
+        Composition of :meth:`preview` and :meth:`run_previewed` with
+        the interactive approver — there is exactly one implementation
+        of every stage.
+        """
+        preview = self.preview(command, dry_run=dry_run)
+        return self.run_previewed(preview, progress=progress)

@@ -305,6 +305,79 @@ before rendering:
 * There is deliberately no `--yes`/`--force` bypass in this milestone.
 * `--dry-run` performs no writes, launches no process, and never even
   asks for approval.
+* v0.5 (two-phase / GUI): approval is **bound to the exact validated
+  plan the user was shown**, via a sha256 `plan_digest` of the
+  canonical action JSON. `run_previewed(..., approval=ApprovalToken
+  (digest))` recomputes the digest of the action it is about to
+  execute and refuses (honest rejection, nothing executed, approval
+  marked `invalidated`) on any mismatch — a plan that changed after
+  approval can never run on the strength of the stale approval
+  (tested). A bare `True` is deliberately **not** an approval
+  mechanism; only an `ApprovalToken`, the interactive approver, or an
+  explicit `False` (rejection) are accepted. The UI-layer approval the
+  manager collects is handed back to the pipeline, which re-checks
+  permissions at execution time even though both `preview()` and the
+  UI already checked them (the world may have changed while the user
+  was deciding). The UI can never grant itself permission: it has no
+  access to the permission engine, and the pipeline does not trust it.
+
+### 3c. Task experience (v0.5) and its new attack surface
+
+The desktop task experience (`taskui/`) is a **thin view plus a
+session manager over the existing trusted core**. It adds no second
+execution engine, no second permission system, and no new action
+types. Its own security properties and the new surface it introduces:
+
+* **The window executes nothing.** `taskui/gtk_app.py` renders
+  presenter dictionaries and forwards five user intents (submit,
+  approve, reject, cancel, history selection) to the manager. It has
+  no subprocess, no code evaluation, no file writes, and no import of
+  the execution engine — enforced by AST-based meta-checks that parse
+  every `taskui` module and fail the suite if `subprocess`, `os.system`,
+  `eval`, `exec`, `compile`, `__import__`, `socket.socket`, etc. appear
+  as imports or calls, or if any module except the manager/entry point
+  imports `ai_core.pipeline/executor/planner/permissions/verifier` or
+  `integrations` (tested).
+* **Untrusted text is rendered as plain text, never markup.** Every
+  dynamic string — the user's request, the model's proposal, file
+  names, application/window titles, control text, history records and
+  error messages — is inserted with `set_text`/plain `Gtk.Label`, and
+  the view never imports Pango nor calls `set_markup` (tested). Such
+  content can therefore never impersonate UI chrome, inject markup, or
+  influence a permission/approval/policy decision; the presenter only
+  ever truncates and passes through curated fields.
+* **New attack surface, stated honestly:**
+  1. *The task-history file* (`<state_dir>/task_history.jsonl`) is a
+     new user-owned data file an attacker with local write access could
+     corrupt or forge. It is **display-only by construction**: the
+     module imports no execution code, exposes no run/replay/execute
+     function, validates every record against a closed schema on read,
+     and skips-and-counts anything malformed or hostile — a forged
+     record can, at worst, be *displayed* (sanitized and bounded), and
+     nothing in Alwin Fusion ever replays it (tested). It is **not
+     tamper-proof** and makes no integrity claim; it can supplement
+     but never replace the audit log.
+  2. *The worker-thread approval bridge* (`taskui/manager.py`) blocks
+     a worker thread on an event the UI releases. Approval carries the
+     displayed plan digest; a wrong digest is refused before the worker
+     wakes, and the pipeline independently re-verifies the digest and
+     re-checks permissions at execution time, so a compromised UI
+     thread cannot approve a plan the user did not see or bypass the
+     permission engine (tested).
+  3. *GTK/CSS theming* loads a fixed, embedded stylesheet from a
+     bytes literal; no external theme file, URI or user-controlled CSS
+     is read.
+* **Lifecycle honesty.** The state machine refuses impossible
+  transitions by construction: a task cannot execute before planning
+  and validation; `completed` is reachable only from `verifying`
+  (dispatching an action never completes a task); `cancelled` is only
+  reachable before execution starts, and a cancelled task never claims
+  rollback; `needs_attention` is the honest state for a world change
+  whose result could not be verified. A failed sequence preserves
+  truthful per-step records (`ok`/`failed`/`denied`/`skipped`), never
+  reporting complete success when a required step failed (tested).
+* **One task at a time.** The manager refuses a second submission
+  while one is running, so there is no queue to race or confuse.
 
 ### 4. Verification before success
 
@@ -561,6 +634,35 @@ before rendering:
     per-step verification catch *errors*, not *illogical-but-valid*
     plans. Approval shows the user every step before anything runs,
     and `--dry-run` enumerates the full sequence without executing.
+26. **The task-history file is not tamper-proof and is never
+    replayed.** `task_history.jsonl` is a plain user-owned file
+    (modes 0600/0700) — the same user or root can edit it. It is
+    validated against a closed schema on read, malformed/hostile
+    records are skipped and counted, and nothing in Alwin Fusion ever
+    executes or replays a record (there is no code path from history
+    to execution), but a local attacker who can write it can still
+    *forge what the history displays*. The audit log remains the
+    authoritative record; the history is a convenience view.
+27. **The v0.5 task window has not been tested on a clean
+    installation.** GTK4/PyGObject availability, font metrics and
+    window behaviour were verified only on the development machine
+    (Ubuntu 26.04.1, GNOME/Wayland) via the opt-in smoke test and the
+    headless lifecycle walkthrough. No clean-install support is
+    claimed.
+28. **The GUI approval bridge trusts the desktop session.** Approval
+    travels from the GTK main loop through `TaskManager.approve()`
+    (carrying the displayed plan digest) to the pipeline, which
+    independently re-verifies the digest and re-checks permissions at
+    execution time. This defends against a *changed plan* and against
+    the UI granting itself permission, but it cannot defend against a
+    compromised desktop session (a hostile process driving the same
+    input devices as the user) — that is the same trust boundary as
+    the CLI's `y/N` prompt.
+29. **One task at a time; no queue.** The manager refuses a second
+    submission while one is running. This is a deliberate simplicity
+    (no inter-task ordering or scheduling guarantees), not a
+    concurrency control: there is still no file locking between
+    separate Alwin Fusion processes (see 5).
 
 ## Reporting security issues
 
