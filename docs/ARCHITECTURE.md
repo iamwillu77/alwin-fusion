@@ -101,8 +101,58 @@ taskui/                  v0.5 task experience (UI-agnostic core + thin view)
                          worker-thread updates with GLib.idle_add; inserts
                          ALL dynamic text as plain text (never markup)
     __main__.py          `python3 -m taskui` entry point (--llm, --dry-run,
-                         --check headless self-check, --smoke scripted
-                         headless lifecycle walkthrough)
+                         --companion opens the task window together with the
+                         Alwin companion, --check headless self-check,
+                         --smoke scripted headless lifecycle walkthrough)
+companion/                 v0.7 Alwin companion (presentation layer only)
+    states.py            the 16-state character controller: validated
+                         transition graph, calm safe fallbacks, truthful
+                         target recovery, expression/label tables, auto-
+                         return delays, error-isolated renderer dispatch
+                         (an animation exception is recorded, never raised)
+    renderer.py          the renderer interface (CharacterRenderer ABC:
+                         show_state/set_expression/tick/attach/detach/
+                         start/stop/is_available) — the seam a future 3D
+                         renderer implements — plus NullRenderer for
+                         headless use
+    character.py         the full-body character drawing core (pure cairo,
+                         headless): a shared float-only Pose dataclass
+                         (head/face/breath/hand-target knobs), per-state
+                         pose builders computed from ELAPSED TIME (never
+                         frame counts), a natural blink rhythm, two-link
+                         arm IK, shared components (head/hair/eyes/hoodie/
+                         arms/hands/legs/shoes) and per-state props (desk,
+                         notebook, laptop, book, magnifier, wrench,
+                         sparkles, thought dots, z's, sun, sweat drop)
+    renderer2d.py        the GTK implementation: re-exports the character
+                         core, blends poses (~0.25s) across state changes,
+                         adaptive frame cadence (~12fps lively, ~6fps
+                         idle), AssetStore for optional <state>/frame.png
+                         overrides (missing/corrupt asset = graceful
+                         vector fallback)
+    adapter.py           TaskEventAdapter: the ONLY bridge from trusted
+                         TaskRecords to character states + bounded curated
+                         speech; celebrates only on `completed`, maps
+                         approval to waiting_for_approval, holds no manager
+                         reference and exposes no approve/execute surface
+    presentation.py      pure view-model (bubble/subtitle/task status/
+                         controls/settings) — bounded text, no approval
+                         affordance, no digests or error internals
+    greeting.py          configurable startup greeting: name from
+                         env/settings (never hard-coded), quiet hours,
+                         once-per-session + optional once-per-day marker
+    settings.py          closed-schema local JSON preferences (0600),
+                         cosmetic-only — the trusted core never reads it
+    voice.py             VoiceEngine ABC + NullVoice (honest "no engine
+                         connected"; no audio, no microphone, no model)
+    window.py            thin GTK4 view: speech bubble, character area,
+                         subtitle/status, controls, settings popover;
+                         marshals worker-thread records with GLib.idle_add;
+                         hides on close; never renders markup
+    __main__.py          `python3 -m companion` (--check/--smoke headless,
+                         --no-greeting)
+    assets/character/    per-state directories (frame.png convention) +
+                         README identifying the artwork as placeholder
 tests/                   unittest suite (temporary sandboxes + in-memory
                          accessibility trees only)
 docs/                    ARCHITECTURE.md, SECURITY.md
@@ -110,6 +160,9 @@ scripts/run_tests.sh     Test entry point
 scripts/manual_smoke_apps.sh  opt-in real-launch smoke test (ALWIN_MANUAL_SMOKE=1)
 scripts/manual_smoke_automation.sh  opt-in real-AT-SPI automation smoke test
                          (ALWIN_AUTOMATION_SMOKE=1)
+scripts/manual_smoke_ui.sh     opt-in real task-window smoke test (ALWIN_UI_SMOKE=1)
+scripts/manual_smoke_companion.sh  opt-in real companion smoke test
+                         (ALWIN_COMPANION_SMOKE=1)
 requirements.txt         optional v0.2 document dependencies
 ```
 
@@ -279,6 +332,178 @@ stated as a fact about the design (the only network client in the
 codebase talks to a local Ollama server), not as a network probe. When
 AI is unavailable the deterministic parser keeps working and the status
 says so.
+
+## Alwin companion (companion/, v0.7)
+
+A presentation layer **on top of** the task experience. It gives the
+desktop a small, persistent character window (Alwin) whose animation
+state reflects *real* task states. Five responsibilities stay strictly
+separated, each depending only on the one below it:
+
+```
+window.py        GTK view (widgets, timers, marshalling) — executes nothing
+   │  uses
+presentation.py  pure view-model: bubble / subtitle / status / controls
+   │  driven by
+adapter.py       trusted TaskRecord  ──►  character state + bounded speech
+   │  enters states in
+states.py        CharacterController: validated transitions + fallbacks
+   │  dispatches to
+renderer.py      CharacterRenderer interface  (renderer2d.py implements it
+   │             today; a future renderer3d.py implements the same one)
+character.py     pure-cairo Pose system + full-body drawing core
+                 (renderer2d.py drives it; renderer3d.py could reuse poses)
+```
+
+**State controller** (`states.py`) — 16 explicit states with a single
+transition table (`TRANSITIONS`); an edge that is not in the table is
+rejected: from a calm state nothing changes, from an active state the
+controller falls back through a calm state (one hop, never inventing a
+state), and a *truthful* target such as `waiting_for_approval` or
+`celebrating` is recovered via that calm hop so a trusted result is
+never lost to a fallback. Every renderer call is wrapped: an animation
+exception is appended to `renderer_errors` (bounded) and **cannot
+propagate** — presentation bugs are structurally unable to reach the
+task engine. `force()` (used only for startup/sleep) still validates
+state membership. The controller executes no operating-system commands;
+a source-level meta-test pins its imports to `time`/`typing`.
+
+**Renderer interface** (`renderer.py`) — `show_state(state,
+expression=)`, `set_expression()`, `tick(now)`, `attach(target)`,
+`detach()`, `start()`, `stop()`, `is_available`. States are validated
+against the shared vocabulary (a renderer may not invent states);
+expressions degrade to `neutral`. Rendering is host-driven: no
+renderer starts its own thread — the GTK layer owns the frame clock
+and calls `start()`/`stop()` as the window is mapped/unmapped, so no
+timer runs while the character is hidden. `NullRenderer` is the
+headless implementation used by `--check`, `--smoke` and tests.
+
+**Character core** (`character.py`) — the v0.7 full-body character:
+an *original* cartoon boy drawn procedurally with cairo (large head,
+tousled dark-brown hair, big brown eyes with gaze and brows, small
+nose, friendly mouth, blush, ears, neck, blue hoodie with an original
+ALWIN chevron emblem, two jointed arms with hands, legs, red
+sneakers, soft ground shadow). One reusable `Pose` dataclass (floats
+only: head offset/tilt, gaze, blink, eye openness, brows, mouth,
+blush, bob/sway/lean, breathing phase, two hand targets with elbow
+bend side, leg swings) is the single source of truth for *every*
+state — `compute_pose(state, t, expression)` builds it as a **pure
+function of elapsed time** (never a frame counter, so delayed frames
+stay correct and renders are deterministic), hands are reached with
+two-link IK so arms always bend naturally, and the whole 220×260
+design box is scaled **uniformly and centred** onto any widget (never
+distorted, never clipped). `Pose.lerp` gives smooth ~0.25 s blends
+across state changes. A jittered, hash-based blink rhythm (~3.4 s
+cycle, occasional double blinks) and slow breathing keep the character
+alive in every state. Per-state props (desk + notebook + pencil,
+laptop with floating `< / >` glyphs, book, magnifier, wrench + gear,
+sparkles, thought dots, drifting `z`'s, sweat drop, rising sun, pulsing
+`…`) are honest depictions of activity, never outcome claims. The
+module imports only cairo/math/dataclasses/typing — pinned by a source
+meta-test — so a future 3D renderer can reuse the pose vocabulary
+without dragging in any trusted-core concept.
+
+**2D renderer** (`renderer2d.py`) — the GTK implementation of the
+renderer interface on top of the character core: it re-exports
+`draw_character`, advances elapsed time on each frame, **blends
+poses** (~0.25 s) whenever the state changes so transitions never
+snap, and picks an **adaptive cadence** (~12 fps for lively states,
+~6 fps for the subtle `idle` breathing/blinking; `sleeping`/`resting`
+draw a single frame and stop entirely). Optional per-state overrides
+live at `companion/assets/character/<state>/frame.png` (`AssetStore`):
+present → shown (scaled); missing or corrupt → the vector character
+renders (graceful, never a crash). Drawing is wrapped so an animation
+bug degrades to a static frame instead of raising — and, via the
+controller's isolation, can never reach the task engine.
+
+**Task-event adapter** (`adapter.py`) — the only bridge from the
+trusted pipeline: it reads curated fields of a `TaskRecord`
+(`state`, `plan`, `steps`) and enters a character state:
+
+| Task record state | Character state |
+|---|---|
+| `planning` | `thinking` |
+| `awaiting_approval` | `waiting_for_approval` (speech points at the task window) |
+| `approved` | `walking` (2D transition to work) |
+| `executing` | `writing` / `coding` / `reading` when the action identifies it, else `working` |
+| `verifying` | `verifying` |
+| `completed` | `celebrating` — the **only** path to celebration |
+| `needs_attention`, `failed` | `error` |
+| `cancelled` | calm `idle` (a user choice, not a failure) |
+
+`coding` is used only for `create_text_file` with a recognised
+code/config extension; every other target is honestly `writing`. A
+`task_sequence` reports its currently *running* step's kind. Speech
+lines are curated per state, bounded (≤ 160 chars) and never include
+file content, model output or error internals. The adapter holds no
+manager reference, exposes no approve/reject/execute method and returns
+nothing — its power is limited to "what the character is doing".
+
+**Companion window** (`window.py`) — a thin GTK4 view: speech bubble,
+character area, accessible subtitle (text alternative to the
+animation), minimal task status, and controls (open task window, hide,
+settings with greeting/subtitles/always-on-top, honest voice status).
+Worker-thread records are marshalled to the main loop with
+`GLib.idle_add`; all dynamic text uses `set_text` (never markup).
+Closing hides the window; when hosted by the task application the task
+engine keeps running. Re-activation presents the existing window
+instead of building a duplicate, and `map`/`unmap` handlers start/stop
+the renderer's frame timer so nothing animates off-screen. Focus:
+`python3 -m taskui --companion` presents the task window last so the
+companion never steals keyboard focus. Always-on-top is off by default
+and best-effort (Wayland may ignore it). No web server, no remote
+service, no new threads beyond the manager's existing worker.
+
+**Event feed** (`taskui/manager.py`, additive) — `add_observer()` /
+`remove_observer()` deliver the same curated `TaskRecord` the task
+window already renders, in addition to (never instead of) the single
+`on_update` slot. Observers are read-only: the manager ignores their
+return values, never asks them for permission, and wraps each call in
+its own try/except — a companion or animation bug cannot affect a task.
+
+**Greeting** (`greeting.py`) — configurable name
+(`ALWIN_COMPANION_NAME` or settings; default `friend`, never a
+hard-coded user), enable toggle, quiet hours (`HH:MM-HH:MM`, wraps
+midnight), once per session plus an optional once-per-day 0600 marker;
+text-only (the bubble), no audio, no microphone, no presence
+assumption, no re-greet on redraw. `--no-greeting` disables it for one
+run. The window *sequences* the greeting through real states — a
+`waking_up` stretch/yawn, then `greeting` (wave + bubble), settling
+back to `idle` via the normal transition graph — with every timer id
+tracked and cancelled on teardown.
+
+**Voice** (`voice.py`) — a small `VoiceEngine` ABC (`speak`/`stop`/
+`status`/`available`) with `NullVoice` implementing it honestly:
+`available = False`, `speak()` returns `False`, nothing plays. A future
+local engine implements the same interface and is passed to the window;
+states, adapter, greeting and speech content do not change. No model
+install, no cloud, no fake engine.
+
+### 2D → 3D migration strategy
+
+The renderer interface is the *only* seam that changes:
+
+1. implement `CharacterRenderer` in a new `companion/renderer3d.py`
+   (attach to a viewport widget, translate `show_state`/`expression`
+   into scene/animation-clip selections, advance `tick`),
+2. construct it in `CompanionWindow` (renderer selection is already a
+   constructor argument) and keep everything else — state vocabulary,
+   transition graph, adapter mapping, greeting, speech, presentation,
+   controls, observer feed — byte-for-byte unchanged,
+3. keep 3D-only concepts (scene graph, room/bed/desk props, meshes,
+   lip-sync timing) inside that module: `ai_core`/`integrations` must
+   never learn about them (enforced by the package-wide import
+   meta-checks).
+
+The v0.7 `Pose` system eases this migration: the per-state pose
+builders in `character.py` are renderer-agnostic animation *recipes*
+(elapsed-time functions over float knobs) that a 3D skeleton could
+consume directly, so the motion design survives even if the artwork
+does not.
+
+v0.7 deliberately adds **no** game engine, 3D runtime, model load or
+sprite pipeline; the future room/walking/object-interaction/lip-sync
+features are planned, not present.
 
 ## The action model
 
@@ -545,6 +770,12 @@ note rather than silently ignored.
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Local Ollama endpoint |
 | `OLLAMA_MODEL` | *(empty)* | Model name; empty disables `--llm` |
 | `OLLAMA_TIMEOUT` | `30` | HTTP timeout (seconds) |
+| `ALWIN_COMPANION_NAME` | settings, else `friend` | Companion greeting name |
+| `ALWIN_COMPANION_GREETING` | settings, else on | `0/false/no/off` disables the greeting |
+| `ALWIN_COMPANION_QUIET_HOURS` | settings, else off | `HH:MM-HH:MM` no-greeting window |
+
+Companion preferences persist to `<state_dir>/companion_settings.json`
+(0600, closed schema, cosmetic-only — never read by the trusted core).
 
 CLI flags: `--dry-run`, `--llm`, `--root DIR` (repeatable),
 `--ai-status`, `--show-config`, `--version`, `--help`.
@@ -559,8 +790,12 @@ ever started by the automated suite**; automation tests inject a fake
 AT-SPI module (in-memory accessible trees), fake `/proc` directories
 (`<pid>/comm` files), and fake clock/sleep callables, so **no real
 desktop is ever inspected or driven by the automated suite**. The
-v0.4 suite is **404 tests**; v0.5 adds **149 more** for a total of
-**553 tests**: the full v0.1/v0.2 set (242, preserved
+v0.4 suite is **404 tests**; v0.5 adds **149 more** (total **553**);
+v0.6 adds **185 companion tests** for a total of **738 tests**; v0.7
+adds **29 more** (27 dedicated character tests, 1 character-purity
+meta-test, 1 updated idle-animation pin) for a total of **767 tests**:
+the full
+v0.1/v0.2 set (242, preserved
 unchanged — covering supported/unsupported commands, traversal,
 symlink escapes, permission denial, approval rejection, verification
 failure, Ollama-unavailable behaviour, no-overwrite/no-delete
@@ -714,7 +949,73 @@ manager with mocked/sandboxed dependencies):
   and never calls `set_markup` (no Pango) — untrusted text can never
   be rendered as markup; and the package imports headless.
 
-Three separate **opt-in** manual smoke tests exist and are never
+Plus the 204 v0.6+v0.7 companion tests (also all headless — no window,
+no display, no animation loop; drawing is exercised on in-memory
+`cairo.ImageSurface`s and GTK objects are only imported/constructed,
+never shown):
+
+* character state controller (`test_companion_states.py`) — exactly 16
+  states with labels/expressions/edges, valid edges accepted, invalid
+  edges rejected honestly (calm state stays put; active state falls
+  back through exactly one calm hop), truthful targets
+  (`waiting_for_approval`, `celebrating`) recovered instead of lost,
+  unknown states never raising and never claimed, auto-return delays,
+  injected clock, renderer exceptions captured (bounded list) and never
+  propagating, `on_change` bugs contained;
+* task-event adapter (`test_companion_adapter.py`) — every lifecycle
+  state mapped, approval → `waiting_for_approval`, `completed` the only
+  path to `celebrating` (failure/needs-attention/cancelled/unknown never
+  celebrate), action → reading/writing/coding/working identification
+  with conservative code-extension matching, running-sequence step
+  mapping, bounded curated speech with error internals/file content
+  never spoken, broken records never raising, and a structural check
+  that the adapter has no manager reference and no approve/execute
+  surface;
+* greeting (`test_companion_greeting.py`) — generic default name,
+  env/setting override, bounds/control-char stripping, time-of-day
+  parts, quiet-hours parsing (wraps midnight, malformed raises),
+  once-per-session dedup, once-per-day marker (0600, new day renews,
+  unwritable marker tolerated), disabled/muted preferences;
+* renderer seam + artwork (`test_companion_renderer.py`) — abstract
+  contract, expression degradation, a stand-in future-3D renderer
+  driving the unchanged controller, all 16 states drawing headless and
+  deterministically with distinct frames, motion over time, missing/
+  corrupt asset fallback, shipped per-state asset layout with no
+  required image files;
+* full-body character (`test_companion_character.py`, v0.7) — the
+  drawing is non-empty and substantial (not a floating face), inside
+  real image bounds with head/hands/feet visible at five widget sizes,
+  uniformly scaled (never stretched), pose determinism and
+  unknown-state fallback, `Pose.lerp` endpoint/midpoint behaviour,
+  subtle idle breathing, natural blinking (open and closed frames
+  render), elapsed-time animation (a time jump lands on the correct
+  pose), pairwise-distinct frames for the eight key states
+  (writing ≠ coding, thinking ≠ listening), a genuinely oscillating
+  greeting wave, celebration only from a trusted verified `completed`
+  (failed/needs-attention records never celebrate), zero/tiny canvas
+  robustness, expression overrides — plus `test_companion_security.py`
+  pinning `character.py` to cairo/math/dataclasses/typing imports only;
+* presentation/settings/voice (`test_companion_presentation.py`) —
+  bounded bubbles (markup stays inert text), tone per state, accessible
+  subtitle, minimal status without digests/error internals, no
+  approve/reject control, closed cosmetic-only settings schema with
+  0600 roundtrip and corrupt-file defaults, honest `NullVoice`;
+* companion window (`test_companion_window.py`) — headless import and
+  construction, constants (low-frequency idle check, modest frame
+  rate), light self-contained CSS, teardown ignores late records;
+* observers (`test_taskui_observers.py`) — dual delivery with the
+  `on_update` slot, observer exceptions cannot break a task, a truthy
+  observer return approves nothing (the mutating task still waits for a
+  digest-bound approval), duplicate registration collapsed, removal
+  stops delivery;
+* security meta-checks (`test_companion_security.py`) — AST analysis of
+  every `companion` module: no shell/spawn/eval/network/microphone
+  imports or calls, no import of the execution engine anywhere in the
+  package, only `__main__.py` may import `taskui`, the state controller
+  and adapter are pure, no `set_markup`/remote CSS in the window, no
+  web-server surface, and no hard-coded user name.
+
+Four separate **opt-in** manual smoke tests exist and are never
 invoked by the automated suite:
 
 * `ALWIN_MANUAL_SMOKE=1 scripts/manual_smoke_apps.sh` — read-only
@@ -737,6 +1038,17 @@ invoked by the automated suite:
   history it wrote, and finally the real GTK4 window on the developer's
   display. Everything inside a throwaway sandbox home; skipped with an
   honest message if GTK4 or a display is missing.
+* `ALWIN_COMPANION_SMOKE=1 scripts/manual_smoke_companion.sh` — the
+  v0.7 companion: the headless self-check (`python3 -m companion
+  --check`), the headless walkthrough (`--smoke`, including greeting
+  dedup, approval mapping, renderer-error isolation and asset
+  fallback), the companion's automated tests, and finally the real task
+  window **and** the real Alwin window (`python3 -m taskui
+  --companion`) in a throwaway sandbox home so you can watch the
+  full-body character breathe, blink, wave, think and show its
+  writing/coding/celebrating/error poses, the greeting, subtitles and
+  the companion controls. Skipped with an honest message if GTK4 or a
+  display is missing.
 
 ## Future compatibility
 
@@ -778,6 +1090,12 @@ points already in place:
   action only — no silent downloads).
 * **Graphical desktop:** drive `TaskPipeline` directly; it is UI
   agnostic (approval and proposal are callbacks).
+* **3D character renderer:** implement
+  `companion.renderer.CharacterRenderer` in a new module (see
+  "2D → 3D migration strategy" above) — the state vocabulary, transition
+  graph, task-event adapter, greeting, speech and controls are reused
+  unchanged, and 3D-only concepts stay out of `ai_core`/`integrations`.
+  No engine or runtime is added until that milestone is actually taken.
 * **Bootable OS image:** `os-build/`, `models/`, `desktop/`,
   `app-bridge/` are reserved for those milestones.
 

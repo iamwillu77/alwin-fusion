@@ -9,6 +9,8 @@ Useful flags::
     python3 -m taskui --llm            # use the local Ollama model for
                                        # proposals (still re-validated)
     python3 -m taskui --dry-run        # every task runs as a dry run
+    python3 -m taskui --companion      # task window + the Alwin companion
+                                       # character side by side (v0.6)
     python3 -m taskui --check          # headless self-check: no window,
                                        # prints status + history location
     python3 -m taskui --smoke          # scripted headless walkthrough of
@@ -51,6 +53,10 @@ def _build_parser() -> argparse.ArgumentParser:
                              "(every action is still re-validated)")
     parser.add_argument("--dry-run", action="store_true",
                         help="plan and verify without changing anything")
+    parser.add_argument("--companion", action="store_true",
+                        help="also open the Alwin companion character "
+                             "window beside the task window (v0.6); both "
+                             "share one application and one task engine")
     parser.add_argument("--check", action="store_true",
                         help="headless self-check (no window); prints "
                              "capability status and exits")
@@ -195,7 +201,44 @@ def main(argv: Optional[List[str]] = None) -> int:
             return original_submit(command, dry_run=True)
 
         manager.submit = _dry_submit  # type: ignore[method-assign]
-    return gtk_app.run_app(manager, status=status)
+
+    if not args.companion:
+        return gtk_app.run_app(manager, status=status)
+
+    # ---- v0.6: task window + Alwin companion in one application --------- #
+    from companion.window import CompanionWindow, Gtk as CompanionGtk
+
+    if CompanionGtk is None:
+        print(
+            "GTK4 is unavailable, so the companion window cannot open; "
+            "running the task window alone.\n(Headless check: "
+            "python3 -m companion --check)",
+            file=sys.stderr,
+        )
+        return gtk_app.run_app(manager, status=status)
+
+    task_window = gtk_app.TaskWindow(manager, status=status)
+    # The companion shares the task application's main loop: one process,
+    # one engine, no second execution path.
+    companion = CompanionWindow(
+        manager,
+        config=config,
+        status=status,
+        application=task_window.app,
+        open_task_window=lambda: task_window.open(),
+    )
+
+    def _activate_companion(app) -> None:
+        # Runs after TaskWindow's own activate handler (connected first
+        # in its constructor): open the companion, then re-present the
+        # task window so keyboard focus ends up on the primary task
+        # interface instead of being stolen by the companion.
+        companion.open(app)
+        if task_window.window is not None:
+            task_window.window.present()
+
+    task_window.app.connect("activate", _activate_companion)
+    return task_window.run()
 
 
 if __name__ == "__main__":

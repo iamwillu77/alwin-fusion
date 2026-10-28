@@ -32,9 +32,9 @@ from ai_core.permissions import PermissionChecker
 from ai_runtime.ollama_client import OllamaClient, OllamaError
 
 BANNER = (
-    "ALWIN FUSION v0.5\n"
+    "ALWIN FUSION v0.7\n"
     "Local AI Core + Documents + Applications + Desktop Automation\n"
-    "Task experience: python3 -m taskui"
+    "Task experience: python3 -m taskui · Companion: python3 -m companion"
 )
 
 EXIT_OK = 0

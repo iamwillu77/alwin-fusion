@@ -113,6 +113,11 @@ class TaskManager:
         self._approval_event = threading.Event()
         self._approval_decision: Optional[str] = None
         self._approval_digest_shown: str = ""
+        #: Additional read-only subscribers (e.g. the v0.6 companion).
+        #: ``on_update`` keeps its single-slot semantics; observers are
+        #: additive, error-isolated, and receive the same TaskRecord —
+        #: they cannot influence, approve or change any task outcome.
+        self._observers: List[Callable[[TaskRecord], None]] = []
 
     # ------------------------------------------------------------------ #
     # Intake
@@ -127,6 +132,28 @@ class TaskManager:
     def busy(self) -> bool:
         record = self.current
         return record is not None and not record.is_terminal
+
+    # ------------------------------------------------------------------ #
+    # Read-only subscribers (v0.6 companion; cannot influence tasks)
+    # ------------------------------------------------------------------ #
+
+    def add_observer(self, callback: Callable[[TaskRecord], None]) -> None:
+        """Subscribe to task updates without taking the ``on_update`` slot.
+
+        Observers receive the same curated :class:`TaskRecord` from the
+        worker thread (marshal to a UI loop before touching widgets).
+        They are strictly read-only: the manager never reads a return
+        value, never asks an observer for permission, and an observer
+        exception is swallowed so it can never affect a task.
+        """
+        with self._lock:
+            if callback is not None and callback not in self._observers:
+                self._observers.append(callback)
+
+    def remove_observer(self, callback: Callable[[TaskRecord], None]) -> None:
+        with self._lock:
+            if callback in self._observers:
+                self._observers.remove(callback)
 
     def submit(self, command: str, *, dry_run: bool = False) -> TaskRecord:
         """Validate intake and start the task worker thread.
@@ -549,6 +576,15 @@ class TaskManager:
             try:
                 self.on_update(record)
             except Exception:  # noqa: BLE001 - a UI bug must not kill a task
+                pass
+        # Read-only subscribers (e.g. the companion): same isolation —
+        # an observer exception is never allowed to affect a task.
+        with self._lock:
+            observers = list(self._observers)
+        for observer in observers:
+            try:
+                observer(record)
+            except Exception:  # noqa: BLE001 - same rule as on_update
                 pass
 
     def wait_for_state(

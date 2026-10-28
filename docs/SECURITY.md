@@ -11,7 +11,11 @@ open.
 ## Assets and adversaries (working assumptions)
 
 Assets: files inside the user's configured permitted roots, the audit
-log's integrity, and the user's system outside those roots.
+log's integrity, and the user's system outside those roots. Since v0.6
+the **truthfulness of the companion's display** is also an asset: Alwin
+must never visually claim a permission, an approval or a success that
+did not actually happen, because the user makes decisions based on what
+they see.
 
 Assumed-trusted: the Alwin Fusion code itself, the Python
 interpreter, the OS, and the human user making approval decisions.
@@ -379,6 +383,97 @@ types. Its own security properties and the new surface it introduces:
 * **One task at a time.** The manager refuses a second submission
   while one is running, so there is no queue to race or confuse.
 
+### 3d. Companion presentation (v0.6/v0.7) and its new attack surface
+
+The Alwin companion (`companion/`) is a **presentation layer only**. It
+observes curated task records and animates a character; it adds no
+execution engine, no permission path, no approval path and no network
+client. Its security properties:
+
+* **Structural inability to act.** No companion module imports the
+  trusted execution engine (`ai_core.pipeline/executor/planner/
+  permissions/verifier/audit`, `integrations`) or the task experience
+  (only the `__main__` launcher may import `taskui`, to host the
+  manager/window it displays) — enforced by AST-based meta-checks over
+  every `companion` module that fail the suite for banned imports
+  (`subprocess`, `socket`, `urllib`, `http`, `requests`, `pickle`,
+  `ctypes`, `pty`, audio-capture modules, …) or banned calls (`eval`,
+  `exec`, `compile`, `os.system`, `subprocess.*`, `socket.socket`,
+  `webbrowser.open`, …) (tested). The state controller's own imports
+  are pinned to `time`/`typing`, the adapter's to `typing` +
+  `companion.*`, and — new in v0.7 — the entire character drawing core
+  (`companion/character.py`) is pinned to `cairo`/`math`/`dataclasses`/
+  `typing` (tested): the artwork cannot read a file, open a socket or
+  learn about the task engine.
+* **The observer feed is read-only and cannot approve.**
+  `TaskManager.add_observer()` delivers the same curated `TaskRecord`
+  the task window renders; the manager ignores observer return values,
+  never asks an observer for permission, wraps every call in
+  try/except, and the adapter exposes no `approve`/`reject`/`execute`/
+  `grant` method and holds no manager reference (tested). Approval
+  still requires the digest-bound call path through the pipeline, so a
+  compromised companion cannot approve a plan or change an outcome
+  (tested: a truthy observer return approves nothing).
+* **Truthfulness rules are structural, not cosmetic.** The renderer
+  only ever *receives* states — it never decides them and cannot infer
+  success from animation. `celebrating` is reachable only from the
+  adapter's `completed` mapping (which the task lifecycle allows only
+  after verification); `failed`, `needs_attention`, `cancelled` and
+  unknown states are mapped to `error`/calm `idle` and a test proves
+  the celebration state is never sent to the renderer on those paths.
+  An invalid state transition falls back to a calm state instead of
+  inventing behaviour, and a truthful target (`waiting_for_approval`,
+  `celebrating`) is never lost to a fallback (tested).
+* **Animation failures cannot affect tasks.** Every renderer call the
+  controller makes is wrapped: exceptions are captured into a bounded
+  `renderer_errors` list and never propagate — and because the adapter
+  sits *downstream* of the manager (the manager swallows observer
+  exceptions too), neither an animation bug nor an adapter bug can
+  interrupt or alter task execution (tested at both layers).
+* **Bounded plain-text display.** Speech bubbles, subtitles, status and
+  greeting name are normalized and bounded (≤ 160–240 chars), come
+  from curated fields (never raw file content, model output or error
+  internals — tested), and the GTK view inserts them with `set_text`
+  only: no `set_markup`, no Pango import (tested). Untrusted text
+  cannot impersonate UI chrome or influence a policy decision.
+* **No network, no audio, no listening.** The companion opens no
+  socket, contacts no server and starts no web service (AST-tested
+  package-wide). It records no microphone input and opens no audio
+  device: `NullVoice` reports `available = False` and `speak()` returns
+  `False` — nothing is ever claimed to have been spoken, and no voice
+  model is installed or downloaded.
+* **The greeting assumes nothing.** It is text, fires at most once per
+  session (optionally once per day), honours an explicit disable and
+  quiet hours, takes its name from configuration (no hard-coded user —
+  tested), and does not claim the user is present.
+
+New surface introduced by v0.6, stated honestly:
+
+1. *`companion_settings.json`* (`<state_dir>`, mode 0600) is a new
+   user-owned file. Its schema is closed (unknown keys dropped, type
+   mismatches fall back to defaults) and it is **cosmetic-only**: at
+   worst a local writer can change greeting/subtitle/always-on-top
+   preferences. The trusted core never reads it (AST-tested), so it
+   cannot grant a permission, enable an action or bypass approval.
+2. *Per-state image assets* (`companion/assets/character/<state>/frame.png`)
+   are optional local files decoded by `Gdk.Texture`. Missing or
+   corrupt files fall back to the vector character (tested) — a
+   hostile-but-valid image can, at worst, change what the character
+   *looks like* for one state; it cannot change which state is shown or
+   any task decision (states come only from the adapter).
+3. *The once-per-day greeting marker* (`greeted.json`, mode 0600) only
+   records a date; forging it can at most suppress or permit one extra
+   greeting.
+4. *A second window on the same display.* The companion hides on
+   close, never grabs keyboard focus after launch (the task window is
+   presented last), does not block other applications, and
+   always-on-top is off by default and best-effort — none of this
+   changes any trust decision, which still happens in the task window.
+   v0.7 additionally guards against duplicate windows on
+   re-activation (the existing window is presented instead) and stops
+   the animation timer while the window is hidden (no off-screen
+   redraws).
+
 ### 4. Verification before success
 
 * The verifier re-resolves paths and re-inspects the filesystem
@@ -663,6 +758,33 @@ types. Its own security properties and the new surface it introduces:
     (no inter-task ordering or scheduling guarantees), not a
     concurrency control: there is still no file locking between
     separate Alwin Fusion processes (see 5).
+30. **The companion's character is procedural vector artwork, not
+    hand-drawn frame animation** (updated in v0.7). Alwin is now a
+    full-body cartoon boy drawn with cairo and driven by a
+    parameterized `Pose` system — real, elapsed-time-based motion
+    (breathing, blinking, waving, typing, jumping) — but there are no
+    sprite sheets, no lip-sync and no full room/bed scene beyond
+    per-state props. The *states and mapping are real behaviour*; the
+    artwork remains replaceable per state via
+    `companion/assets/character/<state>/frame.png`, and a
+    hostile-but-valid image file can at worst change what one state
+    looks like (see 3d, new surface 2). The drawing core itself is
+    pinned to pure cairo/math/dataclasses/typing imports (tested).
+31. **The companion has no voice.** `NullVoice` honestly reports no
+    speech engine connected: nothing is spoken, recorded or listened
+    for, no microphone is opened and no voice model exists. The TTS/ASR
+    interface is a seam for a future local engine only.
+32. **`walking` is a 2D waddle, not locomotion**, and the companion is
+    a small character window — not a desktop shell, not a wallpaper
+    overlay; it never draws over or blocks other applications.
+    Always-on-top is off by default and best-effort (Wayland
+    compositors may ignore it).
+33. **The companion window has not been tested on a clean
+    installation**, same as limitation 27: verified on the development
+    machine (Ubuntu 26.04.1, GNOME/Wayland, GTK 4.22) via the opt-in
+    companion smoke test, headless `--check`/`--smoke` and programmatic
+    checks. Companion settings (`companion_settings.json`) are
+    cosmetic-only and not tamper-proof (see 3d, new surface 1).
 
 ## Reporting security issues
 

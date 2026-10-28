@@ -2,23 +2,30 @@
 
 **Open-source, offline-first AI-native operating system — in progress.**
 
-Version **0.5.0** · Milestone: **Task Experience Engine**
+Version **0.7.0** · Milestone: **Animated Character & Morning Experience**
 
 Alwin Fusion lets you control your computer through natural-language
-commands. v0.5 adds the first user-facing **task experience** — a
-lightweight offline GTK4 desktop interface (`taskui`) where you submit
-a request, inspect the *real* plan the trusted core produced, approve
-or reject it, watch truthful per-step execution with verification
-evidence, and browse a persistent, validated, display-only local task
-history. It builds directly on the unchanged trusted core (parse →
-plan → permission → approval → execute → verify → audit); there is no
-second execution engine. Fully offline, with an optional local Ollama
-model that is never required and never auto-downloaded.
+commands. v0.7 upgrades **Alwin**, the persistent, lightweight desktop
+companion (`companion/`): the character is now a recognizable **full-body
+cartoon boy** — a large expressive head with tousled dark-brown hair, big
+brown eyes, a blue hoodie with an original ALWIN emblem, jointed arms and
+hands, legs and sneakers — drawn procedurally with cairo and brought to
+life with genuinely working animations (idle breathing and natural
+blinking, a greeting wave, thinking, listening, distinguishable writing
+and coding poses at a desk, an honest celebration on a **verified**
+success, and a concerned-but-friendly error). He mirrors *real* task
+states truthfully, shows a configurable startup greeting, and stays
+strictly outside the trusted pipeline — he observes curated task records
+and can neither grant a permission nor change an outcome. It builds on
+the unchanged trusted core (parse → plan → permission → approval →
+execute → verify → audit) and on the v0.5 task experience (`taskui`);
+there is no second execution engine. Fully offline, with an optional
+local Ollama model that is never required and never auto-downloaded.
 
 ```
-ALWIN FUSION v0.5
+ALWIN FUSION v0.7
 Local AI Core + Documents + Applications + Desktop Automation
-Task experience: python3 -m taskui
+Task experience: python3 -m taskui · Companion: python3 -m companion
 
 You: inspect the state of LibreOffice Writer
 
@@ -70,6 +77,31 @@ $ python3 -m taskui
 │ 4f2a9c  2026-10-27T18:02Z  Completed  Create a folder named…  │
 └──────────────────────────────────────────────────────────────┘
 ```
+
+And, next to it, the v0.7 companion:
+
+```
+$ python3 -m taskui --companion
+┌─────────────────────────┐
+│  Hi Friend! Good        │   ← speech bubble (text only; no voice,
+│  morning! What shall     │      no microphone, no fake speech)
+│  we do today?            │
+│          ╭─────╮         │
+│         ▕▟█▙▀▟▙▛▜        │   ← Alwin: a full-body cartoon boy
+│          │ ◕ ‿ ◕│        │      (tousled hair, blue hoodie,
+│          │ ╭─A─╮ │       │       emblem, arms, legs, shoes)
+│          │ │   │ │       │   ← original procedural vector artwork,
+│          ╰─┤   ├─╯       │      animated (breathes, blinks, waves)
+│         ╱  ╰───╯  ╲      │
+│  Alwin is thinking.      │   ← accessible subtitle (text alternative)
+│  Planning…               │   ← minimal task status
+│ [Open task window][Settings][Hide]
+└─────────────────────────┘
+```
+
+The companion is presentation only: it reads the same curated task
+records the task window renders and can do nothing else — approval,
+execution and verification stay where they were.
 
 ## Features
 
@@ -157,6 +189,37 @@ $ python3 -m taskui
   closed schema on read, and malformed records are skipped and counted
   — never repaired or executed. It is a normal user-owned file, not
   tamper-proof.
+- **Alwin companion** (`companion/`, v0.7) — a persistent, lightweight
+  desktop character beside the task window (`python3 -m taskui
+  --companion`, or `python3 -m companion` alone): a small GTK4 window
+  showing an **original full-body cartoon boy** (large expressive head,
+  tousled dark-brown hair, big brown eyes, a blue hoodie with an
+  original ALWIN emblem, jointed arms with hands, legs and red
+  sneakers) drawn procedurally with cairo — no image assets, no new
+  dependencies — in one of **16 explicit states** with validated
+  transitions and safe fallbacks. Every state reuses one shared `Pose`
+  system (`companion/character.py`), so proportions, hair and clothing
+  stay identical while the pose and face animate: idle breathing and
+  natural varied blinking, a greeting wave, thinking (hand to chin),
+  listening, a walking swing, distinguishable **writing** and **coding**
+  poses at a desk (notebook with a scribbling pencil; laptop with
+  floating code glyphs), reading, verifying with a magnifier, a wrench
+  for general work, celebrating **only** from a trusted `completed` (a
+  failed task always shows a concerned `error`, never a success
+  animation), and calm idle. Animation is a pure function of *elapsed
+  time* (correct even with delayed frames) and the frame timer stops
+  while the window is hidden. A task-event adapter maps real
+  `TaskRecord` states onto character states. Speech bubbles and
+  subtitles are bounded plain text; the startup greeting is a sequenced
+  wake-up → wave → bubble → idle flow, configurable
+  (`ALWIN_COMPANION_NAME`, enable toggle, quiet hours, once per
+  session/day — never hard-coded, never re-greeted on redraw); voice is
+  an honestly-unavailable placeholder (`NullVoice`, no audio, no mic);
+  the renderer sits behind a small interface a future 3D
+  implementation can replace unchanged. The companion observes
+  read-only records and is structurally incapable of approving,
+  executing or changing anything (source-level meta-checks enforce that
+  no companion module imports the execution engine or can shell out).
 - **Two-phase pipeline** (`preview()` + `run_previewed()`,
   `ai_core/pipeline.py`) — the additive split the desktop UI needs:
   `preview()` runs parse → plan → permission and **never executes**;
@@ -328,6 +391,17 @@ python3 -m taskui --check         # headless self-check (no window): prints
                                   # AI/automation status + history location
 python3 -m taskui --smoke         # scripted headless walkthrough of the
                                   # full lifecycle (used by the UI smoke test)
+python3 -m taskui --companion      # v0.7: task window + Alwin companion together
+
+# v0.7: the Alwin companion (full-body animated character window)
+python3 -m companion               # companion alone (its Settings can open
+                                   # the task window in the same process)
+python3 -m companion --no-greeting # skip the startup greeting this run
+python3 -m companion --check       # headless self-check: state graph,
+                                   # task mapping, greeting, all 16 drawings
+python3 -m companion --smoke       # scripted headless companion walkthrough
+ALWIN_COMPANION_NAME=Ada python3 -m companion   # greeting name (never hard-coded)
+ALWIN_COMPANION_SMOKE=1 scripts/manual_smoke_companion.sh  # opt-in real-GUI smoke
 
 # Use the local Ollama model to propose actions (always validated;
 # falls back to the built-in parser with a visible note)
@@ -373,6 +447,104 @@ blocks.
 > openpyxl does not calculate either. Open the workbook in a
 > spreadsheet application (LibreOffice Calc, Excel, …) to calculate.
 
+## The Alwin companion (v0.7)
+
+### Launching it
+
+```bash
+python3 -m taskui --companion    # recommended: task window + Alwin side by side
+python3 -m companion             # Alwin alone (Settings can open the task
+                                 # window later — same process, same engine)
+python3 -m companion --check     # headless self-check (no display)
+python3 -m companion --smoke     # headless walkthrough (no display)
+ALWIN_COMPANION_SMOKE=1 scripts/manual_smoke_companion.sh   # opt-in real window
+```
+
+Everything is manual: Alwin Fusion installs **no** autostart entry,
+service, cron job or desktop-shell component, and it never modifies
+system settings. If GTK4 or a display is missing, `python3 -m
+companion` says so honestly and exits; the headless `--check`/`--smoke`
+modes still prove the companion core.
+
+### The 16 character states
+
+| State | Entered when (trusted source) | Animation |
+|---|---|---|
+| `sleeping` | startup before waking / quiet rest | slow breathing, closed eyes, drifting `z` |
+| `waking_up` | companion session starts | morning stretch + yawn, eyes opening, rising sun |
+| `greeting` | startup greeting fires | raised hand waving several times + big smile |
+| `idle` | nothing to do; returns after outcomes | subtle breathing + natural varied blinking |
+| `listening` | you submit a request | attentive wide eyes, raised brows, small nod |
+| `thinking` | planning a plan | hand at the chin, gaze up, drifting thought dots |
+| `walking` | plan approved — moving to work | alternating leg/arm swing with a body bob |
+| `writing` | executing a document/text action | seated at a desk, scribbling pencil over a notebook |
+| `coding` | executing a code/config file creation | seated at a desk, hands tapping a laptop, floating `< / >` glyphs |
+| `reading` | executing a read/inspect action | book held open, eyes scanning left to right |
+| `waiting_for_approval` | plan awaits your approval | raised open palm, hopeful face, pulsing `…` |
+| `working` | executing anything else | hand holding a small wrench beside a turning gear |
+| `verifying` | independent verification running | magnifying glass held up, gaze sweeping |
+| `celebrating` | **only** a trusted `completed` result | arms raised, big smile, small jump + sparkles |
+| `error` | failed / needs attention | concerned-but-friendly face, hand to head, sweat drop |
+| `resting` | user quiet for minutes | slow breath, drowsy eyes |
+
+Invalid transitions never raise: they fall back through a calm state
+(and a truthful target such as `waiting_for_approval` is never lost to
+that fallback). A failed, rejected or cancelled task **never** renders a
+success animation; only the verified `completed` lifecycle state reaches
+`celebrating`.
+
+### Real behaviour, original procedural artwork
+
+The *states, transitions and task mapping are real behaviour* — they are
+driven by actual `TaskRecord` updates from the trusted pipeline, and the
+*animation is real*: every state is a distinct procedural pose computed
+by `companion/character.py` as a pure function of **elapsed time**
+(correct even when frames are delayed), blended smoothly (~0.25 s)
+across state changes, and drawn with cairo as an original full-body
+cartoon boy. There are no shipped image assets; drop a `frame.png` into
+`companion/assets/character/<state>/` to replace **one** state's art
+(see the README there). Lively states animate at ~12 fps; the subtle
+`idle` state ticks at ~6 fps, and `sleeping`/`resting` draw once and
+stop the frame timer entirely — an idle companion costs almost nothing.
+The frame timer is also stopped whenever the window is hidden.
+
+### Startup greeting
+
+Configurable and honest: the name comes from `ALWIN_COMPANION_NAME` or
+your saved settings (default: `friend` — no name is hard-coded), it
+fires **once per session** (never again on redraw) with an optional
+once-per-day marker, respects the enable toggle and quiet hours
+(`22:00-07:00`), and is **text only** — nothing is spoken, no
+microphone is opened, and presence is never assumed. `--no-greeting`
+skips it for one run. The greeting is *sequenced*: Alwin stretches and
+yawns (`waking_up`), then waves with a smile (`greeting`) while the
+bubble appears, then settles back into `idle` through the normal
+validated state machine — and every timer is cleaned up when the
+window closes.
+
+### How it connects to the task engine
+
+`TaskManager.add_observer()` (added in v0.6, additive and read-only)
+delivers the same curated `TaskRecord`s the task window renders to
+`companion/adapter.py`, which maps them to character states and bounded
+speech. The adapter holds no manager reference, exposes no
+approve/reject/execute surface, and returns nothing; observers are
+error-isolated, so a companion or animation bug can never affect a task.
+Approval remains exclusively in the task window, where the validated
+plan digest is shown.
+
+### From 2D to 3D
+
+Renderers implement one small interface (`companion/renderer.py`:
+`show_state`, `set_expression`, `tick`, `attach`, `detach`,
+`is_available`). A future 3D renderer swaps in behind exactly that
+interface and reuses the state vocabulary, transition graph,
+task-event adapter, greeting, speech content and controls unchanged;
+3D-specific concerns (scene, room, meshes, lip-sync) stay out of
+`ai_core`/`integrations`. v0.7 deliberately ships **no** game engine or
+3D runtime — the character is plain cairo, and the pose system was
+structured so a future 3D renderer can reuse it unchanged.
+
 ## Configuration
 
 | Environment variable | Default | Meaning |
@@ -383,6 +555,15 @@ blocks.
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Local Ollama endpoint |
 | `OLLAMA_MODEL` | *(empty)* | Model name for `--llm`; never auto-downloaded |
 | `OLLAMA_TIMEOUT` | `30` | HTTP timeout in seconds |
+| `ALWIN_COMPANION_NAME` | *(settings, else `friend`)* | Companion greeting name |
+| `ALWIN_COMPANION_GREETING` | *(settings, else on)* | `0`/`false`/`no`/`off` disables the startup greeting |
+| `ALWIN_COMPANION_QUIET_HOURS` | *(settings, else off)* | `HH:MM-HH:MM` window in which Alwin does not greet |
+
+Companion preferences (greeting on/off, name, quiet hours, mute
+placeholder, always-on-top, subtitles) persist to
+`$ALWIN_STATE_DIR/companion_settings.json` (mode 0600, closed schema —
+unknown keys are ignored; this file is cosmetic-only and never read by
+the trusted core).
 
 CLI flags: `--dry-run`, `--llm`, `--root DIR` (repeatable),
 `--ai-status`, `--show-config`, `--version`, `--help`.
@@ -402,7 +583,7 @@ All tests run in temporary directories; they never modify your real
 launch adapter's `popen`/`which`, the automation backend's AT-SPI
 session, adapter factory, clock and `/proc` root are all injected
 fakes; fake `/proc` trees are temporary directories of `<pid>/comm`
-files). The suite (553 tests) covers supported/unsupported commands,
+files). The suite (767 tests) covers supported/unsupported commands,
 traversal and symlink escapes, permission denial, approval rejection,
 directory creation, verification failure, Ollama-unavailable operation,
 absence of overwrite/delete capability, dry-run inertness,
@@ -443,7 +624,41 @@ badges, approval affordances, step rendering, verification evidence,
 bounded untrusted text), and AST-based source meta-checks (no
 subprocess/os.system/eval/exec anywhere in `taskui/`, only the manager
 imports the execution engine, the GTK view never renders markup). The
-spreadsheet/PDF pipeline tests skip themselves politely when the
+v0.7 companion is covered the same way (204 headless tests, no window
+and no display): the 16-state controller (valid/invalid
+transitions, calm fallbacks, truthful-target recovery, renderer errors
+contained and recorded), the task-event adapter (every lifecycle state
+mapped, approval → `waiting_for_approval`, **failed/needs-attention/
+cancelled never reach `celebrating`**, action → writing/coding/reading
+identification, sequence step mapping, bounded curated speech, no
+manager/approve/execute surface), the greeting (name configurability,
+session and once-per-day dedup, quiet hours, disabled/muted preference,
+0600 marker, unwritable-marker tolerance), the renderer seam (abstract
+contract, null renderer, a stand-in "future 3D" renderer driving the
+unchanged controller), the cairo artwork (all 16 states draw headless,
+deterministic, visually distinct), asset fallback (missing/corrupt
+`frame.png` degrade to the vector character), the pure presentation
+view-model (bounded text, no approve/reject affordance, no digests or
+error internals exposed), manager observers (dual delivery with
+`on_update`, observer exceptions cannot break a task, a truthy observer
+return approves nothing), and AST-based meta-checks (no companion module
+can shell out/eval/socket/microphone, imports of the execution engine
+are banned package-wide, only `__main__.py` may import `taskui`, the
+state controller is pure, the window never renders markup or remote
+resources, no user name is hard-coded). The v0.7 full-body character is
+covered by its own dedicated suite (`tests/test_companion_character.py`,
+27 tests): non-empty and substantial drawing inside real image bounds at
+five widget sizes (head, hands and feet never clipped), uniform
+non-distorting scaling, pose determinism and unknown-state fallback,
+`Pose.lerp` endpoint/midpoint blending, subtle idle breathing, natural
+blinking (open + closed frames), elapsed-time animation (delayed frames
+still land on the right pose), pairwise-distinct frames for the eight
+key states (writing ≠ coding, thinking ≠ listening), the greeting wave
+genuinely oscillating, **celebration only from a trusted verified
+`completed`** (failed and needs-attention records never celebrate),
+graceful handling of zero/tiny canvases, and expression overrides —
+plus a source purity meta-test pinning `companion/character.py` to
+cairo/math/dataclasses/typing only. The spreadsheet/PDF pipeline tests skip themselves politely when the
 optional package is not installed (the standard library validator
 tests always run).
 
@@ -505,6 +720,25 @@ directory are never touched, and the sandbox is deleted on exit. If
 GTK4 or a display is unavailable the window step is skipped with an
 honest message — the headless walkthrough still proves the lifecycle.
 
+### Manual companion smoke test (opt-in, real Alwin window)
+
+For a developer who wants to watch the real companion react to a real
+task:
+
+```bash
+ALWIN_COMPANION_SMOKE=1 scripts/manual_smoke_companion.sh
+```
+
+Without the environment variable the script is a no-op. It reports the
+environment, runs the headless companion self-check and walkthrough,
+runs the companion's automated tests, then opens the real task window
+**and** the real Alwin window (`python3 -m taskui --companion`) inside
+a throwaway sandbox home so you can watch Alwin think, wait for your
+approval, celebrate only a verified result and stay calm on rejection —
+plus try its greeting, subtitle, settings and hide controls. Your real
+`~/Documents`, state directory and companion settings are never
+touched, and the sandbox is deleted on exit.
+
 ## How the local model is used
 
 The core works with **zero** AI runtime. With `--llm`, the pipeline
@@ -533,14 +767,28 @@ integrations/   ActionDispatcher + filesystem tools + documents/
                  mcp — extension point)
 taskui/         lifecycle (state machine) · history (validated,
                 display-only JSONL) · manager (worker-thread bridge to
-                the pipeline) · presenter (pure view-model) · status
-                (honest AI/automation probes) · gtk_app (thin GTK4
-                view) · __main__ entry point
+                the pipeline + read-only observers) · presenter (pure
+                view-model) · status (honest AI/automation probes) ·
+                gtk_app (thin GTK4 view) · __main__ entry point
+companion/      states (16-state character controller) · character
+                (full-body cartoon boy: shared Pose system, per-state
+                procedural animation — pure cairo, headless) ·
+                renderer (renderer interface + headless null renderer) ·
+                renderer2d (GTK renderer: pose blending, adaptive frame
+                cadence + per-state asset overrides) · adapter (trusted
+                records → character states + bounded speech) ·
+                presentation (pure view-model) · greeting (sequenced,
+                configurable startup greeting) · settings (validated
+                local JSON) · voice (TTS/ASR interface, honestly
+                absent) · window (thin GTK4 view) · __main__ entry
+                point (--check/--smoke) · assets/ (per-state art slots
+                + convention README)
 tests/          unittest suite (temporary sandboxes + in-memory
                 accessibility trees only; no display, no desktop)
 docs/           ARCHITECTURE.md · SECURITY.md
 scripts/        run_tests.sh · manual_smoke_apps.sh ·
-                manual_smoke_automation.sh · manual_smoke_ui.sh (opt-in)
+                manual_smoke_automation.sh · manual_smoke_ui.sh ·
+                manual_smoke_companion.sh (opt-in)
 requirements.txt  optional v0.2 document dependencies (you install them)
 app-bridge/ desktop/ models/ os-build/   reserved for later milestones
 ```
@@ -564,12 +812,28 @@ application registry/discovery/launch engine, the AT-SPI desktop
 automation engine for LibreOffice Writer/Calc (honest state machine,
 control finding/reading, allowlisted activation and text entry,
 digest-confirmed saves, validated multi-step sequences), and the
-automated test suite (553 tests). v0.5 adds the **task experience**:
+automated test suite. v0.5 adds the **task experience**:
 a two-phase pipeline (`preview()` + `run_previewed()` with
 digest-bound `ApprovalToken`s), the `taskui` package (validated task
 lifecycle, redacted display-only task history, worker-thread manager,
 pure presenter, honest capability probes, thin GTK4 window), and the
-opt-in UI smoke test.
+opt-in UI smoke test. v0.6 adds the **Alwin companion**: the
+`companion` package (16-state character controller, renderer interface
+with a cairo 2D implementation, task-event adapter, pure presentation,
+configurable greeting, validated settings, honest voice placeholder,
+thin GTK4 window), the read-only `TaskManager` observer feed, the
+`--companion` launcher and the opt-in companion smoke test. v0.7
+upgrades the companion into an **animated character**: a full-body
+original cartoon boy (`companion/character.py`) driven by a shared
+float-only `Pose` system — idle breathing, natural blinking, greeting
+wave, thinking/listening/walking/writing/coding/reading/verifying/
+working poses, a jumping celebration reachable **only** from a trusted
+verified `completed`, and a concerned-but-friendly error — with
+elapsed-time animation, smooth pose blending across state changes,
+adaptive frame cadence, a sequenced morning greeting
+(wake → wave → bubble → idle), animation timers stopped while the
+window is hidden, and 27 dedicated headless character tests. The suite
+is now **767 tests**, all headless.
 
 Known limitations (details in `docs/SECURITY.md`):
 
@@ -627,6 +891,31 @@ Known limitations (details in `docs/SECURITY.md`):
   *descriptors* (capabilities, schemas, permissions, timeouts, result
   rules) only; `integrations/automation/mcp.py` is a manifest, not a
   transport.
+- **The character is procedural vector artwork, not hand-drawn frame
+  animation** — Alwin is an original cairo drawing of a full-body
+  cartoon boy driven by a parameterized `Pose` system: real motion
+  (breathing, blinking, waving, typing, jumping) but no sprite sheets,
+  no lip-sync, no full room/bed scene beyond per-state props, and no
+  artist-polished frame-by-frame animation. Individual states can be
+  replaced by dropping a `frame.png` into
+  `companion/assets/character/<state>/`, and the renderer interface
+  keeps the door open for a future 3D or sprite-based implementation.
+- **There is no voice** — `NullVoice` reports "no speech engine
+  connected" and nothing is ever spoken, recorded or listened for; the
+  TTS/ASR interface exists only so a future local engine can be
+  connected. No voice model is installed, downloaded or implied.
+- **`walking` is a 2D waddle, not locomotion through a 3D world**, and
+  the companion is a small character window — not a desktop shell, not
+  a wallpaper overlay, and it does not draw over or block other
+  applications.
+- **Always-on-top is opt-in and best effort** — off by default, and
+  Wayland compositors may ignore it entirely.
+- **The companion window was exercised on the development machine**
+  (Ubuntu 26.04.1, GNOME/Wayland, GTK 4.22) via the opt-in smoke and
+  programmatic checks; a clean installation has **not** been tested.
+- **The companion settings file is cosmetic-only and not
+  tamper-proof** — a modified file can change greeting/subtitle
+  preferences at most; the trusted core never reads it.
 - Still deliberately absent: file deletion/overwrite, shell or
   arbitrary command execution, keystroke/mouse synthesis, arbitrary
   application flags/commands, software installation, network

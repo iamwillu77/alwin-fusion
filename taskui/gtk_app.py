@@ -100,6 +100,7 @@ class TaskWindow:
         *,
         status: Optional[SystemStatus] = None,
         on_quit: Optional[Callable[[], None]] = None,
+        application: Optional["Gtk.Application"] = None,
     ) -> None:
         if Gtk is None:  # pragma: no cover - defensive
             raise RuntimeError(
@@ -108,7 +109,13 @@ class TaskWindow:
         self.manager = manager
         self.on_quit = on_quit
 
-        self.app = Gtk.Application(application_id="org.alwin.fusion.taskui")
+        # `application` (v0.6): let a host application (e.g. the
+        # companion launcher) provide one shared Gtk.Application so the
+        # task window and the companion window live in the same process
+        # and the same main loop.  Omitting it behaves exactly as v0.5.
+        self.app = application or Gtk.Application(
+            application_id="org.alwin.fusion.taskui"
+        )
         self.app.connect("activate", self._on_activate)
         self.window: Optional[Gtk.ApplicationWindow] = None
 
@@ -125,6 +132,10 @@ class TaskWindow:
     # ------------------------------------------------------------------ #
 
     def _on_activate(self, app) -> None:  # pragma: no cover - needs display
+        if self.window is not None:
+            # Already built (shared-application mode, second activate).
+            self.window.present()
+            return
         provider = Gtk.CssProvider()
         provider.load_from_data(CSS)
         display = app.get_default_for_display() if hasattr(
@@ -459,6 +470,21 @@ class TaskWindow:
 
     def run(self) -> int:  # pragma: no cover - needs display
         return self.app.run(None)
+
+    def open(self, app=None) -> None:  # pragma: no cover - needs display
+        """Build/show the task window on *app* (v0.6 companion mode).
+
+        Used when the task window is hosted by another application —
+        ``python3 -m companion`` calls this from the companion's
+        "Open task window" control, so one process runs both windows
+        on one main loop.  Calling it twice simply re-presents the
+        existing window.
+        """
+        target = app or self.app
+        if self.window is None:
+            self._on_activate(target)
+        else:
+            self.window.present()
 
     def refresh_history(self) -> None:  # pragma: no cover - needs display
         self._refresh_history()

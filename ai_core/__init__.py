@@ -6,4 +6,4 @@ operations and verifying the results.  Nothing in this package executes
 shell commands or evaluates model output as code.
 """
 
-__version__ = "0.5.0"
+__version__ = "0.7.0"
