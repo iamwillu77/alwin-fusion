@@ -23,6 +23,8 @@ from dataclasses import dataclass
 from typing import Callable, Dict
 
 from integrations.apps.tools import ApplicationTools, make_app_handlers
+from integrations.automation.sequence import TaskSequenceRunner
+from integrations.automation.tools import AutomationTools, make_automation_handlers
 from integrations.documents.tools import DocumentTools, make_doc_handlers
 from integrations.filesystem.tools import FileSystemTools, ToolResult, make_fs_handlers
 
@@ -92,12 +94,15 @@ def build_default_dispatcher(
     checker,
     *,
     app_tools: "ApplicationTools | None" = None,
+    automation_tools: "AutomationTools | None" = None,
 ) -> ActionDispatcher:
-    """Dispatcher with the filesystem, document and application integrations.
+    """Dispatcher with the filesystem, document, application and
+    desktop-automation integrations.
 
-    ``app_tools`` may be supplied to inject a test double (fake
-    launcher, fake ``which``, fake desktop directories); the default
-    builds the real read-only/argv-only application tools.
+    ``app_tools`` and ``automation_tools`` may be supplied to inject
+    test doubles (fake launcher, fake accessibility session, fake
+    adapters); the defaults build the real read-only probes and
+    argv-only launchers.
     """
     tools = FileSystemTools(checker)
     handlers = make_fs_handlers(tools)
@@ -105,6 +110,8 @@ def build_default_dispatcher(
     doc_handlers = make_doc_handlers(doc_tools)
     apps = app_tools or ApplicationTools(checker)
     app_handlers = make_app_handlers(apps)
+    automation = automation_tools or AutomationTools(checker)
+    automation_handlers = make_automation_handlers(automation)
 
     dispatcher = ActionDispatcher()
     dispatcher.register(
@@ -172,6 +179,85 @@ def build_default_dispatcher(
         description=(
             "Open an existing, permission-checked file with a registered "
             "application (argv-only launch; approval required)."
+        ),
+        mutates=True,
+        requires_approval=True,
+    )
+
+    # ---- v0.4 desktop automation ------------------------------------ #
+    dispatcher.register(
+        "inspect_application",
+        automation_handlers["inspect_application"],
+        description=(
+            "Report the honest state of a supported application "
+            "(read-only: no launch, no install, no change)."
+        ),
+        mutates=False,
+        requires_approval=False,
+    )
+    dispatcher.register(
+        "find_control",
+        automation_handlers["find_control"],
+        description=(
+            "Find a control by accessible role and name in a supported "
+            "application (read-only)."
+        ),
+        mutates=False,
+        requires_approval=False,
+    )
+    dispatcher.register(
+        "read_control",
+        automation_handlers["read_control"],
+        description=(
+            "Read a permitted control's accessible text (read-only, "
+            "bounded, untrusted display data)."
+        ),
+        mutates=False,
+        requires_approval=False,
+    )
+    dispatcher.register(
+        "activate_control",
+        automation_handlers["activate_control"],
+        description=(
+            "Activate an identified control through its accessibility "
+            "action — revalidated first; no keystrokes, no coordinates "
+            "(approval required)."
+        ),
+        mutates=True,
+        requires_approval=True,
+    )
+    dispatcher.register(
+        "enter_text",
+        automation_handlers["enter_text"],
+        description=(
+            "Enter approved text into an identified input field "
+            "(role 'entry' only; read back to confirm; approval required)."
+        ),
+        mutates=True,
+        requires_approval=True,
+    )
+    dispatcher.register(
+        "save_document",
+        automation_handlers["save_document"],
+        description=(
+            "Activate the reviewed Save control and confirm the write by "
+            "file digest — an unchanged file is an honest failure "
+            "(approval required)."
+        ),
+        mutates=True,
+        requires_approval=True,
+    )
+    # The sequence runner closes over the dispatcher it dispatches
+    # through (built above), re-checking permissions per step.
+    sequence_runner = TaskSequenceRunner(checker, dispatcher=dispatcher)
+    dispatcher.register(
+        "task_sequence",
+        lambda action, *, dry_run=False: sequence_runner.run(
+            action, dry_run=dry_run
+        ),
+        description=(
+            "Run validated steps in order with stop-on-failure semantics "
+            "(every step re-checked; approval required for the sequence)."
         ),
         mutates=True,
         requires_approval=True,

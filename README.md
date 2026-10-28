@@ -2,40 +2,46 @@
 
 **Open-source, offline-first AI-native operating system — in progress.**
 
-Version **0.3.0** · Milestone: **Application Integration Engine**
+Version **0.4.0** · Milestone: **Desktop Automation Engine**
 
 Alwin Fusion lets you control your computer through natural-language
-commands. v0.3 adds a controlled application integration engine —
-read-only discovery of installed desktop applications (LibreOffice
-Writer/Calc, common PDF viewers) and approval-gated opening of an
-existing, permission-checked file with a registered application — on
-top of the trusted core: a lightweight Python CLI that turns commands
-into **validated, approved, executed and verified** actions — fully
-offline, with an optional local Ollama model that is never required
-and never auto-downloaded.
+commands. v0.4 adds a safe, AT-SPI-based desktop automation engine —
+inspect the honest state of LibreOffice Writer/Calc, find and read
+controls, activate identified buttons, enter text into identified input
+fields, digest-confirmed saves, and validated multi-step task sequences
+— inside the unchanged trusted core: a lightweight Python CLI that
+turns commands into **validated, approved, executed and verified**
+actions — fully offline, with an optional local Ollama model that is
+never required and never auto-downloaded.
 
 ```
-ALWIN FUSION v0.3
-Local AI Core + Documents + Applications
+ALWIN FUSION v0.4
+Local AI Core + Documents + Applications + Desktop Automation
 
-You: which applications are installed?
+You: inspect the state of LibreOffice Writer
 
-ALWIN: Detected 5 application(s): 1 available, 4 not_installed. Nothing was launched, installed or changed.
-         Desktop default application: available
-         Document Viewer (Evince): not_installed
-         LibreOffice Calc: not_installed
-         LibreOffice Writer: not_installed
-         Okular: not_installed
+ALWIN: libreoffice-writer: state 'installed_not_running'.
+       installed; no running process observed
 
-You: open summary.txt in Documents with LibreOffice Writer
+You: find the Save button in LibreOffice Writer
+
+ALWIN: Control identified: role 'button', accessible name 'Save'.
+       control: role 'button' name 'Save'
+       state: control_identified
+       Control identity verified against the validated locator
+       (read-only operation; nothing was changed).
+
+You: save the document in LibreOffice Writer to Documents/notes.txt
 
 ALWIN: Proposed action:
-       Open ~/Documents/summary.txt with LibreOffice Writer
+       Save the active LibreOffice Writer document to
+       ~/Documents/notes.txt (confirmed only if the file changes)
        Approve? [y/N] y
 
-ALWIN: Verified: the file still exists inside the permitted roots and the
-       application process was started. This confirms the launch only —
-       Alwin Fusion does not inspect or control the application window.
+ALWIN: The Save control was activated, but ~/Documents/notes.txt did not
+       change on disk within 2s. A save cannot be confirmed — state
+       unknown (the active document may be a different file or
+       unmodified).
 ```
 
 ## Features
@@ -59,6 +65,18 @@ ALWIN: Verified: the file still exists inside the permitted roots and the
     (`open report.txt in Documents with LibreOffice Writer`, or `with
     the default application` via `xdg-open`) — approval required,
     argv-only launch, `shell=False`
+  - **automate LibreOffice Writer/Calc** (v0.4): `inspect the state of
+    LibreOffice Writer`, `find the Save button in LibreOffice Writer`,
+    `read the text of the Title label in ...`, `activate the OK button
+    in ...`, `enter "42" into the Search entry in ...`, `save the
+    document in LibreOffice Writer to Documents/notes.txt` — read-only
+    inspection/finding/reading, approval-gated mutations
+  - **multi-step tasks** (v0.4): `create a folder named Batch in
+    Documents then create a file named log.txt in Documents containing
+    done` — every step planned, permission-checked and verified
+    independently; the first failure stops the rest (the split only
+    happens when every part is a real command, so `... containing buy
+    milk then eggs` still means what it says)
   - explain which operation would be performed
 - **Structured plans with an explicit action allowlist** — model
   output is JSON-parsed and validated by trusted code; it is never
@@ -75,11 +93,17 @@ ALWIN: Verified: the file still exists inside the permitted roots and the
   go through the same permission checks.
 - **Approval before modification** for every mutating action; `y/N`
   prompt, EOF/Ctrl-C = *no*. `--dry-run` mode makes zero changes.
-- **Verification before success**: the verifier re-checks the
-  filesystem independently — reports are re-rendered and compared
-  byte-for-byte, PDFs are structurally validated, and workbooks are
-  **reopened** and compared cell-by-cell against the approved spec
-  (including formula strings). Failures report the real error.
+- **Verification before success**: the verifier re-checks the world
+  independently of what the executor claims — reports are re-rendered
+  and compared byte-for-byte, PDFs are structurally validated,
+  workbooks are **reopened** and compared cell-by-cell against the
+  approved spec (including formula strings), automation state reports
+  must be internally consistent with their evidence (a
+  `document_open` claim without a live accessible connection fails
+  verification), reported controls must match the validated locator,
+  and a save only verifies when the file on disk matches the digest
+  recorded after the Save control was activated. Failures report the
+  real error.
 - **Audit log** in `~/.local/state/alwin-fusion/audit.jsonl`,
   mode 0600/0700, with file content and structured `spec`/`content`
   redacted.
@@ -97,6 +121,31 @@ ALWIN: Verified: the file still exists inside the permitted roots and the
   uses argv lists with `shell=False`, and success is reported
   honestly as *"the process was started"* — never as visual
   inspection, editing or formula recalculation.
+- **Desktop automation engine** (`integrations/automation/`, v0.4):
+  a safe AT-SPI layer for LibreOffice Writer and Calc with a **closed
+  action set** — `inspect_application`, `find_control`, `read_control`
+  (read-only, no approval), and `activate_control`, `enter_text`,
+  `save_document`, `task_sequence` (approval required). Every operation
+  reports one of a fixed set of honest application states
+  (`not_installed` → `installed_not_running` → `process_started` →
+  `interface_detected`/`document_open` → `control_identified` →
+  `action_performed` → `result_verified`, or `failed_or_unknown`): a
+  started process is never claimed to be a visible window, and a
+  Save-button activation is never claimed to be a save — the file's
+  sha256 must actually change, and the verifier re-reads the file
+  independently. Text entry is confined to input fields (role `entry`)
+  and is confirmed by reading the field back; document bodies are
+  never typed into. Multi-step tasks (`... then ...`) validate every
+  step independently, re-check permissions per step, stop at the first
+  failure, skip dependents, and are re-verified step by step.
+- **No synthetic input, ever**: the automation layer contains no
+  keystroke injection, no mouse/coordinate events, no shell — the only
+  mutation primitives are the accessibility *action* interface of an
+  identified control and `EditableText` on an identified input field
+  (pinned by source-level meta-bans in the test suite).
+- **Untrusted application text**: accessible names, window titles and
+  control text are sanitized before display and never take part in a
+  permission, policy or approval decision.
 
 ## Requirements
 
@@ -123,6 +172,26 @@ ALWIN: Verified: the file still exists inside the permitted roots and the
   the builtin registry (LibreOffice Writer/Calc, Evince, Okular, or
   the `xdg-open` desktop default handler) — detection and all tests
   work without any of them; Alwin Fusion never installs applications.
+- v0.4 desktop automation additionally needs (installed by **you** —
+  Alwin Fusion never installs anything):
+
+  | Dependency | Enables | If missing |
+  |---|---|---|
+  | `python3-gi` + `gir1.2-atspi-2.0` (`gi.repository.Atspi`) | the AT-SPI backend | clear "capability unavailable" errors; everything else keeps working |
+  | a running AT-SPI bus (`org.a11y.Bus`, normally present in any logged-in desktop session) | live interface access | honest `state unknown` reports |
+  | LibreOffice Writer or Calc **exposing its accessibility interface** | inspect/find/read/activate/enter/save | honest `process_started` / "no accessible interface" reports |
+
+  **Desktop accessibility must be enabled for the application to be
+  visible on the bus.** On Ubuntu GNOME this means GNOME Settings →
+  Accessibility (or `gsettings set org.gnome.desktop.interface
+  toolkit-accessibility true` — *you* run this; Alwin Fusion never
+  changes desktop settings). Observed on the development machine
+  (Ubuntu 26.04.1, GNOME on Wayland): the AT-SPI bus and registry are
+  live and GNOME apps (Nautilus, gnome-shell) expose interfaces, but
+  with `toolkit-accessibility=false` LibreOffice 26.2.6.3 does *not*
+  register — ALWIN then reports `process_started` and refuses to fake
+  a window it cannot see. The core and all 404 tests work without any
+  of these; the automated suite never touches a real desktop.
 
 ## Quick start
 
@@ -158,6 +227,22 @@ python3 -m ai_core.cli "Open summary.pdf in Documents with the default applicati
 
 # v0.3: see what a launch would do, without doing it (no approval prompt)
 python3 -m ai_core.cli --dry-run "Open summary.txt in Documents with LibreOffice Writer"
+
+# v0.4: read-only desktop automation (no approval, nothing mutated)
+python3 -m ai_core.cli "Inspect the state of LibreOffice Writer"
+python3 -m ai_core.cli "Find the Save button in LibreOffice Writer"
+python3 -m ai_core.cli "Read the text of the Title label in LibreOffice Writer"
+
+# v0.4: approval-gated automation mutations
+python3 -m ai_core.cli "Activate the OK button in LibreOffice Calc"
+python3 -m ai_core.cli 'Enter "42" into the Search entry in LibreOffice Calc'
+python3 -m ai_core.cli "Save the document in LibreOffice Writer to Documents/notes.txt"
+
+# v0.4: multi-step task (approved once, every step verified)
+python3 -m ai_core.cli "Create a folder named Batch in Documents then create a file named log.txt in Documents containing done"
+
+# v0.4: see the whole sequence without doing anything
+python3 -m ai_core.cli --dry-run "Inspect the state of LibreOffice Writer then find the Save button in LibreOffice Writer"
 
 # Show effective configuration / probe the local AI runtime
 python3 -m ai_core.cli --show-config
@@ -232,24 +317,36 @@ python3 -m unittest discover -s tests -v
 ```
 
 All tests run in temporary directories; they never modify your real
-`~/Documents` and never start a real desktop application (the launch
-adapter's `popen`/`which` are injected fakes in tests). The suite
-(316 tests) covers supported/unsupported commands, traversal and
-symlink escapes, permission denial, approval rejection, directory
-creation, verification failure, Ollama-unavailable operation, absence
-of overwrite/delete capability, dry-run inertness, audit
-redaction/permissions, the v0.2 document features (report rendering,
-workbook creation with formula preservation, PDF structural
-validation, content-source checks, lying/tampering handlers), and the
-v0.3 application engine: registry schema validation, unknown
-integration ids, arbitrary-executable/flag/shell rejection,
-discovery statuses, discovery never spawning processes, argv-only
-launches with `shell=False`, opening permitted files, outside-root
+`~/Documents` and never start or touch a real desktop application (the
+launch adapter's `popen`/`which`, the automation backend's AT-SPI
+session, adapter factory, clock and `/proc` root are all injected
+fakes; fake `/proc` trees are temporary directories of `<pid>/comm`
+files). The suite (404 tests) covers supported/unsupported commands,
+traversal and symlink escapes, permission denial, approval rejection,
+directory creation, verification failure, Ollama-unavailable operation,
+absence of overwrite/delete capability, dry-run inertness,
+audit redaction/permissions, the v0.2 document features (report
+rendering, workbook creation with formula preservation, PDF structural
+validation, content-source checks, lying/tampering handlers), the
+v0.3 application engine (registry schema validation, unknown
+integration ids, arbitrary-executable/flag/shell rejection, discovery
+statuses, argv-only launches, opening permitted files, outside-root
 refusal, launch-failure reporting, verification failures, audit
-fields for launches, and preservation of v0.1/v0.2 behaviour. The
-spreadsheet/PDF pipeline tests skip themselves politely when the
-optional package is not installed (the standard library validator
-tests always run).
+fields), and the v0.4 automation engine: unknown action/role/name
+rejections, capability-unavailable reporting, permission denial for
+applications without the `automate` capability, the honest state
+machine (`not_installed`/`installed_not_running`/`process_started`
+never upgraded to a window or document claim), control find/read with
+bounds, approval and dry-run inertness for mutations, revalidation and
+stale-control refusal, dead-bus/dead-control reporting, digest-confirmed
+saves and lying-save verification failures, dishonest adapters failing
+verification, untrusted application text sanitization, audit redaction
+of entered text, per-step sequence verification with stop-on-failure
+and skipped dependents, source-level bans on keystroke/mouse/shell
+primitives in the automation package, and preservation of
+v0.1/v0.2/v0.3 behaviour. The spreadsheet/PDF pipeline tests skip
+themselves politely when the optional package is not installed (the
+standard library validator tests always run).
 
 ### Manual smoke test (opt-in, real LibreOffice)
 
@@ -265,6 +362,26 @@ detection first (read-only), then asks you to approve a single
 `open ... with LibreOffice Writer` inside a throwaway sandbox home
 (your real `~/Documents` is never touched) and prints the resulting
 audit record.
+
+### Manual automation smoke test (opt-in, real LibreOffice + AT-SPI)
+
+For a developer who wants to watch ALWIN drive a *real* LibreOffice
+window over the accessibility bus, approving every mutation:
+
+```bash
+ALWIN_AUTOMATION_SMOKE=1 scripts/manual_smoke_automation.sh
+```
+
+The script explains every step before running it. It runs read-only
+state inspection first, then an approval-gated launch of a sandbox
+file, re-inspection, find/read, an approval-gated controlled-save
+attempt (whose *expected* outcome on an unmodified document is an
+honest "state unknown" failure — the digest rule working), and a
+two-step task sequence. Everything runs inside a throwaway sandbox
+home — your real `~/Documents` and your real LibreOffice profile are
+never touched (the sandbox is deleted on exit). If the desktop does
+not expose LibreOffice's accessibility interface, every step fails
+honestly instead of guessing; see Requirements above.
 
 ## How the local model is used
 
@@ -287,10 +404,14 @@ ai_core/        config · command_parser · specs · planner · permissions ·
 ai_runtime/     ollama_client (stdlib HTTP, never pulls models)
 integrations/   ActionDispatcher + filesystem tools + documents/
                 (report · pdf · spreadsheet · tools) + apps/
-                (registry · discovery · launch · tools — extension point)
-tests/          unittest suite (temporary sandboxes only)
+                (registry · discovery · launch · tools) + automation/
+                (base · processes · atspi_backend · libreoffice ·
+                 tools · sequence · mcp — extension point)
+tests/          unittest suite (temporary sandboxes + in-memory
+                accessibility trees only)
 docs/           ARCHITECTURE.md · SECURITY.md
-scripts/        run_tests.sh · manual_smoke_apps.sh (opt-in)
+scripts/        run_tests.sh · manual_smoke_apps.sh ·
+                manual_smoke_automation.sh (opt-in)
 requirements.txt  optional v0.2 document dependencies (you install them)
 app-bridge/ desktop/ models/ os-build/   reserved for later milestones
 ```
@@ -304,13 +425,17 @@ app-bridge/ desktop/ models/ os-build/   reserved for later milestones
 ## Status and known limitations
 
 Implemented: the full parse → plan → permission → approval →
-execute → verify → audit loop for all ten actions (including
+execute → verify → audit loop for all seventeen actions (including
 `create_report`, `create_pdf`, `create_spreadsheet`,
-`detect_applications`, `open_file`), CLI (dry-run, single-command and
-interactive modes), structured-content validation, audit logging with
-structured-content redaction, local Ollama client with graceful
-degradation, the application registry/discovery/launch engine, and the
-automated test suite.
+`detect_applications`, `open_file`, and the seven v0.4 automation
+actions), CLI (dry-run, single-command and interactive modes),
+structured-content validation, audit logging with structured-content
+redaction, local Ollama client with graceful degradation, the
+application registry/discovery/launch engine, the AT-SPI desktop
+automation engine for LibreOffice Writer/Calc (honest state machine,
+control finding/reading, allowlisted activation and text entry,
+digest-confirmed saves, validated multi-step sequences), and the
+automated test suite (404 tests).
 
 Known limitations (details in `docs/SECURITY.md`):
 
@@ -321,19 +446,41 @@ Known limitations (details in `docs/SECURITY.md`):
   creation metadata), and text outside latin-1 is replaced (basic
   Helvetica fonts only — no CJK/emoji glyphs).
 - Optional dependencies are loaded lazily; without `openpyxl` /
-  `reportlab` those actions fail cleanly with an install hint.
-- **A successful launch proves only that the process started** —
-  Alwin Fusion never inspects, controls or automates the application
-  window, never injects keystrokes, and never claims a document was
-  visually reviewed or a spreadsheet recalculated.
+  `reportlab` those actions fail cleanly with an install hint; without
+  `gi`/AT-SPI the automation backend reports "capability unavailable"
+  honestly and nothing fakes it.
+- **Automation needs the application to expose accessibility.** If the
+  desktop keeps assistive technology disabled (e.g. GNOME
+  `toolkit-accessibility=false`), LibreOffice will not appear on the
+  AT-SPI bus and every control operation honestly reports
+  `process_started` / "state unknown". Alwin Fusion never enables this
+  setting itself.
+- **v0.4 automates LibreOffice Writer and Calc only** (via AT-SPI);
+  other registry applications are denied by the permission stage, and
+  there is deliberately no generic "automate anything" path.
+- **Text entry targets input fields only** (role `entry`, ≤ 4096
+  chars, confirmed by read-back); document bodies are never edited
+  through GUI automation — content creation stays with the trusted
+  document generators.
+- **A save is reported only when the file digest actually changes**
+  (≤ 2s confirmation window); an activation that produces no visible
+  file change is an honest failure, not a silent success.
+- **A successful launch still proves only that the process started** —
+  that claim is separate from (and never upgraded into) automation
+  states.
 - **Detection is heuristic** (PATH executables + desktop-entry file
   names in fixed directories); a broken install can be reported as
   `detection_failed`, and unknown viewers as `installed_but_unsupported`.
+- **No MCP server exists** — v0.4 ships future-MCP-compatible tool
+  *descriptors* (capabilities, schemas, permissions, timeouts, result
+  rules) only; `integrations/automation/mcp.py` is a manifest, not a
+  transport.
 - Still deliberately absent: file deletion/overwrite, shell or
-  arbitrary command execution, arbitrary application flags/commands,
-  software installation, network operations, process sandboxing,
-  multi-user support, MCP integrations, GUI accessibility
-  automation, and bootable OS images.
+  arbitrary command execution, keystroke/mouse synthesis, arbitrary
+  application flags/commands, software installation, network
+  operations, process sandboxing, multi-user support, UNO-based
+  LibreOffice control (planned; the unauthenticated UNO socket was
+  deliberately not opened in v0.4), and bootable OS images.
 
 Passing tests does not by itself make a system secure — read
 `docs/SECURITY.md` for the actual threat model (TOCTOU races,

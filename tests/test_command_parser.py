@@ -177,13 +177,16 @@ class TestUnsupportedCommands(unittest.TestCase):
 
 class TestActionValidation(unittest.TestCase):
     def test_allowlist_is_exactly_expected(self):
-        # v0.3 extension: detect_applications (read-only) and open_file
-        # (approval-gated launch) joined the pinned set.  This is an
-        # explicit extension of the allowlist, not a weakening: all ten
-        # actions are validated per-schema, mutating ones require
-        # approval, and none can delete, move, overwrite, shell out or
-        # execute code.  open_file selects an application only through
-        # the reviewed registry — never an executable or flag.
+        # v0.4 extension: seven desktop-automation actions joined the
+        # pinned set (inspect_application, find_control, read_control —
+        # read-only; activate_control, enter_text, save_document —
+        # approval-gated mutations; task_sequence — runs other validated
+        # actions, approval-gated as a whole).  The set is still pinned
+        # exactly so nothing can slip in: there is no keystroke, mouse,
+        # shell, coordinate, install or delete action, automation targets
+        # are reviewed registry ids only, and model output never becomes
+        # executable code — it re-enters validate_action like everything
+        # else.
         self.assertEqual(
             set(ACTION_SCHEMA),
             {
@@ -196,9 +199,47 @@ class TestActionValidation(unittest.TestCase):
                 "create_spreadsheet",
                 "detect_applications",
                 "open_file",
+                "inspect_application",
+                "find_control",
+                "read_control",
+                "activate_control",
+                "enter_text",
+                "save_document",
+                "task_sequence",
                 "explain",
             },
         )
+
+    def test_automation_role_vocabulary_is_consistent(self):
+        # The parser's typed role words, the planner's canonical role
+        # set, and the automation layer's per-operation policy sets must
+        # never drift apart.
+        from ai_core.planner import KNOWN_ROLES
+        from ai_core.command_parser import ROLE_ALIASES
+        from integrations.automation.base import (
+            ACTIVATABLE_ROLES,
+            ENTERABLE_ROLES,
+            READABLE_ROLES,
+        )
+
+        self.assertTrue(set(ROLE_ALIASES.values()) <= set(KNOWN_ROLES))
+        for policy in (READABLE_ROLES, ACTIVATABLE_ROLES, ENTERABLE_ROLES):
+            self.assertTrue(
+                set(policy) <= set(KNOWN_ROLES),
+                f"{sorted(set(policy) - set(KNOWN_ROLES))} not in KNOWN_ROLES",
+            )
+
+    def test_automation_limits_match_between_planner_and_base(self):
+        import ai_core.planner as planner
+        import integrations.automation.base as base
+
+        self.assertEqual(planner.MAX_CONTROL_NAME_CHARS, base.MAX_CONTROL_NAME_CHARS)
+        self.assertEqual(
+            planner.MAX_ENTERED_TEXT_CHARS, base.MAX_ENTERED_TEXT_CHARS
+        )
+        self.assertLessEqual(planner.MAX_SEQUENCE_STEPS, 8)
+        self.assertIn(".txt", planner.SAVEABLE_FILE_EXTENSIONS)
+        self.assertIn(".xlsx", planner.SAVEABLE_FILE_EXTENSIONS)
 
     def test_no_destructive_or_exec_actions(self):
         for banned in ("delete", "remove", "overwrite", "exec", "shell", "run_command"):

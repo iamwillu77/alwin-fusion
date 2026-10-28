@@ -8,13 +8,24 @@ without doing the work fails verification.
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional
 
 from ai_core import specs
 from ai_core.executor import ExecutionResult
-from ai_core.permissions import PermissionChecker
+from ai_core.permissions import PermissionChecker, pretty_path
+from integrations.automation.base import (
+    ACTION_PERFORMED,
+    APPLICATION_STATES,
+    CONTROL_IDENTIFIED,
+    DOCUMENT_OPEN,
+    INTERFACE_STATES,
+    MAX_READ_TEXT_CHARS,
+    RESULT_VERIFIED,
+    safe_app_text,
+)
 from integrations.documents.pdf import validate_pdf_bytes
 from integrations.documents.report import render_text_report
 from integrations.documents.spreadsheet import inspect_workbook
@@ -279,6 +290,20 @@ class Verifier:
         if name in ("create_report", "create_pdf", "create_spreadsheet"):
             return self._verify_document(name, action, checks)
 
+        # ---- v0.4 desktop automation --------------------------------- #
+        if name in (
+            "inspect_application",
+            "find_control",
+            "read_control",
+            "activate_control",
+            "enter_text",
+            "save_document",
+        ):
+            return self._verify_automation(name, action, execution, checks)
+
+        if name == "task_sequence":
+            return self._verify_sequence(action, execution, checks)
+
         if name == "explain":
             explanation = execution.data.get("explanation")
             self._add(
@@ -477,6 +502,374 @@ class Verifier:
                 "calculate them)."
                 if ok
                 else "Verification failed: the workbook does not match the specification."
+            ),
+            checks=checks,
+        )
+
+    # ------------------------------------------------------------------ #
+    # Desktop automation (v0.4)
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _control_matches(
+        checks: List[Dict], action: dict, execution: ExecutionResult
+    ) -> bool:
+        """The reported control must match the validated locator."""
+        locator = action.get("control") or {}
+        reported = execution.data.get("control")
+
+        def _norm(value: object) -> str:
+            # Names reach the parser lower-cased and whitespace-collapsed;
+            # compare the same way the backend does — case and spacing
+            # blind — but never ignore anything else.
+            return " ".join(str(value or "").lower().split())
+
+        found = Verifier._add(
+            checks,
+            "control_found",
+            isinstance(reported, dict) and bool(reported.get("role")),
+            f"role '{reported.get('role')}' reported"
+            if isinstance(reported, dict)
+            else "no control reported",
+        )
+        role_ok = Verifier._add(
+            checks,
+            "role_matches",
+            isinstance(reported, dict)
+            and _norm(reported.get("role")) == _norm(locator.get("role")),
+            f"expected '{locator.get('role')}', got "
+            f"'{reported.get('role') if isinstance(reported, dict) else None}'",
+        )
+        wanted_name = safe_app_text(locator.get("name", ""), 120)
+        name_ok = Verifier._add(
+            checks,
+            "name_matches",
+            not wanted_name
+            or (
+                isinstance(reported, dict)
+                and _norm(reported.get("name")) == _norm(wanted_name)
+            ),
+            f"expected name '{wanted_name}'" if wanted_name else "role-only search",
+        )
+        return found and role_ok and name_ok
+
+    def _verify_automation(
+        self,
+        name: str,
+        action: dict,
+        execution: ExecutionResult,
+        checks: List[Dict],
+    ) -> VerificationResult:
+        data = execution.data
+
+        if name == "inspect_application":
+            snapshot = data.get("snapshot")
+            well_formed = self._add(
+                checks,
+                "report_well_formed",
+                isinstance(snapshot, dict)
+                and snapshot.get("application") == action.get("application")
+                and snapshot.get("state") in APPLICATION_STATES,
+                f"state '{snapshot.get('state') if isinstance(snapshot, dict) else None}'",
+            )
+            interface_ok = True
+            if isinstance(snapshot, dict) and snapshot.get("state") in INTERFACE_STATES:
+                interface_ok = self._add(
+                    checks,
+                    "interface_state_backed",
+                    snapshot.get("interface_detected") is True
+                    and snapshot.get("a11y_available") is True,
+                    "an interface state claims a live accessible connection",
+                )
+            document_ok = True
+            if isinstance(snapshot, dict) and snapshot.get("state") == DOCUMENT_OPEN:
+                document_ok = self._add(
+                    checks,
+                    "document_state_backed",
+                    snapshot.get("document_reliable") is True
+                    and bool(snapshot.get("document")),
+                    "a document-open claim needs a reliably identified document",
+                )
+            ok = well_formed and interface_ok and document_ok
+            state = snapshot.get("state") if isinstance(snapshot, dict) else "?"
+            return VerificationResult(
+                status=STATUS_PASSED if ok else STATUS_FAILED,
+                message=(
+                    f"State report verified as internally honest (reported "
+                    f"state: '{state}'); inspection changed nothing."
+                    if ok
+                    else "Verification failed: the state report claims more "
+                    "than its evidence supports."
+                ),
+                checks=checks,
+            )
+
+        if name == "find_control":
+            control_ok = self._control_matches(checks, action, execution)
+            state_ok = self._add(
+                checks,
+                "state_control_identified",
+                data.get("state") == CONTROL_IDENTIFIED,
+                str(data.get("state")),
+            )
+            ok = control_ok and state_ok
+            return VerificationResult(
+                status=STATUS_PASSED if ok else STATUS_FAILED,
+                message=(
+                    "Control identity verified against the validated locator "
+                    "(read-only operation; nothing was changed)."
+                    if ok
+                    else "Verification failed: the reported control does not "
+                    "match the validated locator."
+                ),
+                checks=checks,
+            )
+
+        if name == "read_control":
+            control_ok = self._control_matches(checks, action, execution)
+            text_reported = self._add(
+                checks,
+                "text_reported",
+                isinstance(data.get("text"), str),
+                f"{data.get('text_chars')} chars reported",
+            )
+            bounded = self._add(
+                checks,
+                "text_within_limit",
+                isinstance(data.get("text"), str)
+                and len(data["text"]) <= MAX_READ_TEXT_CHARS,
+                f"stored {len(data.get('text', ''))} chars "
+                f"(limit {MAX_READ_TEXT_CHARS})",
+            )
+            ok = control_ok and text_reported and bounded
+            return VerificationResult(
+                status=STATUS_PASSED if ok else STATUS_FAILED,
+                message=(
+                    "Read verified against the execution record (the text "
+                    "itself is application-provided, untrusted display data "
+                    "and is not written to the audit log)."
+                    if ok
+                    else "Verification failed: the read result is missing, "
+                    "bounded incorrectly, or points at the wrong control."
+                ),
+                checks=checks,
+            )
+
+        if name == "activate_control":
+            control_ok = self._control_matches(checks, action, execution)
+            performed = self._add(
+                checks,
+                "action_performed",
+                data.get("action_performed") is True,
+                str(data.get("action_performed")),
+            )
+            revalidated = self._add(
+                checks,
+                "control_revalidated",
+                data.get("revalidated") is True,
+                "application and control were re-checked before the action",
+            )
+            state_ok = self._add(
+                checks,
+                "state_action_level",
+                data.get("state") in (ACTION_PERFORMED, RESULT_VERIFIED),
+                str(data.get("state")),
+            )
+            ok = control_ok and performed and revalidated and state_ok
+            verified = data.get("state") == RESULT_VERIFIED
+            return VerificationResult(
+                status=STATUS_PASSED if ok else STATUS_FAILED,
+                message=(
+                    "Activation verified by re-reading the control state "
+                    "(result verified)."
+                    if ok and verified
+                    else (
+                        "Action performed on a revalidated control; "
+                        "downstream effects are not independently verifiable "
+                        "through accessibility (state: action_performed)."
+                        if ok
+                        else "Verification failed: the activation was not "
+                        "reported with evidence (missing action/revalidation)."
+                    )
+                ),
+                checks=checks,
+            )
+
+        if name == "enter_text":
+            control_ok = self._control_matches(checks, action, execution)
+            performed = self._add(
+                checks,
+                "action_performed",
+                data.get("action_performed") is True,
+                str(data.get("action_performed")),
+            )
+            readback = self._add(
+                checks,
+                "readback_confirmed",
+                data.get("readback_match") is True
+                and data.get("state") == RESULT_VERIFIED,
+                "the field was read back after entry",
+            )
+            length_ok = self._add(
+                checks,
+                "entered_length_matches",
+                data.get("entered_chars") == len(action.get("content", "")),
+                f"{data.get('entered_chars')} chars entered, "
+                f"{len(action.get('content', ''))} approved",
+            )
+            ok = control_ok and performed and readback and length_ok
+            return VerificationResult(
+                status=STATUS_PASSED if ok else STATUS_FAILED,
+                message=(
+                    "Entered text confirmed by reading the field back "
+                    "(result verified through the application's accessible "
+                    "text; the audit log stores a length marker only)."
+                    if ok
+                    else "Verification failed: the entered text could not be "
+                    "confirmed (state unknown — no success is claimed)."
+                ),
+                checks=checks,
+            )
+
+        # name == "save_document"
+        try:
+            resolved = self.checker.resolve(action.get("path", ""), operation="save")
+        except Exception as exc:  # noqa: BLE001 - re-resolution failure
+            return VerificationResult(
+                status=STATUS_FAILED,
+                message=f"Verification failed: the save target is no longer "
+                f"permitted ({exc}).",
+                checks=checks,
+            )
+        exists = self._add(checks, "path_exists", resolved.exists(), str(resolved))
+        is_file = exists and self._add(
+            checks, "is_file", resolved.is_file(), str(resolved)
+        )
+        activation = self._add(
+            checks,
+            "save_activation_recorded",
+            data.get("action_performed") is True,
+            "the reviewed Save control was activated",
+        )
+        before = data.get("before_digest")
+        after = data.get("after_digest")
+        digests_ok = self._add(
+            checks,
+            "digests_recorded_and_changed",
+            isinstance(before, str)
+            and isinstance(after, str)
+            and bool(before)
+            and bool(after)
+            and before != after,
+            "sha256 before the activation differs from after",
+        )
+        changed_claim = self._add(
+            checks,
+            "file_change_confirmed",
+            data.get("file_changed") is True,
+            str(data.get("file_changed")),
+        )
+        disk_ok = False
+        if is_file and isinstance(after, str) and after:
+            try:
+                current = hashlib.sha256(resolved.read_bytes()).hexdigest()
+            except OSError as exc:
+                current = ""
+                self._add(checks, "disk_re_readable", False, str(exc))
+            else:
+                disk_ok = self._add(
+                    checks,
+                    "disk_matches_recorded_digest",
+                    current == after,
+                    "re-read independently at verification time",
+                )
+        else:
+            self._add(checks, "disk_matches_recorded_digest", False, "no digest")
+        ok = exists and is_file and activation and digests_ok and changed_claim and disk_ok
+        return VerificationResult(
+            status=STATUS_PASSED if ok else STATUS_FAILED,
+            message=(
+                f"Save verified: {pretty_path(resolved, self.checker.home)} on "
+                f"disk matches the digest recorded after the Save control was "
+                f"activated — the activation alone was never treated as a save."
+                if ok
+                else "Verification failed: the file change could not be "
+                "confirmed against the recorded digest, so NO save is "
+                "reported (state unknown)."
+            ),
+            checks=checks,
+        )
+
+    def _verify_sequence(
+        self, action: dict, execution: ExecutionResult, checks: List[Dict]
+    ) -> VerificationResult:
+        """Re-verify every step independently; one failure fails the task."""
+        steps = action.get("steps") or []
+        records = execution.data.get("steps")
+        recorded = isinstance(records, list) and len(records) == len(steps)
+        self._add(
+            checks,
+            "all_steps_recorded",
+            recorded,
+            f"{len(records) if isinstance(records, list) else 0} of "
+            f"{len(steps)} step results recorded",
+        )
+        statuses_ok = recorded and all(
+            isinstance(record, dict) and record.get("status") == "ok"
+            and record.get("ok") is True
+            for record in records
+        )
+        self._add(
+            checks,
+            "no_step_failed_or_skipped",
+            bool(statuses_ok),
+            "every step reports status 'ok'"
+            if statuses_ok
+            else "a step failed, was denied or was skipped",
+        )
+        if not (recorded and statuses_ok):
+            return VerificationResult(
+                status=STATUS_FAILED,
+                message=(
+                    "Verification failed: the sequence has an incomplete or "
+                    "unsuccessful step, so complete task success is NOT "
+                    "reported."
+                ),
+                checks=checks,
+            )
+
+        for index, (step, record) in enumerate(zip(steps, records), start=1):
+            step_execution = ExecutionResult(
+                ok=True,
+                executed=bool(record.get("executed")),
+                dry_run=False,
+                message=str(record.get("message") or ""),
+                error=record.get("error"),
+                data=dict(record.get("data") or {}),
+            )
+            sub_checks: List[Dict] = []
+            result = self._verify_executed(
+                step.get("action"), step, step_execution, sub_checks
+            )
+            for check in sub_checks:
+                renamed = dict(check)
+                renamed["name"] = f"step_{index}:{check['name']}"
+                checks.append(renamed)
+            if result.status != STATUS_PASSED:
+                return VerificationResult(
+                    status=STATUS_FAILED,
+                    message=(
+                        f"Verification failed at step {index} of {len(steps)}: "
+                        f"{result.message} The task is not reported as "
+                        f"successful."
+                    ),
+                    checks=checks,
+                )
+        return VerificationResult(
+            status=STATUS_PASSED,
+            message=(
+                f"All {len(steps)} step(s) verified independently; partial "
+                f"success is never reported as full success."
             ),
             checks=checks,
         )

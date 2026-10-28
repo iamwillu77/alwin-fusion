@@ -41,6 +41,14 @@ ACTION_SCHEMA: dict[str, frozenset] = {
     "create_spreadsheet": frozenset({"action", "path", "spec"}),
     "detect_applications": frozenset({"action", "integration"}),
     "open_file": frozenset({"action", "path", "application"}),
+    # ---- v0.4 desktop automation (closed set; see AUTOMATION_ACTIONS) ----
+    "inspect_application": frozenset({"action", "application"}),
+    "find_control": frozenset({"action", "application", "control"}),
+    "read_control": frozenset({"action", "application", "control"}),
+    "activate_control": frozenset({"action", "application", "control"}),
+    "enter_text": frozenset({"action", "application", "control", "content"}),
+    "save_document": frozenset({"action", "application", "path"}),
+    "task_sequence": frozenset({"action", "steps"}),
     "explain": frozenset({"action", "target"}),
 }
 
@@ -59,6 +67,13 @@ PATH_ACTIONS = (
 #: and therefore need user approval.  ``open_file`` launches an
 #: external application process — read-only detection
 #: (``detect_applications``) is deliberately *not* in this set.
+#:
+#: v0.4: the three state-changing automation mutations (activate,
+#: enter text, save) join the set because they act on a running
+#: application; ``task_sequence`` joins because it *runs* other actions
+#: (each sequence is approved as a whole, with every step enumerated in
+#: the proposal).  The read-only automation actions (inspect, find,
+#: read) stay out, exactly like detection.
 MUTATING_ACTIONS = frozenset(
     {
         "create_directory",
@@ -67,8 +82,70 @@ MUTATING_ACTIONS = frozenset(
         "create_pdf",
         "create_spreadsheet",
         "open_file",
+        "activate_control",
+        "enter_text",
+        "save_document",
+        "task_sequence",
     }
 )
+
+#: The v0.4 automation actions (three read-only, three mutating; the
+#: seventh action, task_sequence, composes them).  Anything outside
+#: this set is rejected by :func:`validate_action` before permissions
+#: ever run.
+AUTOMATION_ACTIONS = frozenset(
+    {
+        "inspect_application",
+        "find_control",
+        "read_control",
+        "activate_control",
+        "enter_text",
+        "save_document",
+    }
+)
+
+#: Canonical accessible roles accepted in ``control.role``.  The values
+#: are AT-SPI role names ('toggle button', 'page tab', ...);
+#: ``integrations.automation`` keeps the per-operation role policy sets
+#: (readable / activatable / enterable) and tests pin both together.
+KNOWN_ROLES = frozenset(
+    {
+        "application",
+        "button",
+        "check box",
+        "combo box",
+        "document frame",
+        "entry",
+        "frame",
+        "heading",
+        "label",
+        "link",
+        "list",
+        "list item",
+        "menu bar",
+        "menu item",
+        "page tab",
+        "paragraph",
+        "radio button",
+        "status bar",
+        "table",
+        "table cell",
+        "text",
+        "toggle button",
+        "tool bar",
+        "window",
+    }
+)
+
+#: Only reviewed file types may be the target of a GUI save (the
+#: extension check happens at plan time, containment at permission time).
+SAVEABLE_FILE_EXTENSIONS = frozenset({".txt", ".xlsx"})
+
+#: Payload bounds for automation actions (kept in sync with
+#: ``integrations.automation.base``; tests pin the pair).
+MAX_CONTROL_NAME_CHARS = 120
+MAX_ENTERED_TEXT_CHARS = 4096
+MAX_SEQUENCE_STEPS = 8
 
 #: Generated-document actions and the only file extension each produces.
 DOCUMENT_EXTENSIONS = {
@@ -111,6 +188,68 @@ def _validate_path(value: object) -> str:
     if ".." in Path(value).parts:
         raise PlanValidationError("'path' must not contain '..'.")
     return value.strip()
+
+
+def _resolve_application(value: object) -> str:
+    """Resolve an automation target against the trusted registry.
+
+    Automation names an application only by a reviewed registry id —
+    never by executable, path or command-line flag.  Unknown tokens are
+    rejected here, before permissions and before any adapter runs.
+    """
+    try:
+        application = resolve_integration_id(value, BUILTIN_REGISTRY)
+    except RegistryError as exc:
+        raise PlanValidationError(str(exc)) from exc
+    if not application:
+        raise PlanValidationError(
+            "Automation needs an explicit 'application' id, e.g. "
+            "'LibreOffice Writer' or 'libreoffice-calc'."
+        )
+    return application
+
+
+def _validate_control(payload: object, *, action: str) -> dict:
+    """Validate a control locator: canonical role + optional name."""
+    if not isinstance(payload, dict):
+        raise PlanValidationError(
+            f"'control' must be an object, got {type(payload).__name__}."
+        )
+    extra = set(payload) - {"role", "name"}
+    if extra:
+        raise PlanValidationError(
+            f"'control' has unexpected fields: {', '.join(sorted(extra))}."
+        )
+    role = payload.get("role")
+    if not isinstance(role, str) or not role.strip():
+        raise PlanValidationError("'control.role' is required, e.g. 'button'.")
+    role_key = " ".join(role.replace("_", " ").lower().split())
+    if role_key not in KNOWN_ROLES:
+        raise PlanValidationError(
+            f"'{role_key}' is not a known accessible role. Known roles: "
+            f"{', '.join(sorted(KNOWN_ROLES))}."
+        )
+    name = payload.get("name", "")
+    if name is None:
+        name = ""
+    if not isinstance(name, str):
+        raise PlanValidationError(
+            f"'control.name' must be a string, got {type(name).__name__}."
+        )
+    name = name.strip()
+    if "\x00" in name:
+        raise PlanValidationError("'control.name' contains a null byte.")
+    if len(name) > MAX_CONTROL_NAME_CHARS:
+        raise PlanValidationError(
+            f"'control.name' is too long (limit {MAX_CONTROL_NAME_CHARS})."
+        )
+    if action in ("read_control", "activate_control", "enter_text") and not name:
+        raise PlanValidationError(
+            f"'{action}' needs 'control.name' identifying the exact control, "
+            f"e.g. {{'role': 'button', 'name': 'Save'}} (only find_control "
+            f"may search by role alone)."
+        )
+    return {"role": role_key, "name": name}
 
 
 def validate_action(payload: object) -> dict:
@@ -158,6 +297,88 @@ def validate_action(payload: object) -> dict:
         except RegistryError as exc:
             raise PlanValidationError(str(exc)) from exc
         return {"action": action, "integration": integration}
+
+    # ---- v0.4 desktop automation ------------------------------------- #
+
+    if action == "task_sequence":
+        steps = payload.get("steps")
+        if not isinstance(steps, list):
+            raise PlanValidationError(
+                f"'task_sequence' needs a 'steps' list, got "
+                f"{type(steps).__name__}."
+            )
+        if not steps:
+            raise PlanValidationError("'task_sequence' needs at least one step.")
+        if len(steps) > MAX_SEQUENCE_STEPS:
+            raise PlanValidationError(
+                f"'task_sequence' accepts at most {MAX_SEQUENCE_STEPS} steps "
+                f"(got {len(steps)})."
+            )
+        validated_steps = []
+        for index, step in enumerate(steps, start=1):
+            try:
+                checked = validate_action(step)
+            except PlanValidationError as exc:
+                raise PlanValidationError(
+                    f"Step {index} of the sequence is invalid: {exc}"
+                ) from exc
+            if checked["action"] in ("task_sequence", "explain"):
+                raise PlanValidationError(
+                    f"Step {index} of the sequence cannot be a nested "
+                    f"'{checked['action']}'."
+                )
+            validated_steps.append(checked)
+        return {"action": "task_sequence", "steps": validated_steps}
+
+    if action == "inspect_application":
+        return {
+            "action": action,
+            "application": _resolve_application(payload.get("application", "")),
+        }
+
+    if action in (
+        "find_control",
+        "read_control",
+        "activate_control",
+        "enter_text",
+    ):
+        application = _resolve_application(payload.get("application", ""))
+        control = _validate_control(payload.get("control"), action=action)
+        if action == "enter_text":
+            text = payload.get("content")
+            if not isinstance(text, str):
+                raise PlanValidationError(
+                    f"'enter_text' needs string 'content', got "
+                    f"{type(text).__name__}."
+                )
+            if not text:
+                raise PlanValidationError("'enter_text' needs non-empty 'content'.")
+            if "\x00" in text:
+                raise PlanValidationError("'enter_text' content contains a null byte.")
+            if len(text) > MAX_ENTERED_TEXT_CHARS:
+                raise PlanValidationError(
+                    f"Entered text is too long (limit "
+                    f"{MAX_ENTERED_TEXT_CHARS} characters)."
+                )
+            return {
+                "action": action,
+                "application": application,
+                "control": control,
+                "content": text,
+            }
+        return {"action": action, "application": application, "control": control}
+
+    if action == "save_document":
+        application = _resolve_application(payload.get("application", ""))
+        path = _validate_path(payload.get("path"))
+        suffix = Path(path).suffix.lower()
+        if suffix not in SAVEABLE_FILE_EXTENSIONS:
+            supported = ", ".join(sorted(SAVEABLE_FILE_EXTENSIONS))
+            raise PlanValidationError(
+                f"'save_document' supports only {supported} files in this "
+                f"milestone (got '{suffix or 'no extension'}')."
+            )
+        return {"action": action, "application": application, "path": path}
 
     path = _validate_path(payload.get("path"))
 
@@ -416,6 +637,86 @@ def plan_from_intent(
             {"action": "detect_applications", "integration": integration}
         )
 
+    # ---- v0.4 desktop automation ------------------------------------- #
+
+    if intent.intent == command_parser.INSPECT_APPLICATION:
+        return validate_action(
+            {
+                "action": "inspect_application",
+                "application": slots.get("application", ""),
+            }
+        )
+
+    if intent.intent in (
+        command_parser.FIND_CONTROL,
+        command_parser.READ_CONTROL,
+        command_parser.ACTIVATE_CONTROL,
+        command_parser.ENTER_TEXT,
+    ):
+        action_name = {
+            command_parser.FIND_CONTROL: "find_control",
+            command_parser.READ_CONTROL: "read_control",
+            command_parser.ACTIVATE_CONTROL: "activate_control",
+            command_parser.ENTER_TEXT: "enter_text",
+        }[intent.intent]
+        payload = {
+            "action": action_name,
+            "application": slots.get("application", ""),
+            "control": {
+                "role": slots.get("role", ""),
+                "name": slots.get("name", ""),
+            },
+        }
+        if action_name == "enter_text":
+            payload["content"] = slots.get("content", "")
+        return validate_action(payload)
+
+    if intent.intent == command_parser.SAVE_DOCUMENT:
+        path = (slots.get("path") or "").strip()
+        if path and not path.startswith(("/", "~")) and "/" not in path:
+            # A bare file name ('to notes.txt') is placed in the same
+            # default location other commands write to ('Documents').
+            path = _join_path(default_location, path)
+        return validate_action(
+            {
+                "action": "save_document",
+                "application": slots.get("application", ""),
+                "path": path,
+            }
+        )
+
+    if intent.intent == command_parser.TASK_SEQUENCE:
+        commands = list(slots.get("commands") or [])
+        if not commands:
+            raise PlanValidationError("The sequence contains no steps.")
+        steps = []
+        for index, command in enumerate(commands, start=1):
+            sub = command_parser.parse_command(command)
+            if sub.intent in (
+                command_parser.UNSUPPORTED,
+                command_parser.EXIT,
+                command_parser.TASK_SEQUENCE,
+            ):
+                reason = sub.slots.get("reason") or "this step is not supported"
+                raise PlanValidationError(
+                    f"Step {index} of the sequence could not be planned: {reason}"
+                )
+            try:
+                step = plan_from_intent(
+                    sub,
+                    default_location=default_location,
+                    content_loader=content_loader,
+                )
+            except PlanValidationError as exc:
+                raise PlanValidationError(f"Step {index} of the sequence: {exc}") from exc
+            if step.get("action") in ("task_sequence", "explain"):
+                raise PlanValidationError(
+                    f"Step {index} of the sequence cannot be a nested "
+                    f"'{step.get('action')}'."
+                )
+            steps.append(step)
+        return validate_action({"action": "task_sequence", "steps": steps})
+
     if intent.intent == command_parser.EXPLAIN:
         inner = command_parser.parse_command(slots.get("target", ""))
         if inner.intent == command_parser.UNSUPPORTED:
@@ -480,7 +781,54 @@ def describe_action(
         return f"List contents of {display}"
     if name == "read_file":
         return f"Read file {display}"
+    # ---- v0.4 desktop automation ------------------------------------- #
+    if name == "inspect_application":
+        return (
+            f"Inspect application state of "
+            f"{_application_name(action.get('application', ''))} (read-only)"
+        )
+    if name == "find_control":
+        return (
+            f"Find {_control_label(action.get('control') or {})} in "
+            f"{_application_name(action.get('application', ''))} (read-only)"
+        )
+    if name == "read_control":
+        return (
+            f"Read text of {_control_label(action.get('control') or {})} in "
+            f"{_application_name(action.get('application', ''))} (read-only)"
+        )
+    if name == "activate_control":
+        return (
+            f"Activate {_control_label(action.get('control') or {})} in "
+            f"{_application_name(action.get('application', ''))}"
+        )
+    if name == "enter_text":
+        return (
+            f"Enter {len(action.get('content', ''))} characters of text into "
+            f"{_control_label(action.get('control') or {})} in "
+            f"{_application_name(action.get('application', ''))}"
+        )
+    if name == "save_document":
+        return (
+            f"Save the active {_application_name(action.get('application', ''))} "
+            f"document to {display} (confirmed only if the file changes)"
+        )
+    if name == "task_sequence":
+        steps = action.get("steps") or []
+        joined = " -> ".join(
+            describe_action(step, home=home) for step in steps
+        )
+        return f"Run task sequence of {len(steps)} step(s): {joined}"
     return f"Unknown action {name!r}"
+
+
+def _control_label(control: dict) -> str:
+    """One-line, newline-free label for a control locator (approval text)."""
+    label = f"role '{str(control.get('role', '?'))}'"
+    name = " ".join(str(control.get("name", "")).split())
+    if name:
+        label += f" name '{name[:60]}'"
+    return label
 
 
 def _application_name(integration_id: str) -> str:
@@ -516,6 +864,22 @@ SYSTEM_PROMPT = (
     '  (omit "integration" or use "" to detect all)\n'
     '{"action": "open_file", "path": "Documents/report.txt", "application": '
     '"libreoffice-writer"}\n'
+    # ---- v0.4 desktop automation (closed set) ----
+    '{"action": "inspect_application", "application": "libreoffice-writer"} '
+    "  (read-only state report)\n"
+    '{"action": "find_control", "application": "libreoffice-writer", '
+    '"control": {"role": "button", "name": "Save"}}  '
+    '("name" may be omitted to find the first control of a role)\n'
+    '{"action": "read_control", "application": "libreoffice-calc", '
+    '"control": {"role": "entry", "name": "Search"}}  (read-only)\n'
+    '{"action": "activate_control", "application": "libreoffice-writer", '
+    '"control": {"role": "button", "name": "OK"}}\n'
+    '{"action": "enter_text", "application": "libreoffice-writer", '
+    '"control": {"role": "entry", "name": "Find"}, "content": "..."}\n'
+    '{"action": "save_document", "application": "libreoffice-writer", '
+    '"path": "Documents/notes.txt"}\n'
+    '{"action": "task_sequence", "steps": [ ...1 to 8 validated actions, '
+    "one object each, no nested sequences... ]}\n"
     '{"action": "explain", "target": { ...one of the above... }}\n'
     "Rules:\n"
     "- 'path' is relative to the user's home directory, e.g. "
@@ -532,6 +896,23 @@ SYSTEM_PROMPT = (
     "path or command-line flag — no such field exists.\n"
     "- 'open_file' only opens files that already exist inside the "
     "permitted roots; the user approves every launch.\n"
+    "- Automation 'application' must be an application with the 'automate' "
+    "capability: exactly "
+    f"{', '.join(sorted(i.id for i in BUILTIN_REGISTRY.definitions if 'automate' in i.capabilities))} "
+    "in this milestone.\n"
+    "- Automation 'control.role' must be one of: "
+    f"{', '.join(sorted(KNOWN_ROLES))}.\n"
+    "- 'read_control', 'activate_control' and 'enter_text' need an exact "
+    "'control.name'; only 'find_control' may omit it.\n"
+    "- Read-only automation: inspect_application, find_control, read_control. "
+    "Mutating (user approval required): activate_control, enter_text, "
+    "save_document, task_sequence.\n"
+    "- 'enter_text' targets input fields only (role 'entry'); document "
+    "bodies are created with the document actions, never typed into.\n"
+    "- 'save_document' never claims a save by itself: the file must change "
+    "on disk for a save to be verified.\n"
+    "- No action ever exists for shell commands, keystrokes, mouse "
+    "coordinates, installing software or disabling security settings.\n"
     "- No other action ever exists: never propose delete, move, shell, "
     "network or code-execution actions.\n"
     "- If the request cannot be mapped, reply with "

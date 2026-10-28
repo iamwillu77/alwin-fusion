@@ -214,12 +214,15 @@ class TestNoDestructiveCapability(unittest.TestCase):
     def test_allowlist_has_no_destructive_actions(self):
         from ai_core.planner import ACTION_SCHEMA, MUTATING_ACTIONS
 
-        # v0.3 extension: detect_applications (read-only detection, no
-        # approval needed) and open_file (opens an existing,
-        # permission-checked file via the reviewed registry; requires
-        # approval) joined the allowlist.  The set is still pinned
-        # exactly so nothing new can slip in unnoticed, and neither new
-        # action can delete, overwrite, or run arbitrary commands.
+        # v0.4 extension: seven desktop-automation actions joined the
+        # pinned allowlist (three read-only: inspect/find/read; three
+        # approval-gated mutations: activate/enter/save; task_sequence,
+        # approval-gated as a whole).  The set is still pinned exactly
+        # so nothing new can slip in unnoticed, and none of the new
+        # actions can delete, overwrite, synthesize keystrokes/mouse
+        # events, or run arbitrary commands — activation goes through
+        # the accessibility action interface of an identified control
+        # only.
         self.assertEqual(
             set(ACTION_SCHEMA),
             {
@@ -232,13 +235,22 @@ class TestNoDestructiveCapability(unittest.TestCase):
                 "create_spreadsheet",
                 "detect_applications",
                 "open_file",
+                "inspect_application",
+                "find_control",
+                "read_control",
+                "activate_control",
+                "enter_text",
+                "save_document",
+                "task_sequence",
                 "explain",
             },
         )
         # Every filesystem-changing or world-changing action requires
         # approval.  open_file joins because launching an application
-        # changes state outside the sandbox; detection stays out because
-        # it is strictly read-only.
+        # changes state outside the sandbox; detection and read-only
+        # automation stay out because they change nothing.  The three
+        # automation mutations act on a running application, and
+        # task_sequence runs other actions — all four need approval.
         self.assertEqual(
             MUTATING_ACTIONS,
             {
@@ -248,8 +260,15 @@ class TestNoDestructiveCapability(unittest.TestCase):
                 "create_pdf",
                 "create_spreadsheet",
                 "open_file",
+                "activate_control",
+                "enter_text",
+                "save_document",
+                "task_sequence",
             },
         )
+        # Read-only automation never silently joins the mutating set.
+        for read_only in ("inspect_application", "find_control", "read_control"):
+            self.assertNotIn(read_only, MUTATING_ACTIONS)
 
     def test_filesystem_tools_have_no_destructive_calls(self):
         import integrations.filesystem.tools as tools_mod

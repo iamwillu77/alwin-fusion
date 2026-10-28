@@ -28,6 +28,14 @@ CREATE_SPREADSHEET = "create_spreadsheet"
 READ_FILE = "read_file"
 OPEN_FILE = "open_file"
 DETECT_APPLICATIONS = "detect_applications"
+# ---- v0.4 desktop automation ----
+INSPECT_APPLICATION = "inspect_application"
+FIND_CONTROL = "find_control"
+READ_CONTROL = "read_control"
+ACTIVATE_CONTROL = "activate_control"
+ENTER_TEXT = "enter_text"
+SAVE_DOCUMENT = "save_document"
+TASK_SEQUENCE = "task_sequence"
 EXPLAIN = "explain"
 EXIT = "exit"
 UNSUPPORTED = "unsupported"
@@ -42,6 +50,13 @@ INTENTS = (
     READ_FILE,
     OPEN_FILE,
     DETECT_APPLICATIONS,
+    INSPECT_APPLICATION,
+    FIND_CONTROL,
+    READ_CONTROL,
+    ACTIVATE_CONTROL,
+    ENTER_TEXT,
+    SAVE_DOCUMENT,
+    TASK_SEQUENCE,
     EXPLAIN,
     EXIT,
     UNSUPPORTED,
@@ -61,6 +76,15 @@ SUPPORTED_COMMAND_EXAMPLES = (
     "Open summary.txt in Documents with LibreOffice Writer.",
     "Open sales.xlsx in Documents with the default application.",
     "Explain create a folder named Archive in Documents.",
+    # ---- v0.4 desktop automation ----
+    "Inspect the state of LibreOffice Writer.",
+    "Find the Save button in LibreOffice Writer.",
+    "Read the text of the Title label in LibreOffice Writer.",
+    "Activate the OK button in LibreOffice Calc.",
+    'Enter "42" into the Search entry in LibreOffice Calc.',
+    "Save the document in LibreOffice Writer to Documents/notes.txt.",
+    "Create a folder named Batch in Documents then create a file named "
+    "log.txt in Documents containing done.",
 )
 
 
@@ -372,6 +396,356 @@ def _parse_detect_apps(text: str, raw: str) -> Optional[ParsedIntent]:
     return None
 
 
+# ---- v0.4 desktop automation commands ------------------------------------ #
+
+#: Words a user may type for a control role -> the canonical AT-SPI
+#: role names validated by ``ai_core.planner.KNOWN_ROLES`` (tests pin
+#: that every value here exists there).
+ROLE_ALIASES = {
+    "application": "application",
+    "button": "button",
+    "toggle button": "toggle button",
+    "check box": "check box",
+    "checkbox": "check box",
+    "radio button": "radio button",
+    "combo box": "combo box",
+    "dropdown": "combo box",
+    "document": "document frame",
+    "document frame": "document frame",
+    "entry": "entry",
+    "text field": "entry",
+    "input field": "entry",
+    "input": "entry",
+    "frame": "frame",
+    "heading": "heading",
+    "label": "label",
+    "link": "link",
+    "list": "list",
+    "list item": "list item",
+    "menu bar": "menu bar",
+    "menu item": "menu item",
+    "page tab": "page tab",
+    "tab": "page tab",
+    "paragraph": "paragraph",
+    "status bar": "status bar",
+    "table": "table",
+    "table cell": "table cell",
+    "text": "text",
+    "tool bar": "tool bar",
+    "toolbar": "tool bar",
+    "window": "window",
+}
+
+#: Role words as a regex alternation, longest first ('text field' wins
+#: over 'text', 'status bar' over nothing ...).
+_ROLE_ALT = "|".join(
+    re.escape(word) for word in sorted(ROLE_ALIASES, key=len, reverse=True)
+)
+
+_QUOTED_OR_REST = r"\"[^\"]*\"|'[^']*'|.+?"
+
+_INSPECT_RES = (
+    re.compile(
+        r"^(?:inspect|check)\s+(?:the\s+)?(?:application\s+)?"
+        r"(?:state|status)(?:\s+(?:of|for))?\s+(?P<app>.+?)\s*[.?!]?$",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^(?:what(?:'s| is)|show(?:\s+me)?(?:\s+the)?)\s+(?:the\s+)?"
+        r"(?:state|status)\s+of\s+(?P<app>.+?)\s*[.?!]?$",
+        re.IGNORECASE,
+    ),
+    # Plain 'inspect <application>' (the verb is automation-only, so it
+    # cannot collide with v0.1/v0.3 commands).
+    re.compile(r"^inspect\s+(?:the\s+|this\s+|an?\s+)?(?P<app>.+?)\s*[.?!]?$",
+               re.IGNORECASE),
+)
+
+_FIND_NAMED_RE = re.compile(
+    rf"^find\s+(?:a\s+|an\s+|the\s+)?(?:control\s+)?"
+    rf"(?P<name>{_QUOTED_OR_REST})\s+(?P<roleword>{_ROLE_ALT})\b"
+    rf"(?:\s+(?:in|of|inside|for)\s+(?P<app>.+?))?\s*[.?!]?$",
+    re.IGNORECASE,
+)
+_FIND_ROLE_RE = re.compile(
+    rf"^find\s+(?:a\s+|an\s+|the\s+)?(?:control\s+)?(?P<roleword>{_ROLE_ALT})\b"
+    rf"(?:\s+(?:named|called|labeled|labelled)\s+(?P<name>{_QUOTED_OR_REST}))?"
+    rf"(?:\s+(?:in|of|inside|for)\s+(?P<app>.+?))?\s*[.?!]?$",
+    re.IGNORECASE,
+)
+
+#: 'read the text/value/content of [the] <name> <role> in <app>' — the
+#: explicit 'text of' marker keeps file reading ('read notes.txt in
+#: Documents') untouched.
+_READ_CTRL_RE = re.compile(
+    rf"^read\s+(?:the\s+)?(?:text|value|content|contents)\s+(?:of\s+)?"
+    rf"(?:a\s+|an\s+|the\s+)?(?P<name>{_QUOTED_OR_REST})\s+"
+    rf"(?P<roleword>{_ROLE_ALT})\b"
+    rf"(?:\s+(?:in|of|inside|from)\s+(?P<app>.+?))?\s*[.?!]?$",
+    re.IGNORECASE,
+)
+
+_ACTIVATE_RES = (
+    re.compile(
+        rf"^(?:activate|press|click)\s+(?:a\s+|an\s+|the\s+)?(?:control\s+)?"
+        rf"(?P<name>{_QUOTED_OR_REST})\s+(?P<roleword>{_ROLE_ALT})\b"
+        rf"(?:\s+(?:in|of|inside)\s+(?P<app>.+?))?\s*[.?!]?$",
+        re.IGNORECASE,
+    ),
+)
+
+_ENTER_RES = (
+    re.compile(
+        rf"^(?:enter|type|input)\s+(?P<content>{_QUOTED_OR_REST})\s+"
+        rf"(?:into|in|to)\s+(?:a\s+|an\s+|the\s+)?"
+        rf"(?P<name>{_QUOTED_OR_REST})\s+(?P<roleword>{_ROLE_ALT})\b"
+        rf"(?:\s+(?:in|of|inside)\s+(?P<app>.+?))?\s*[.?!]?$",
+        re.IGNORECASE,
+    ),
+)
+
+#: 'save the document in <app> to <path>' — the only save phrasing.
+_SAVE_DOC_RE = re.compile(
+    r"^save\s+(?:the\s+)?(?:my\s+)?"
+    r"(?:document|file|spreadsheet|workbook|doc)s?"
+    r"(?:\s+(?:in|of|from|with)\s+(?P<app>.+?))?"
+    r"(?:\s+to\s+(?P<path>.+?))?\s*[.?!]?$",
+    re.IGNORECASE,
+)
+
+
+def _unsupported_automation(reason: str, raw: str) -> ParsedIntent:
+    return _unsupported(reason, raw)
+
+
+def _parse_inspect(text: str, raw: str) -> Optional[ParsedIntent]:
+    for pattern in _INSPECT_RES:
+        m = pattern.match(text)
+        if not m:
+            continue
+        application = _clean_app_token(m.group("app"))
+        if not application:
+            break
+        return ParsedIntent(INSPECT_APPLICATION, {"application": application}, raw)
+    return None
+
+
+def _control_slots(m) -> Dict[str, object]:
+    role = _canonical_role(_clean_role_word(m.group("roleword")))
+    name = _clean_control_name(m.group("name"))
+    application = _clean_app_token(m.group("app")) if m.groupdict().get("app") else ""
+    return {"application": application, "role": role, "name": name}
+
+
+def _canonical_role(word: str) -> str:
+    """Typed role word -> canonical accessible role name."""
+    return ROLE_ALIASES.get(word, word)
+
+
+def _clean_role_word(word: str) -> str:
+    return " ".join((word or "").lower().split())
+
+
+def _clean_control_name(raw: Optional[str]) -> str:
+    """Trim quotes/whitespace and a leading article from a control name.
+
+    A leftover article alone ('find the status bar in ...' parses the
+    name as 'the') becomes '' — which means "first control of this role".
+    """
+    name = normalize_name(raw)
+    name = re.sub(r"^(?:a|an|the)(?:\s+|$)", "", name, flags=re.IGNORECASE)
+    return name.strip()
+
+
+def _needs_app(raw: str) -> ParsedIntent:
+    return _unsupported_automation(
+        "Name the application to automate, e.g. "
+        "'... in LibreOffice Writer' (v0.4 automates LibreOffice Writer "
+        "and Calc, and always re-checks which application it is acting on).",
+        raw,
+    )
+
+
+def _parse_find_control(text: str, raw: str) -> Optional[ParsedIntent]:
+    m = _FIND_NAMED_RE.match(text)
+    if m is None:
+        m = _FIND_ROLE_RE.match(text)
+    if m is None:
+        return None
+    slots = _control_slots(m)
+    if not slots["application"]:
+        return _needs_app(raw)
+    if not slots["role"]:
+        return _unsupported_automation(
+            "Say which control to find, e.g. "
+            "'Find the Save button in LibreOffice Writer'.",
+            raw,
+        )
+    return ParsedIntent(FIND_CONTROL, slots, raw)
+
+
+def _parse_read_control(text: str, raw: str) -> Optional[ParsedIntent]:
+    m = _READ_CTRL_RE.match(text)
+    if m is None:
+        return None
+    slots = _control_slots(m)
+    if not slots["application"]:
+        return _needs_app(raw)
+    if not slots["name"]:
+        return _unsupported_automation(
+            "Name the control to read, e.g. "
+            "'Read the text of the Title label in LibreOffice Writer'.",
+            raw,
+        )
+    return ParsedIntent(READ_CONTROL, slots, raw)
+
+
+def _parse_activate_control(text: str, raw: str) -> Optional[ParsedIntent]:
+    for pattern in _ACTIVATE_RES:
+        m = pattern.match(text)
+        if m is None:
+            continue
+        slots = _control_slots(m)
+        if not slots["application"]:
+            return _needs_app(raw)
+        if not slots["name"]:
+            return _unsupported_automation(
+                "Name the control to activate, e.g. "
+                "'Activate the OK button in LibreOffice Calc'.",
+                raw,
+            )
+        return ParsedIntent(ACTIVATE_CONTROL, slots, raw)
+    return None
+
+
+def _parse_enter_text(text: str, raw: str) -> Optional[ParsedIntent]:
+    for pattern in _ENTER_RES:
+        m = pattern.match(text)
+        if m is None:
+            continue
+        content = _strip_quotes(_clean(m.group("content")))
+        slots = _control_slots(m)
+        if not slots["application"]:
+            return _needs_app(raw)
+        if not slots["name"]:
+            return _unsupported_automation(
+                "Name the input field, e.g. "
+                "enter \"42\" into the Search entry in LibreOffice Calc "
+                "(quote text that contains spaces).",
+                raw,
+            )
+        if not content:
+            return _unsupported_automation(
+                "The text to enter is empty.", raw
+            )
+        slots["content"] = content
+        return ParsedIntent(ENTER_TEXT, slots, raw)
+    return None
+
+
+def _parse_save_document(text: str, raw: str) -> Optional[ParsedIntent]:
+    m = _SAVE_DOC_RE.match(text)
+    if m is None:
+        return None
+    application = _clean_app_token(m.group("app"))
+    if not application:
+        return _unsupported_automation(
+            "Name the application, e.g. "
+            "'Save the document in LibreOffice Writer to Documents/notes.txt'.",
+            raw,
+        )
+    path = normalize_name(m.group("path"))
+    if not path:
+        return _unsupported_automation(
+            "Name the file the save must change, e.g. "
+            "'Save the document in LibreOffice Writer to Documents/notes.txt' "
+            "(ALWIN verifies the save by re-reading that file).",
+            raw,
+        )
+    return ParsedIntent(
+        SAVE_DOCUMENT, {"application": application, "path": path}, raw
+    )
+
+
+#: Sequence separators, split only *outside* quotes so v0.1 content
+#: like 'containing "milk then eggs"' keeps its meaning.
+_SEQ_SEP_RE = re.compile(r"\s+(?:and\s+then|then)\s+", re.IGNORECASE)
+
+#: Intents that may appear as a sequence step (an exit or an unparsed
+#: piece makes the whole split fall back to single-command parsing).
+_SEQUENCE_STEP_INTENTS = frozenset(
+    {
+        LIST_DIRECTORY,
+        CREATE_DIRECTORY,
+        CREATE_TEXT_FILE,
+        CREATE_REPORT,
+        CREATE_PDF,
+        CREATE_SPREADSHEET,
+        READ_FILE,
+        OPEN_FILE,
+        DETECT_APPLICATIONS,
+        INSPECT_APPLICATION,
+        FIND_CONTROL,
+        READ_CONTROL,
+        ACTIVATE_CONTROL,
+        ENTER_TEXT,
+        SAVE_DOCUMENT,
+    }
+)
+
+
+def _split_sequence(text: str) -> list:
+    """Quote-aware split on ' then ' / ' and then '."""
+    parts: list = []
+    buf: list = []
+    quote = ""
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if quote:
+            if char == quote:
+                quote = ""
+            buf.append(char)
+            index += 1
+            continue
+        if char in "\"'":
+            quote = char
+            buf.append(char)
+            index += 1
+            continue
+        separator = _SEQ_SEP_RE.match(text, index)
+        if separator:
+            part = "".join(buf).strip()
+            if part:
+                parts.append(part)
+            buf = []
+            index = separator.end()
+            continue
+        buf.append(char)
+        index += 1
+    tail = "".join(buf).strip()
+    if tail:
+        parts.append(tail)
+    return parts
+
+
+def _parse_sequence(text: str, raw: str) -> Optional[ParsedIntent]:
+    """Multi-step tasks: only when *every* part parses as a real step.
+
+    If any part is not a supported command the whole split is
+    abandoned and single-command parsing runs instead — that is what
+    keeps v0.1 content containing the word 'then' working.
+    """
+    parts = _split_sequence(text)
+    if len(parts) < 2:
+        return None
+    for part in parts:
+        parsed = parse_command(part)
+        if parsed.intent not in _SEQUENCE_STEP_INTENTS:
+            return None
+    return ParsedIntent(TASK_SEQUENCE, {"commands": parts}, raw)
+
+
 def _parse_document(text: str, raw: str) -> Optional[ParsedIntent]:
     """Parse report / PDF / spreadsheet creation commands (v0.2)."""
     if not _DOC_HEAD_RE.match(text):
@@ -595,6 +969,36 @@ def parse_command(command: str) -> ParsedIntent:
             )
         return ParsedIntent(EXPLAIN, {"target": inner}, raw)
 
+    # ---- v0.4 automation and multi-step commands (before every v0.1
+    # branch, so automation verbs can never be read as file verbs) ---- #
+    sequence_intent = _parse_sequence(text, raw)
+    if sequence_intent is not None:
+        return sequence_intent
+
+    inspect_intent = _parse_inspect(text, raw)
+    if inspect_intent is not None:
+        return inspect_intent
+
+    find_intent = _parse_find_control(text, raw)
+    if find_intent is not None:
+        return find_intent
+
+    read_control_intent = _parse_read_control(text, raw)
+    if read_control_intent is not None:
+        return read_control_intent
+
+    activate_intent = _parse_activate_control(text, raw)
+    if activate_intent is not None:
+        return activate_intent
+
+    enter_intent = _parse_enter_text(text, raw)
+    if enter_intent is not None:
+        return enter_intent
+
+    save_intent = _parse_save_document(text, raw)
+    if save_intent is not None:
+        return save_intent
+
     detect_intent = _parse_detect_apps(text, raw)
     if detect_intent is not None:
         return detect_intent
@@ -648,7 +1052,9 @@ def parse_command(command: str) -> ParsedIntent:
         "Supported commands are: list files, create a folder, create a text "
         "file with content, read a text file, create a report, PDF or "
         "spreadsheet from structured content, detect installed applications, "
-        "open a file with an application, explain an operation. Type "
+        "open a file with an application, inspect or automate a supported "
+        "application (inspect/find/read/activate/enter text/save, and "
+        "'... then ...' multi-step tasks), explain an operation. Type "
         "'help' for examples.",
         raw,
     )

@@ -31,7 +31,10 @@ from ai_core.pipeline import (
 from ai_core.permissions import PermissionChecker
 from ai_runtime.ollama_client import OllamaClient, OllamaError
 
-BANNER = "ALWIN FUSION v0.3\nLocal AI Core + Documents + Applications"
+BANNER = (
+    "ALWIN FUSION v0.4\n"
+    "Local AI Core + Documents + Applications + Desktop Automation"
+)
 
 EXIT_OK = 0
 EXIT_FAILURE = 1
@@ -135,6 +138,67 @@ def _print_success(report) -> None:
                 lines.append(f"{entry_name}@ (symlink)")
             else:
                 lines.append(entry_name)
+        alwin_print(lines)
+        return
+
+    # ---- v0.4 desktop automation ------------------------------------- #
+    if name == "inspect_application" and execution is not None:
+        snapshot = execution.data.get("snapshot") or {}
+        lines = [execution.message]
+        state = snapshot.get("state", "?")
+        lines.append(f"  state: {state}")
+        detail = snapshot.get("detail")
+        if detail:
+            lines.append(f"  detail: {detail}")
+        if snapshot.get("document"):
+            lines.append(
+                f"  document (application-supplied): {snapshot['document']}"
+            )
+        if snapshot.get("capabilities"):
+            lines.append(
+                f"  capabilities: {', '.join(snapshot['capabilities'])}"
+            )
+        alwin_print(lines)
+        return
+
+    if name in ("find_control", "read_control") and execution is not None:
+        control = execution.data.get("control") or {}
+        lines = [execution.message or "Control reported."]
+        label = f"role '{control.get('role', '?')}'"
+        if control.get("name"):
+            label += f" name '{control['name']}'"
+        lines.append(f"  control: {label}")
+        lines.append(f"  state: {execution.data.get('state', '?')}")
+        if name == "read_control" and isinstance(execution.data.get("text"), str):
+            suffix = " (truncated)" if execution.data.get("text_truncated") else ""
+            lines.append(f"  text ({execution.data.get('text_chars', 0)} chars){suffix}:")
+            lines.append(execution.data["text"])
+        alwin_print(lines)
+        return
+
+    if name in ("activate_control", "enter_text", "save_document"):
+        lines = [
+            verification.get("message", "")
+            or (execution.message if execution else "Completed.")
+        ]
+        if execution is not None and execution.data.get("state"):
+            lines.append(f"  state: {execution.data['state']}")
+        alwin_print(lines)
+        return
+
+    if name == "task_sequence" and execution is not None:
+        lines = [
+            verification.get("message", "")
+            or (execution.message if execution else "Completed.")
+        ]
+        for record in execution.data.get("steps", []):
+            index = record.get("index", "?")
+            status = record.get("status", "?")
+            action_name = record.get("action", "?")
+            line = f"  step {index}: {action_name} — {status}"
+            if record.get("error"):
+                line += f" ({record['error']})"
+            lines.append(line)
         alwin_print(lines)
         return
 

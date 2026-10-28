@@ -1,6 +1,6 @@
 # Alwin Fusion — Security Model and Limitations
 
-Version: 0.3.0 — Milestone: Application Integration Engine
+Version: 0.4.0 — Milestone: Desktop Automation Engine
 
 This document states what the prototype defends against, how, and —
 importantly — **what it does not defend against**. Passing tests does
@@ -20,9 +20,14 @@ Assumed-untrusted: natural-language input (it may be accidental or
 hostile), local LLM output (models can be wrong or prompt-injected),
 anything a concurrent process does to the filesystem, application
 manifests and desktop-entry files (their *names* are used for
-detection only, after sanitizing; their contents are never read), and
-any file a user might drop in a directory claiming something is
-installed.
+detection only, after sanitizing; their contents are never read), any
+file a user might drop in a directory claiming something is
+installed, and — since v0.4 — **everything a running application says
+about itself**: accessible names, window titles and control text are
+application-controlled data and can be hostile (escape sequences,
+newlines, fake "permission granted" strings). They are sanitized
+before display and never take part in a permission, policy or approval
+decision.
 
 Not defended against: a compromised OS account, a malicious
 `sitecustomize`/Python environment, kernel attacks, or another
@@ -63,11 +68,16 @@ process racing the filesystem (see TOCTOU below).
 * The action allowlist is closed: `create_directory`,
   `create_text_file`, `create_report`, `create_pdf`,
   `create_spreadsheet`, `list_directory`, `read_file`,
-  `detect_applications`, `open_file`, `explain`. The exact set is
+  `detect_applications`, `open_file`, `inspect_application`,
+  `find_control`, `read_control`, `activate_control`, `enter_text`,
+  `save_document`, `task_sequence`, `explain`. The exact set is
   pinned by tests (v0.2 went from five to eight actions, all
   create-only; v0.3 deliberately added exactly two: read-only
-  detection and an approval-gated launch — neither can delete, move,
-  overwrite or execute arbitrary code).
+  detection and an approval-gated launch; v0.4 added exactly seven —
+  three read-only automation actions, three approval-gated automation
+  mutations and `task_sequence` — none of which can delete, move,
+  overwrite, synthesize keystrokes/mouse events or execute arbitrary
+  code).
 * There is no delete, overwrite, move, chmod, or shell action — not
   disabled, simply absent (meta-tests assert this).
 * Model output is parsed with `json.loads` and validated by the same
@@ -127,10 +137,122 @@ approval because it is read-only.
 detect (read-only), open one approved existing file with one
 registered application. What is prohibited/unsupported and simply
 absent: arbitrary application commands, model- or user-supplied
-executables/flags, GUI automation, keystroke injection, window
-inspection, software installation, reading or editing "application
-data" beyond the file being opened, and file deletion/overwrite by
-this path.
+executables/flags, software installation, reading or editing
+"application data" beyond the file being opened, and file
+deletion/overwrite by this path. (Window inspection, which v0.3 listed
+as absent, arrived in v0.4 — but only through the reviewed automation
+engine below, never via `open_file`.)
+
+### 2d. Desktop automation (v0.4)
+
+**What may ever be automated.** Only applications with the `automate`
+capability in the closed registry — currently LibreOffice Writer and
+Calc. Every other registry application (Evince, Okular, the desktop
+default) is denied by the permission stage for every automation
+action, and unknown application tokens are rejected at planning time
+exactly like `open_file` identifiers. There is deliberately **no**
+generic "automate anything" path.
+
+**Closed action set, no synthetic input.** The seven automation
+actions accept only `{role, name}` control locators validated against
+a closed 24-role vocabulary; coordinate fields (`x`, `y`) are rejected
+at planning time. The automation package
+(`integrations/automation/*.py`) contains **no keystroke injection,
+no mouse/coordinate events and no shell** — the only mutation
+primitives are the accessibility *action* interface of an
+already-identified control (`doAction`) and
+`EditableText.set_text_contents` on an already-identified input field.
+Source-level meta-bans in the test suite pin the absence of
+`subprocess`, `os.system`, `os.popen`, `eval`, `exec`,
+keyboard/mouse-event generators and tools like `xdotool`/`ydotool`/
+`wtype`. Text entry is further restricted to input fields (role
+`entry`); document bodies are never typed into, so GUI automation
+cannot bypass the reviewed document generators.
+
+**Honest state machine.** Every operation reports a state from a fixed
+set (`not_installed`, `installed_not_running`, `launch_requested`,
+`process_started`, `interface_detected`, `document_open`,
+`control_identified`, `action_performed`, `result_verified`,
+`failed_or_unknown`) and the verifier rejects any claim that exceeds
+its evidence: `document_open` without a live accessible connection
+fails verification (tested with a lying adapter), a started process is
+never reported as a window, and process observation uses read-only
+`/proc` scanning that reports *unknown* when `/proc` is unreadable —
+never a guess. The inspection path never launches anything.
+
+**Revalidation before every mutation.** Immediately before activating
+a control or entering text, the locator is re-verified against a
+freshly walked accessibility tree; if the control changed identity or
+vanished, the action aborts with `failed_or_unknown` instead of
+acting on the wrong control (tested).
+
+**Digest-confirmed saves.** `save_document` records the target file's
+sha256 before activating the Save control and re-reads the file after
+a bounded wait. If the digest did not change, the result is an honest
+failure ("a save cannot be confirmed — state unknown") — activating a
+Save button is never itself reported as a save. The verifier
+independently re-reads the disk and fails a save whose recorded digest
+does not match (tested with a lying adapter). Save targets must be
+inside the permitted roots with an allowlisted extension (`.txt`,
+`.xlsx`); a missing target file is refused (the automation layer never
+creates or overwrites files — content creation stays with the
+`O_EXCL`-guarded v0.2 tools).
+
+**Untrusted application text.** Accessible names, window titles and
+control text are sanitized (control characters stripped, length-capped)
+before appearing in any message, report or audit record, and they
+never take part in a permission, policy or approval decision — an
+application naming a button "permission granted" or a window
+"... (approved)" changes nothing (tested).
+
+**Approval and read-only/mutation separation.**
+`inspect_application`/`find_control`/`read_control` are read-only:
+never in `MUTATING_ACTIONS`, never requiring approval, mutating
+nothing (asserted by tests). `activate_control`, `enter_text`,
+`save_document` and `task_sequence` require interactive approval per
+action; `--dry-run` touches nothing and never asks. `task_sequence`
+re-checks *every* step through the permission stage (first denial
+denies the whole sequence) and stops at the first failed step, marking
+dependents `skipped` — a partial run is never reported as success, and
+every executed step is re-verified independently by the verifier.
+
+**Model output is never executable.** An LLM proposal naming an
+automation action re-enters `validate_action()` exactly like the
+deterministic parser: unknown actions, applications, roles, coordinate
+fields or oversized text are discarded.
+
+**Environment dependency and honest degradation.** Automation needs
+`python3-gi` + `gir1.2-atspi-2.0`, a running AT-SPI bus, and the
+desktop exposing the application (on Ubuntu GNOME:
+`toolkit-accessibility` enabled). Without these, the backend reports
+"capability unavailable" or `process_started`/"state unknown" honestly
+— **Alwin Fusion never changes desktop accessibility settings, never
+installs dependencies and never fakes a window it cannot see**.
+Observed on the development machine (Ubuntu 26.04.1 GNOME/Wayland,
+`toolkit-accessibility=false`): the AT-SPI bus is live and GNOME apps
+expose interfaces, but LibreOffice does not register — ALWIN then
+reports `process_started` and refuses to fabricate control data.
+
+**Deliberately not opened: the UNO socket.** LibreOffice's documented
+UNO API would allow stronger control, but listening on an UNO socket
+would be an unauthenticated local control channel (any process on the
+machine could drive it), weakening the v0.3 launch posture. v0.4 does
+not open such a socket; a UNO adapter is *planned* and must first
+solve authentication. Likewise **no MCP server exists**: `mcp.py` is a
+descriptors-only manifest (schemas, permissions, timeouts, result
+rules) with no transport or listener.
+
+**Capability policy summary.** Allowed end-to-end: inspect a
+registered application's honest state, find a control by role/name,
+read a permitted control's text, activate an identified control, type
+into an identified input field, digest-confirmed save of the open
+document to an allowed path — each behind the permission stage and
+(approval-gated where mutating), each independently verified.
+Prohibited and simply absent: keystroke/mouse synthesis, coordinate
+clicking, shell or arbitrary command execution, automating
+unregistered applications, typing into document bodies, hidden or
+unattended sensitive actions (every mutation is individually
+approved), disabling desktop security, and any auto-install.
 
 ### 2b. Structured content validation (v0.2)
 
@@ -173,6 +295,12 @@ before rendering:
   resolved operation is displayed. `open_file` is mutating: every
   application launch is individually approved; `detect_applications`
   is not, because it reads fixed system locations and starts nothing.
+  v0.4: `activate_control`, `enter_text`, `save_document` and
+  `task_sequence` are mutating — every automation mutation is
+  individually approved, and a sequence is approved once as a whole
+  only after every step has passed the permission stage;
+  `inspect_application`/`find_control`/`read_control` are read-only
+  and never require approval.
 * EOF, Ctrl-C, or any input failure while approving = **no**.
 * There is deliberately no `--yes`/`--force` bypass in this milestone.
 * `--dry-run` performs no writes, launches no process, and never even
@@ -201,6 +329,19 @@ before rendering:
   (tested). The verified claim is deliberately narrow: *"the process
   was started"* — never that the application displayed, edited or
   recalculated anything.
+* v0.4 automation verification is evidence-based and adapter-independent:
+  an application-state report must be internally consistent with its
+  evidence (a `document_open` claim without a live accessible
+  connection fails verification — tested with a lying adapter), a
+  reported control must match the validated locator's role and name
+  (case/whitespace-insensitive; a lying adapter pointing at the wrong
+  control fails — tested), entered text is only verified when the
+  field read-back matches, and a save verifies only when the file on
+  disk matches the sha256 digest recorded after the Save control was
+  activated — the verifier re-reads the disk itself rather than
+  trusting the execution record (tested). For `task_sequence` the
+  verifier re-verifies **every executed step independently** using its
+  recorded data, so one lying step fails the whole task.
 
 ### 5. Audit log
 
@@ -213,7 +354,10 @@ before rendering:
   integration id, requested capability, permission operation
   (`open`/`detect`), approval verdict, launch outcome (started flag,
   executable path, pid, returncode) and verification verdict — but
-  never file contents.
+  never file contents. Automation tasks carry the application id,
+  the requested capability (`automate`), the reported honest state,
+  the identified control's role/name and the save digests — and
+  entered text is redacted exactly like file content (tested).
 * Redaction: `content`, `spec`, passwords, tokens and similar keys
   become `<redacted:N chars>`; user-file content embedded in the raw
   command string is masked too (inline structured JSON is redacted as
@@ -252,9 +396,14 @@ before rendering:
   user installs them explicitly.
 * Tests run in temporary sandboxes (`ALWIN_HOME`-style injection) and
   never modify the real home directory. Application tests inject fake
-  `popen`/`which` callables, so the automated suite never starts a
-  real desktop application; the manual smoke test is a separate,
-  explicit opt-in (`ALWIN_MANUAL_SMOKE=1`).
+  `popen`/`which` callables, and automation tests inject a fake AT-SPI
+  module (in-memory accessibility trees), fake `/proc` directories and
+  fake clock/sleep callables — so the automated suite never starts a
+  real desktop application and never inspects or drives a real
+  desktop. The two manual smoke tests are separate, explicit opt-ins
+  (`ALWIN_MANUAL_SMOKE=1` for a real launch;
+  `ALWIN_AUTOMATION_SMOKE=1` for real AT-SPI automation, every step
+  approval-gated, inside a throwaway sandbox home).
 
 ## Known limitations (read this honestly)
 
@@ -345,11 +494,13 @@ before rendering:
 17. **Launch verification proves only that a process started.**
     `poll()` immediately after `Popen` cannot know whether a window
     appeared, whether the file actually rendered, or whether the
-    application later crashed. There is deliberately no window
-    inspection, no accessibility-API query and no claim of visual
-    review or formula recalculation. A GUI that needs stronger
-    verification must add a reviewed accessibility adapter (future
-    milestone) rather than weaken this claim.
+    application later crashed. There is deliberately no *launch-time*
+    window inspection and no claim of visual review or formula
+    recalculation from the launch path. v0.4's separate automation
+    engine can inspect an already-running application over AT-SPI —
+    but only when the desktop exposes it, and always as its own
+    independently approved action, never as a silent upgrade of a
+    launch result.
 18. **Detection is heuristic and metadata-driven.** It reads PATH
     and `.desktop` file *names* only; a manually copied binary that
     is not on PATH, a `.desktop` file in an unsearched location, or a
@@ -370,6 +521,46 @@ before rendering:
     *untrusted* input, but a future change to `registry.py` itself
     (reviewed code) could add a dangerous definition — the test pins
     and review process, not cryptography, are what guard that.
+21. **Automation sees only what accessibility exposes — which can be
+    incomplete or wrong.** AT-SPI trees vary by toolkit and version;
+    a control may be missing, mislabeled or renamed by an application
+    update, and an application could expose *hostile* accessible data
+    (a button named like another button). Mitigations: exact role+name
+    matching against the validated locator, revalidation immediately
+    before every mutation, sanitizing of all application text, and
+    honest "not found or not exposed" failures — but ALWIN cannot
+    prove the visible on-screen control is the one it actuated.
+    Automation is restricted to reviewed applications (Writer/Calc)
+    precisely to keep this surface small.
+22. **Automation depends on a desktop setting Alwin Fusion will not
+    change.** If assistive technology is disabled at the desktop level
+    (e.g. GNOME `toolkit-accessibility=false`), LibreOffice does not
+    register on the AT-SPI bus and every control operation honestly
+    reports `process_started`/"state unknown". This is fail-closed by
+    design; enabling the setting is a manual, user-side action (a
+    global desktop change that could affect other applications'
+    threat models — which is why ALWIN never does it itself).
+23. **Text entry is confirmed by field read-back, not by
+    application semantics.** ALWIN reads the input field back after
+    typing and reports a mismatch honestly, but it cannot verify what
+    the application *does* with the text afterwards (e.g. whether a
+    later implicit action discards or transforms it). Similarly, the
+    entered text is bounded (4096 chars) and restricted to `entry`
+    fields — there is no path to bulk-edit document content.
+24. **A digest-confirmed save confirms bytes on disk, not user
+    intent.** If the application writes something other than what the
+    user expected (a filter, an auto-correct, a different document in
+    focus), ALWIN reports only that the file changed and the change
+    verified — it does not semantically validate the saved document.
+    The ≤ 2 s confirmation window can also miss a slow save, which is
+    reported as honest failure ("state unknown"), never as success.
+25. **Sequence steps are validated individually, not as a
+    interaction whole.** Each step passes planning, permissions and
+    verification, but no model checks whether step 3 makes sense
+    after step 2 changed the application state — stop-on-failure and
+    per-step verification catch *errors*, not *illogical-but-valid*
+    plans. Approval shows the user every step before anything runs,
+    and `--dry-run` enumerates the full sequence without executing.
 
 ## Reporting security issues
 

@@ -1,6 +1,6 @@
 # Alwin Fusion — Architecture
 
-Version: 0.3.0 — Milestone: Application Integration Engine
+Version: 0.4.0 — Milestone: Desktop Automation Engine
 
 Alwin Fusion is an open-source, offline-first AI-native operating
 system in the making. This document describes what exists today, how
@@ -55,10 +55,24 @@ integrations/            Pluggable action handlers (the extension point)
         discovery.py     read-only detection (PATH + desktop-entry names)
         launch.py        argv-only LaunchAdapter (shell=False, one {path})
         tools.py         detect/open_file handlers re-checking permissions
-tests/                   unittest suite (temporary sandboxes only)
+    automation/          v0.4 desktop automation engine (AT-SPI)
+        base.py          state machine, control locators, capabilities,
+                         role policies, bounds, untrusted-text sanitizing
+        processes.py     read-only /proc observation (never starts processes)
+        atspi_backend.py AtspiSession over gi.repository.Atspi (no gi = clean
+                         BackendUnavailable; no keystrokes/mouse/shell ever)
+        libreoffice.py   LibreOfficeAdapter: Writer/Calc root discovery,
+                         find/read/activate/enter/save with revalidation
+        tools.py         the 7 automation handlers re-checking permissions
+        sequence.py      TaskSequenceRunner (stop-on-failure, per-step records)
+        mcp.py           future-MCP tool descriptors only (no server/transport)
+tests/                   unittest suite (temporary sandboxes + in-memory
+                         accessibility trees only)
 docs/                    ARCHITECTURE.md, SECURITY.md
 scripts/run_tests.sh     Test entry point
 scripts/manual_smoke_apps.sh  opt-in real-launch smoke test (ALWIN_MANUAL_SMOKE=1)
+scripts/manual_smoke_automation.sh  opt-in real-AT-SPI automation smoke test
+                         (ALWIN_AUTOMATION_SMOKE=1)
 requirements.txt         optional v0.2 document dependencies
 ```
 
@@ -89,11 +103,16 @@ approval callback (CLI: interactive y/N)   required for mutating actions
 executor.execute()  -> ActionDispatcher -> integrations.filesystem.tools
     |  ExecutionResult (real errors, no fakes)   or integrations.documents.tools
     v                                              or integrations.apps.tools
-verifier.verify()   -> re-resolves paths, re-checks the filesystem
+verifier.verify()   -> re-resolves paths, re-checks the filesystem   or integrations.automation.tools
     |  VerificationResult {passed|failed|skipped}  (re-renders reports,
     v                                              reopens workbooks, validates PDFs,
     |                                              re-resolves open_file paths and
-    |                                              requires a reported process start)
+    |                                              requires a reported process start;
+    |                                              automation: state claims must match
+    |                                              their evidence, reported controls
+    |                                              must match validated locators,
+    |                                              saves must match disk digests,
+    |                                              sequence steps re-verified one by one)
 audit.record()      -> <state_dir>/audit.jsonl (0600, content redacted)
     v
 cli.print_report()  -> human-readable outcome + exit code
@@ -117,6 +136,13 @@ future GUI or MCP server can drive the same `TaskPipeline`.
 | `read_file`           | `path`                    | no      | no       |
 | `detect_applications` | `integration` (id or `""`) | no     | no       |
 | `open_file`           | `path`, `application` (id) | yes    | yes      |
+| `inspect_application` | `application` (id)         | no      | no       |
+| `find_control`        | `application`, `control`   | no      | no       |
+| `read_control`        | `application`, `control`   | no      | no       |
+| `activate_control`    | `application`, `control`   | yes     | yes      |
+| `enter_text`          | `application`, `control`, `content` | yes | yes |
+| `save_document`       | `application`, `path` (.txt/.xlsx) | yes | yes   |
+| `task_sequence`       | `steps` (2–8 validated actions) | yes | yes      |
 | `explain`             | `target` (nested action)  | no      | no       |
 
 There is **no** delete, overwrite, move, shell, network or
@@ -134,6 +160,22 @@ narrowed per integration by its `file_types`), requires an already
 existing file inside the permitted roots, and is in `MUTATING_ACTIONS`
 so every launch needs explicit approval. `detect_applications` is
 read-only and never requires approval.
+
+The seven v0.4 automation actions carry *identifiers and locators*,
+never commands or coordinates: `application` is again a closed-registry
+id, and `control` is a `{role, name}` locator validated against a
+closed 24-role vocabulary (`KNOWN_ROLES`) — unknown roles, unknown
+fields (including any `x`/`y` coordinates) and over-long names are
+rejected at planning time. `read_control`/`activate_control` require an
+exact control name; `find_control` may search by role alone.
+`enter_text` content is bounded (≤ 4096 chars, no null bytes) and the
+automation layer further restricts typing to input fields (role
+`entry`). `save_document` accepts only the allowlisted extensions
+(`.txt`, `.xlsx`) and is digest-confirmed. `task_sequence` embeds 2–8
+*individually validated* actions (no nesting), so model output can
+never smuggle an unvalidated step inside a sequence. The three
+read-only automation actions are not in `MUTATING_ACTIONS`; the three
+automation mutations plus `task_sequence` are.
 
 The three v0.2 document actions carry *structured* payloads instead of
 free text: `content` is a report/PDF document (`{"title": ..., "blocks":
@@ -207,7 +249,92 @@ no GUI automation or keystroke injection exists.
 launch/verification-strategy enums are where an MCP-backed or
 accessibility-API adapter would plug in (as new *reviewed* strategy
 values with their own trusted adapter code); an untrusted manifest
-still cannot introduce one. Nothing in this milestone implements
+still cannot introduce one.
+
+## Desktop automation engine (integrations/automation/)
+
+v0.4 adds a safe, AT-SPI-based automation layer for LibreOffice Writer
+and Calc. Like the apps engine, it is deliberately separate from NL
+parsing, model inference, discovery, permissions, filesystem tools and
+document generation: it consumes a *validated* action and nothing
+else.
+
+**Honest state machine (`base.py`).** Every operation reports one of a
+fixed set of application states:
+`not_installed` → `installed_not_running` → `launch_requested` /
+`process_started` → `interface_detected` / `document_open` →
+`control_identified` → `action_performed` → `result_verified`, or
+`failed_or_unknown`. The rules are enforced, not aspirational: a
+started process is never reported as a visible window, an interface
+detection is never reported as an open document, and a Save-control
+activation is never reported as a save. `document_open` requires a
+live accessible connection *and* a window title matching the module
+(e.g. contains "LibreOffice Writer"); anything weaker reports
+`interface_detected` with `document_reliable: false`.
+
+**Capabilities and backend seam (`base.py`, `atspi_backend.py`).**
+Each adapter declares a capability set (`inspect`, `find`, `read`,
+`activate`, `enter`, `save`); a missing capability or missing binding
+(`gi.repository.Atspi`) produces a clean
+`unavailable`/`capability_unavailable` report — never a fake. The real
+backend is `AtspiSession` over AT-SPI: it contains no keystroke
+injection, no mouse/coordinate events and no shell — the only mutation
+primitives are the accessibility *action* interface of an
+already-identified control and `EditableText.set_text_contents` on an
+already-identified input field (pinned by source-level meta-bans in
+the test suite). Every external dependency (AT-SPI module, session,
+adapter factory, `which`, `/proc` root, clock, sleep) is injectable,
+so the automated tests run the real code against an in-memory tree.
+
+**Process observation (`processes.py`).** Read-only `/proc` scanning
+(`*/comm` files) distinguishes "installed but not running" from
+"running". An unreadable `/proc` yields *unknown*, never a guess, and
+the inspection never launches anything.
+
+**LibreOffice adapter (`libreoffice.py`).** Discovers the Writer/Calc
+application root on the bus, walks the tree with depth/node bounds,
+finds controls by canonical role + accessible name (case/whitespace
+insensitive), reads permitted roles' text (bounded, truncated marks),
+activates identified controls, enters text into `entry` fields with a
+read-back confirmation, and performs the digest-confirmed save. Before
+every mutation the locator is **revalidated** against a freshly walked
+tree — if the control changed identity or vanished, the action aborts
+with `failed_or_unknown` instead of acting on the wrong control.
+
+**Digest-confirmed save.** The tools layer records the target file's
+sha256 before activating the Save control and re-reads the file after
+a bounded wait (injectable clock/sleep, default 2 s). If the digest
+did not change, the result is an honest failure ("the file did not
+change on disk; a save cannot be confirmed — state unknown"), and the
+verifier independently re-reads the disk rather than trusting the
+execution record.
+
+**Untrusted application text.** Accessible names, window titles and
+control text are application-controlled data: they are sanitized
+(control characters stripped, length-capped) before appearing in any
+message or report, and they never take part in a permission, policy or
+approval decision — an application cannot grant itself approval by
+naming a button "approved".
+
+**Multi-step sequences (`sequence.py`).** `task_sequence` re-checks
+every step through the permission stage (first denial denies all),
+then executes steps in order with stop-on-failure semantics: a failed
+step marks all dependents `skipped` and the task fails — a partial run
+is never reported as success. Each executed step's data is kept so the
+verifier re-verifies every step independently.
+
+**MCP readiness (`mcp.py`).** A descriptors-only manifest for a future
+MCP server: each automation tool's name, schema, permission
+requirements, timeout and result-validation rules. No server, no
+transport, no listener exists in this milestone.
+
+**Environment dependency (observed).** Automation needs the desktop to
+expose the application on the AT-SPI bus. On Ubuntu GNOME/Wayland
+(observed on the dev machine: Ubuntu 26.04.1), the AT-SPI bus and
+registry are live and GNOME apps expose interfaces, but with GNOME's
+`toolkit-accessibility=false` LibreOffice does *not* register; ALWIN
+then honestly reports `process_started`/"state unknown". Alwin Fusion
+never changes that desktop setting itself. Nothing in this milestone implements
 unrestricted UI automation.
 
 ## The local AI runtime
@@ -269,16 +396,20 @@ CLI flags: `--dry-run`, `--llm`, `--root DIR` (repeatable),
 test constructs a temporary home/root/state sandbox — the developer's
 real `~/Documents` is never touched — and application tests inject
 fake `popen`/`which` callables, so **no real desktop application is
-ever started by the automated suite**. The v0.3 suite is **316
-tests**: the full v0.1/v0.2 set (242, preserved unchanged — covering
-supported/unsupported commands, traversal, symlink escapes,
-permission denial, approval rejection, verification failure,
-Ollama-unavailable behaviour, no-overwrite/no-delete capability,
-dry-run inertness, audit redaction/permissions, deterministic report
-rendering, PDF structural validation, workbook reopen/compare with
-formulas preserved as text, formula-grammar rejection,
-content-source checks and lying-handler detection) plus 74
-new ones covering:
+ever started by the automated suite**; automation tests inject a fake
+AT-SPI module (in-memory accessible trees), fake `/proc` directories
+(`<pid>/comm` files), and fake clock/sleep callables, so **no real
+desktop is ever inspected or driven by the automated suite**. The
+v0.4 suite is **404 tests**: the full v0.1/v0.2 set (242, preserved
+unchanged — covering supported/unsupported commands, traversal,
+symlink escapes, permission denial, approval rejection, verification
+failure, Ollama-unavailable behaviour, no-overwrite/no-delete
+capability, dry-run inertness, audit redaction/permissions,
+deterministic report rendering, PDF structural validation, workbook
+reopen/compare with formulas preserved as text, formula-grammar
+rejection, content-source checks and lying-handler detection), the 74
+v0.3 application-engine tests, plus 88 new ones (64 automation + 22
+sequence + 2 updated pin tests) covering:
 
 * registry schema validation — invalid definitions (absolute/slashed
   executables, shell metacharacters in argv, unknown keys,
@@ -303,17 +434,75 @@ new ones covering:
   attempt, unknown integration ids, traversal/symlink/outside-root
   refusals, missing files, launch-failure reporting, a lying launch
   result failing verification, audit fields + redaction, and v0.1/v0.2
-  commands still working with the new dispatcher attached.
+  commands still working with the new dispatcher attached;
+
+plus the 88 v0.4 tests covering:
+
+* planner rejections — unknown actions (`send_keys`, `click_at`,
+  `run_shell`, ... all rejected as "not allowed"), unknown
+  applications, unknown roles, coordinate fields, missing control
+  names, unbounded/oversized/null-byte text, non-allowlisted save
+  extensions, empty/oversized/nested sequences, and per-step error
+  messages naming the failing step;
+* permission denials — applications without the `automate` capability
+  (evince, okular, default) denied for every automation action,
+  save-path containment, and read-only automation confirmed *not* in
+  `MUTATING_ACTIONS`;
+* the honest state machine — `not_installed`, `installed_not_running`
+  (bus never touched), unreadable `/proc` → unknown (never a guess),
+  `process_started` never upgraded to a window/document claim,
+  `document_open` requiring a matching module window, and the
+  state-report verifier rejecting internally inconsistent claims;
+* find/read with bounds — role+name and role-only search, missing
+  controls failing honestly, bounded/truncated reads marked untrusted,
+  non-readable roles refused, role-vocabulary consistency pins;
+* mutations — activation with revalidation (changed-identity control
+  aborts before acting), refused actions and controls dying mid-action
+  reported as failures/state-unknown, text entry confirmed by
+  read-back (mismatch = failure), approval and dry-run inertness
+  (nothing touched, approver never called);
+* digest-confirmed saves — changed digest verified, unchanged file an
+  honest failure, missing target refused, and the verifier
+  independently failing a save whose recorded digest does not match
+  the disk;
+* backend failures — dead AT-SPI bus, exited applications,
+  unavailable adapters reporting unsupported capabilities, and
+  inspect with a dying backend never claiming a window;
+* dishonest adapters failing verification — wrong reported control,
+  `document_open` claimed without a live accessible connection,
+  unconfirmed text entry;
+* untrusted application text — control characters stripped, hostile
+  names/titles sanitized, app text unable to grant permission/approval;
+* audit redaction of entered text, source-level meta-bans on
+  keystroke/mouse/shell primitives in `integrations/automation/*.py`,
+  and parser preservation (`then` inside file content, v0.1 phrasing);
+* task sequences — parsing (including v0.1 `then`-in-content
+  preservation and quote awareness), per-step validation and
+  permission recursion (first denial denies all), stop-on-failure with
+  `skipped` dependents, runtime denial via the runner, per-step
+  re-verification (lying step data fails the whole task), approval
+  even for read-only steps, dry-run inertness, and audit records with
+  step content redacted.
 
 The spreadsheet/PDF pipeline tests skip themselves politely when
 `openpyxl`/`reportlab` is not installed; the pure-stdlib validator
 tests always run.
 
-A separate **opt-in** manual smoke test
-(`ALWIN_MANUAL_SMOKE=1 scripts/manual_smoke_apps.sh`) runs read-only
-detection and one real, personally approved launch of LibreOffice
-Writer inside a throwaway sandbox home, then prints the audit record.
-It is never invoked by the automated suite.
+Two separate **opt-in** manual smoke tests exist and are never invoked
+by the automated suite:
+
+* `ALWIN_MANUAL_SMOKE=1 scripts/manual_smoke_apps.sh` — read-only
+  detection and one real, personally approved launch of LibreOffice
+  Writer inside a throwaway sandbox home, then the audit record;
+* `ALWIN_AUTOMATION_SMOKE=1 scripts/manual_smoke_automation.sh` — a
+  real AT-SPI session against LibreOffice: state inspection, an
+  approval-gated launch, re-inspection, find/read, an approval-gated
+  controlled-save attempt (whose expected outcome on an unmodified
+  document is an honest "state unknown" failure), and a two-step task
+  sequence — every step explained in the script, everything inside a
+  throwaway sandbox home. If the desktop does not expose LibreOffice
+  on the accessibility bus, every step fails honestly instead of
+  guessing (observed on the dev machine — see the automation section).
 
 ## Future compatibility
 
@@ -324,15 +513,32 @@ points already in place:
   `integrations/apps/registry.py` (validated by the same strict
   schema) — no handler code changes are needed, because the tools
   resolve everything from the definition. New *kinds* of integration
-  (MCP servers, accessibility APIs, controlled UI automation) follow
-  the general pattern: create `integrations/<name>/` with handlers
-  shaped like `handler(action, dry_run=...) -> ToolResult`, register
-  them in a dispatcher factory, and add their action names/schemas to
+  follow the general pattern, now worked three times: create
+  `integrations/<name>/` with handlers shaped like
+  `handler(action, dry_run=...) -> ToolResult`, register them in a
+  dispatcher factory, and add their action names/schemas to
   `planner.ACTION_SCHEMA` (plus `MUTATING_ACTIONS` if world-changing)
   and `permissions.check_action`. The pipeline, permissions,
   verification, audit and CLI then work unchanged.
-  `integrations/documents/` (v0.2) and `integrations/apps/` (v0.3)
-  are the worked examples of exactly this pattern.
+  `integrations/documents/` (v0.2), `integrations/apps/` (v0.3) and
+  `integrations/automation/` (v0.4) are the worked examples.
+* **More automation backends/adapters:** `integrations/automation/base.py`
+  defines the `AutomationAdapter` interface (inspect/find/read/
+  activate/enter/save + capabilities); the LibreOffice adapter is one
+  implementation behind the tools layer's injectable adapter factory.
+  A UNO-based LibreOffice adapter is *planned*: it would talk to
+  LibreOffice over its documented API — the unauthenticated UNO
+  listening socket was deliberately not opened in v0.4 because that
+  would weaken the v0.3 launch posture (any local process could drive
+  it). Additional application adapters would first need a reviewed
+  registry entry with the `automate` capability; there is
+  deliberately no generic "automate anything" path.
+* **MCP server:** `integrations/automation/mcp.py` already describes
+  every automation tool as an MCP-shaped manifest (schema, permission
+  requirements, timeouts, result-validation rules) so a future server
+  can expose exactly the same allowlist. No server, transport or
+  listener exists today; adding one must reuse `TaskPipeline`
+  unchanged.
 * **Model management:** `ai_runtime` is already the seam for
   additional runtimes and model lifecycle helpers (explicit user
   action only — no silent downloads).
@@ -343,7 +549,10 @@ points already in place:
 
 What this milestone deliberately does *not* do: process isolation or
 sandboxing, multi-user support, file deletion/overwrite, arbitrary
-command or application-flag execution, software installation,
-GUI automation/keystroke injection, network operations, or any cloud
-integration. See `docs/SECURITY.md` for the security model and its
-limits.
+command or application-flag execution, keystroke/mouse synthesis or
+any coordinate-based clicking (v0.4 automates only identified
+controls through the accessibility action interface), software
+installation, desktop-setting changes (e.g. enabling
+`toolkit-accessibility`), UNO-socket control, an MCP server, network
+operations, or any cloud integration. See `docs/SECURITY.md` for the
+security model and its limits.

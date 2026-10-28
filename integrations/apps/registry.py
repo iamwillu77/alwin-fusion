@@ -67,10 +67,14 @@ PATH_TOKEN = "{path}"
 
 #: Capabilities an integration may declare.  Deliberately tiny; a
 #: capability that does not exist here cannot be validated at all.
-KNOWN_CAPABILITIES = frozenset({"open_file"})
+#: ``open_file`` = may be launched with a file (v0.3).  ``automate`` =
+#: may be driven by the desktop-automation layer (v0.4); only reviewed
+#: applications that genuinely expose accessibility information declare
+#: it, and ``ai_core.permissions`` denies automation without it.
+KNOWN_CAPABILITIES = frozenset({"open_file", "automate"})
 
 #: Permissions an integration may require.
-KNOWN_REQUIRED_PERMISSIONS = frozenset({"open_file"})
+KNOWN_REQUIRED_PERMISSIONS = frozenset({"open_file", "automate"})
 
 #: Launch strategies.  Only argv-list execution exists; there is no
 #: shell strategy and there never should be.
@@ -475,22 +479,27 @@ def resolve_integration_id(
 
 
 # --------------------------------------------------------------------------- #
-# The builtin registry — the only source of definitions (v0.3.0)
+# The builtin registry — the only source of definitions (v0.3.0, v0.4.0)
 #
 # Reviewed, fixed mappings.  LibreOffice Writer/Calc plus two common
 # PDF viewers and the desktop's file-association default.  Detection is
 # read-only (PATH executables + desktop-entry ids); launch is argv-only
 # with shell disabled by the adapter; verification claims only that the
 # process was started.
+#
+# v0.4: Writer and Calc additionally declare the 'automate'
+# capability — the permission stage denies every automation action for
+# any integration that does not declare it.
 # --------------------------------------------------------------------------- #
 
 BUILTIN_INTEGRATIONS = (
     {
         "id": "libreoffice-writer",
         "name": "LibreOffice Writer",
-        "version": "1.0.0",
+        # v0.4: minor bump for the added 'automate' capability.
+        "version": "1.1.0",
         "aliases": ("writer",),
-        "capabilities": ("open_file",),
+        "capabilities": ("open_file", "automate"),
         "file_types": (".txt", ".pdf"),
         "detection": {
             "executables": ("soffice", "libreoffice"),
@@ -503,14 +512,15 @@ BUILTIN_INTEGRATIONS = (
             "arguments": ("--writer", PATH_TOKEN),
         },
         "verification": {"strategy": "process_started"},
-        "required_permissions": ("open_file",),
+        "required_permissions": ("open_file", "automate"),
     },
     {
         "id": "libreoffice-calc",
         "name": "LibreOffice Calc",
-        "version": "1.0.0",
+        # v0.4: minor bump for the added 'automate' capability.
+        "version": "1.1.0",
         "aliases": ("calc",),
-        "capabilities": ("open_file",),
+        "capabilities": ("open_file", "automate"),
         "file_types": (".xlsx",),
         "detection": {
             "executables": ("soffice", "libreoffice"),
@@ -523,7 +533,7 @@ BUILTIN_INTEGRATIONS = (
             "arguments": ("--calc", PATH_TOKEN),
         },
         "verification": {"strategy": "process_started"},
-        "required_permissions": ("open_file",),
+        "required_permissions": ("open_file", "automate"),
     },
     {
         "id": "evince",

@@ -223,7 +223,10 @@ class PermissionChecker:
                     resolved=None,
                     reason="explanation does not touch the filesystem",
                 )
-            decision = self.check(target_path, operation="create")
+            target_operation = (
+                "save" if target.get("action") == "save_document" else "create"
+            )
+            decision = self.check(target_path, operation=target_operation)
             # Explanations are informational: even a denied target path may
             # be explained; the decision is reported, not enforced.
             return PermissionDecision(
@@ -233,6 +236,112 @@ class PermissionChecker:
                 resolved=decision.resolved,
                 reason=decision.reason,
             )
+
+        # ---- v0.4 desktop automation --------------------------------- #
+        #
+        # The automation set is duplicated here on purpose (like the
+        # mutating set below): the planner imports this module, so it
+        # cannot be imported back without a cycle.  tests/ pins both.
+        if name == "task_sequence":
+            steps = action.get("steps") or []
+            if not isinstance(steps, list) or not steps:
+                return PermissionDecision(
+                    allowed=False,
+                    operation="sequence",
+                    requested="",
+                    resolved=None,
+                    reason="the sequence contains no steps",
+                )
+            for index, step in enumerate(steps, start=1):
+                if not isinstance(step, dict):
+                    return PermissionDecision(
+                        allowed=False,
+                        operation="sequence",
+                        requested=f"step {index}",
+                        resolved=None,
+                        reason=f"step {index} is not an action object",
+                    )
+                decision = self.check_action(step)
+                if not decision.allowed:
+                    return PermissionDecision(
+                        allowed=False,
+                        operation="sequence",
+                        requested=f"step {index}: {decision.requested}",
+                        resolved=None,
+                        reason=(
+                            f"step {index} of {len(steps)} is not permitted: "
+                            f"{decision.reason}"
+                        ),
+                    )
+            return PermissionDecision(
+                allowed=True,
+                operation="sequence",
+                requested=f"{len(steps)} step(s)",
+                resolved=None,
+                reason="every step passed the permission stage individually",
+            )
+
+        if name in (
+            "inspect_application",
+            "find_control",
+            "read_control",
+            "activate_control",
+            "enter_text",
+            "save_document",
+        ):
+            # Deferred import: the registry lives in integrations, which
+            # imports this module at package-build time.
+            from integrations.apps.registry import (
+                BUILTIN_REGISTRY,
+                RegistryError,
+            )
+
+            application = action.get("application", "")
+            try:
+                definition = BUILTIN_REGISTRY.get(application)
+            except RegistryError as exc:
+                return PermissionDecision(
+                    allowed=False,
+                    operation="automate",
+                    requested=str(application),
+                    resolved=None,
+                    reason=str(exc),
+                )
+            if "automate" not in definition.capabilities:
+                # This is where evince/okular/default are denied: they
+                # may be opened (open_file) but never automated.
+                return PermissionDecision(
+                    allowed=False,
+                    operation="automate",
+                    requested=definition.id,
+                    resolved=None,
+                    reason=(
+                        f"{definition.name} does not declare the 'automate' "
+                        f"capability (it declares: "
+                        f"{', '.join(definition.capabilities) or 'nothing'}). "
+                        f"Automation is limited to reviewed applications that "
+                        f"expose the capability explicitly."
+                    ),
+                )
+            if name == "save_document":
+                # Containment for the file the save must change; the
+                # mutation itself additionally needs user approval
+                # (planner.MUTATING_ACTIONS).
+                return self.check(action.get("path", ""), operation="save")
+            mutation = name in ("activate_control", "enter_text")
+            return PermissionDecision(
+                allowed=True,
+                operation="automate",
+                requested=f"{definition.id}: {name}",
+                resolved=None,
+                reason=(
+                    "reviewed application with the 'automate' capability; "
+                    "the mutation still requires user approval"
+                    if mutation
+                    else "read-only automation on a reviewed application"
+                ),
+            )
+
         # Defence in depth: this mapping duplicates planner.MUTATING_ACTIONS
         # on purpose (the planner imports this module, so it cannot be
         # imported back without a cycle).  tests/ pins both sets.
