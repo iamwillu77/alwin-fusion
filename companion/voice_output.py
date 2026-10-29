@@ -337,7 +337,10 @@ class GStreamerPlayer:
                 error = "The audio stream failed while playing."
                 break
         else:
-            src.emit("end-stream")
+            # GstAppSrc's action signal is "end-of-stream" (what
+            # gst_app_src_end_of_stream() exposes); "end-stream" does
+            # not exist and raises, which real playback caught.
+            src.emit("end-of-stream")
             # Wait for EOS or ERROR (bounded: buffer time + 5 s).
             deadline = int(
                 (self._speech.seconds + 5.0) * Gst.SECOND
@@ -596,7 +599,12 @@ class CompanionVoice(VoiceEngine):
                             generation)
                     return
                 self._current_player = player
-            error = player.play()
+            try:
+                error = player.play()
+            except Exception as exc:  # noqa: BLE001 - completion truth
+                # A broken player must still complete the turn: the
+                # caller's on_done is how the UI leaves `speaking`.
+                error = f"Audio playback failed: {exc}"
             with self._lock:
                 stale = generation != self._generation
             if stale or error == "stopped":

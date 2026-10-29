@@ -19,6 +19,7 @@ Pins the speaking contract:
 
 from __future__ import annotations
 
+import inspect
 import threading
 import time
 import unittest
@@ -214,6 +215,45 @@ class SpeechFlowTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("No audio output device", error)
         self.assertIn("No audio output device", rec.voice.status)
+
+    def test_a_player_that_raises_still_completes_the_turn(self):
+        # Real-GUI verification found the GStreamer player raising
+        # (wrong appsrc signal); the turn must still complete with an
+        # honest error or the UI would sit in `speaking` forever.
+        class RaisingPlayer:
+            def play(self):
+                raise RuntimeError("boom")
+
+            def stop(self):
+                pass
+
+        completions = []
+        voice = CompanionVoice(
+            synthesizer=FakeSynthesizer(),
+            player_factory=lambda speech: RaisingPlayer(),
+            language="en",
+        )
+        self.assertTrue(voice.speak("hello", on_done=lambda ok, err:
+                                    completions.append((ok, err))))
+        deadline = time.time() + 5.0
+        while not completions and time.time() < deadline:
+            time.sleep(0.02)
+        self.assertEqual(len(completions), 1, "on_done must always fire")
+        ok, error = completions[0]
+        self.assertFalse(ok)
+        self.assertIn("boom", error)
+        self.assertFalse(voice.speaking)
+
+    def test_gstreamer_uses_the_real_appsrc_eos_signal_name(self):
+        # Source pin: GstAppSrc's action signal is "end-of-stream";
+        # "end-stream" raises at runtime (verified on a real sink).
+        import pathlib
+
+        source = pathlib.Path(
+            inspect.getfile(CompanionVoice)
+        ).read_text(encoding="utf-8")
+        self.assertIn('src.emit("end-of-stream")', source)
+        self.assertNotIn('src.emit("end-stream")', source)
 
     def test_bounded_text_is_passed_to_the_synth(self):
         rec = RecordingVoice()
