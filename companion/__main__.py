@@ -1,4 +1,4 @@
-"""Entry point for the Alwin companion (v0.7.0).
+"""Entry point for the Alwin companion (v0.8.0).
 
 Launch the companion window::
 
@@ -10,10 +10,12 @@ Useful flags::
 
     python3 -m companion --check   # headless self-check (no display):
                                    # state graph, adapter mapping, greeting,
-                                   # assets, cairo rendering of all states
+                                   # assets, cairo rendering of all states,
+                                   # the bedroom scene model + rendering
     python3 -m companion --smoke   # scripted headless walkthrough of the
-                                   # companion behaviour (no display; used
-                                   # by scripts/manual_smoke_companion.sh)
+                                   # companion behaviour, including the
+                                   # animated-world morning sequence (no
+                                   # display; used by the manual smoke script)
 
 Environment: ``ALWIN_HOME``, ``ALWIN_PERMITTED_ROOTS``,
 ``ALWIN_STATE_DIR`` (same as the CLI/task UI), plus the greeting
@@ -21,7 +23,9 @@ variables ``ALWIN_COMPANION_NAME`` and ``ALWIN_COMPANION_GREETING``.
 
 Honesty notes: no voice engine is connected (text bubbles only), no
 microphone is opened, no automatic startup service is installed, and
-the companion never plans/approves/executes anything itself.
+the companion never plans/approves/executes anything itself.  The
+animated world is purely visual: the scene can move Alwin around his
+room, but it never executes, approves or modifies a task.
 """
 
 from __future__ import annotations
@@ -167,6 +171,33 @@ def _run_check() -> int:
         except Exception as exc:  # noqa: BLE001
             failures.append(f"drawing {state}: {exc}")
     expect(drawn == 16, "all 16 states render with the vector character")
+
+    # v0.8 — the animated world: scene model, movement, and room render.
+    from companion.scene import (
+        NAMED_POSITIONS, SCENE_PHASES, SceneController, SceneTransform,
+    )
+    from companion import bedroom
+
+    scene = SceneController()
+    expect(scene.at_position("bed"), "scene starts asleep in bed")
+    expect(bool(SCENE_PHASES), "scene phase vocabulary is defined")
+    expect(set(NAMED_POSITIONS) >= {"bed", "beside_bed", "greeting", "desk"},
+           "named positions exist")
+    expect(scene.command("wake", now=0.0), "scene wake command works")
+    expect(not scene.command("exec", now=0.0),
+           "unknown scene command is refused (closed allowlist)")
+    expect(not scene.command("move_to", position="moon", now=0.0),
+           "unknown scene position is refused")
+    try:
+        rsurf = cairo.ImageSurface(cairo.FORMAT_ARGB32, 480, 360)
+        rctx = cairo.Context(rsurf)
+        tr = SceneTransform.for_viewport(480, 360)
+        view = scene.render_view(0.0)
+        bedroom.draw_scene_back(rctx, view, 0.0, tr)
+        bedroom.draw_scene_front(rctx, view, 0.0, tr)
+        expect(True, "bedroom scene renders headless (cairo)")
+    except Exception as exc:  # noqa: BLE001
+        expect(False, f"bedroom scene renders headless ({exc})")
 
     if failures:
         print(f"CHECK FAILED ({len(failures)} problem(s))")
@@ -353,6 +384,34 @@ def _run_smoke() -> int:
         except Exception as exc:  # noqa: BLE001
             failures.append(f"draw {state}: {exc}")
     expect(drawn == len(ALL_STATES), "vector character draws every state")
+
+    # --- v0.8 animated world: morning sequence + scene-driven tasks -------- #
+    from companion.scene import SceneController
+
+    scene = SceneController()
+    expect(scene.at_position("bed"), "scene: Alwin starts asleep in bed")
+    scene.command("wake", now=0.0)
+    expect(scene.phase == "bedroom_waking", "scene: wake begins")
+    scene.command("get_up", now=0.5)
+    for tt in (0.6, 1.0, 1.4, 1.6):
+        scene.tick(tt)
+    expect(scene.at_position("beside_bed"), "scene: got up beside the bed")
+    scene.command("move_to", position="greeting", now=2.0)
+    events = []
+    for tt in (2.3, 2.7, 3.1):
+        events.extend(scene.tick(tt))
+    expect("arrived_at_greeting" in events, "scene: arrival event fired once")
+    expect(scene.at_position("greeting"), "scene: at the greeting spot")
+    scene.command("begin_coding", now=4.0)
+    for tt in (4.5, 5.0, 5.5, 6.0):
+        scene.tick(tt)
+    expect(scene.phase == "coding", "scene: coding at the desk")
+    # the scene never executes/approves: the allowlist is closed and
+    # invalid destinations are refused without moving him.
+    expect(not scene.command("rm", now=7.0),
+           "scene: unknown command refused")
+    expect(not scene.command("move_to", position="moon", now=7.0),
+           "scene: bad position refused")
 
     # --- presentation honesty ------------------------------------------------ #
     expect(len(presentation.bubble_view("idle", "y" * 999)["text"])

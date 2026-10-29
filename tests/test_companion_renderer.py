@@ -204,5 +204,59 @@ class AssetFallbackTests(unittest.TestCase):
                          "the character must run without image assets")
 
 
+class FrameTimerLifecycleTests(unittest.TestCase):
+    """Regression: a late frame callback must not resurrect the timer.
+
+    When the window hides, ``_on_unmap`` calls ``stop()``.  A frame
+    callback already dispatched in that same main-loop iteration would,
+    before v0.8.4, call ``tick()`` -> ``_sync_timer()`` -> ``_timer =
+    GLib.timeout_add(...)`` and re-arm the source, so the room kept
+    animating off-screen.  ``stop()`` now flips ``_paused``; both
+    ``_sync_timer`` and ``_on_frame`` honor it.  Everything here is
+    headless: the renderer's timer control is pure Python.
+    """
+
+    def _renderer(self, scene=None):
+        from companion.renderer2d import Character2DRenderer
+        r = Character2DRenderer()
+        if scene is not None:
+            r.set_scene(scene)
+        return r
+
+    def test_stop_pauses_and_clears_the_timer(self):
+        from unittest import mock
+
+        r = self._renderer()
+        with mock.patch("companion.renderer2d.GLib") as glib:
+            r._timer = 42  # pretend the source is armed
+            r.stop()
+            glib.source_remove.assert_called_once_with(42)
+        self.assertIsNone(r._timer)
+        self.assertTrue(r._paused)
+
+    def test_sync_timer_never_rearms_while_paused(self):
+        from companion.scene import SceneController
+        r = self._renderer(SceneController())  # scene: _animating() is True
+        r._paused = True
+        r._timer = None
+        r._sync_timer()
+        self.assertIsNone(r._timer,
+                          "a paused renderer must not re-arm its frame timer")
+
+    def test_on_frame_is_noop_and_drops_source_while_paused(self):
+        r = self._renderer()
+        r._paused = True
+        r._timer = 7
+        self.assertFalse(r._on_frame(),
+                         "a late callback must drop itself, not reschedule")
+
+    def test_start_clears_pause_and_resumes(self):
+        r = self._renderer()
+        r.stop()
+        self.assertTrue(r._paused)
+        r.start()  # start() clears the flag; _sync_timer may then arm it
+        self.assertFalse(r._paused)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,4 +1,4 @@
-"""Companion window: the GTK4 view for the Alwin character (v0.7.0).
+"""Companion window: the GTK4 view for the Alwin character (v0.8.0).
 
 A lightweight, persistent window that shows the character, a speech
 bubble, a minimal task status and a small control row.  It is a **thin
@@ -26,6 +26,7 @@ like ``taskui.gtk_app`` is a thin view over ``taskui.presenter``:
 from __future__ import annotations
 
 import sys
+import time
 from typing import Callable, Optional
 
 try:  # pragma: no cover - exercised only with a display
@@ -42,21 +43,30 @@ from companion import presentation
 from companion.adapter import TaskEventAdapter
 from companion.greeting import GreetingConfig, GreetingController
 from companion.renderer import NullRenderer
+from companion.scene import SceneController
 from companion.states import (
     STATE_CELEBRATING,
+    STATE_CODING,
     STATE_ERROR,
     STATE_GREETING,
     STATE_IDLE,
+    STATE_THINKING,
+    STATE_WAITING_FOR_APPROVAL,
     STATE_WAKING_UP,
+    STATE_WALKING,
+    STATE_WRITING,
+    STATE_SLEEPING,
     CharacterController,
 )
 from companion.voice import NullVoice, voice_status
 
 APP_ID = "org.alwin.fusion.companion"
 
-#: Character area size (small: a companion, not a game window).
-CHAR_WIDTH = 240
-CHAR_HEIGHT = 250
+#: Character area size.  v0.8: wide enough for the bedroom scene (which
+#: scales uniformly to whatever box it is given — this is just the
+#: default the window asks for).
+CHAR_WIDTH = 520
+CHAR_HEIGHT = 380
 
 #: Idle check cadence (very low frequency; no busy polling).
 IDLE_CHECK_MS = 5000
@@ -155,6 +165,14 @@ class CompanionWindow:
             self.controller, on_speech=self._queue_speech
         )
 
+        # ---- animated world (v0.8) --------------------------------------- #
+        # A renderer-independent scene model (pure Python).  The renderer
+        # draws it and advances it; it never executes, approves or
+        # modifies a task — it is only ever a place Alwin stands.
+        self.scene = SceneController(
+            reduced_motion=bool(self._settings.get("reduced_motion", False))
+        )
+
         # ---- greeting ---------------------------------------------------- #
         if greeting_config is None:
             greeting_config = GreetingConfig(
@@ -180,6 +198,11 @@ class CompanionWindow:
         self._bubble_text = ""
         self._bubble_tone = presentation.TONE_CALM
         self._closing = False
+        # v0.8 — morning wake-up sequence bookkeeping.  ``_morning_active``
+        # is True only while the sleep -> wake -> walk -> greet chain runs;
+        # it suppresses the ordinary scene drive so the two never fight.
+        self._morning_active = False
+        self._morning_text = ""
         # Widgets exist only after _build(); guarded accessors check them.
         self._bubble = None
         self._status_label = None
@@ -269,6 +292,14 @@ class CompanionWindow:
         except Exception:  # noqa: BLE001 - degrade to text-only
             self.renderer = NullRenderer()
             self.controller.renderer = self.renderer
+        # v0.8: hand the bedroom scene to the renderer (when it supports
+        # one) so Alwin is drawn *in a room* at his world position.  A
+        # renderer without set_scene (the null one) degrades to text-only.
+        if hasattr(self.renderer, "set_scene"):
+            try:
+                self.renderer.set_scene(self.scene, self._on_scene_event)
+            except Exception:  # noqa: BLE001 - never break window build
+                pass
         root.append(area)
 
         # ---- status + subtitle ------------------------------------------- #
@@ -321,39 +352,149 @@ class CompanionWindow:
         if self._greeted_this_window:
             return  # never re-greet on redraw/re-build
         if not self._greeting.should_greet():
+            # Greeting disabled or quiet hours: skip the wake-up sequence
+            # but still make the room "ready" — Alwin stands at the
+            # greeting spot, idle, instead of staying in bed.
+            self._silent_ready()
             return
         self._greeted_this_window = True
         self._greeting.mark_greeted()
-        text = self._greeting.text()
+        self._morning_text = self._greeting.text()
+        self._start_morning_sequence()
 
-        # Sequence: wake up (stretch + yawn) -> pause -> greet + wave.
-        # The greeting state auto-returns to idle via the existing
-        # AUTO_RETURN_DELAYS timer; every timer id is tracked so the
-        # window teardown can cancel them.
+    def _silent_ready(self) -> None:
+        """No greeting (disabled/quiet): place Alwin up, idle, ready."""
+        self._scene_command("place", position="greeting")
+        self.controller.force(STATE_IDLE, reason="ready")
+
+    # ------------------------------------------------------------------ #
+    # Morning wake-up sequence (v0.8): sleep -> wake -> get up -> walk ->
+    # greet.  Every stage is a real scene command advanced by elapsed
+    # time; the walk ends on an arrival event, with a timer safety net so
+    # the chain never dead-ends if no frame is drawn.  Reduced motion
+    # collapses the whole thing to a near-instant placement.
+    # ------------------------------------------------------------------ #
+
+    def _start_morning_sequence(self) -> None:
+        self._morning_active = True
+        # Begin in bed, pre-dawn, with Alwin asleep.
+        self._scene_command("reset")
+        self.controller.force(STATE_SLEEPING, reason="startup")
+
+        if self.scene.reduced_motion:
+            # Reduced motion: no long walk — place him at the greeting
+            # spot and greet after a short beat.
+            def _greet() -> bool:
+                self._greet_id = None
+                if self._closing:
+                    return False
+                self._scene_command("place", position="greeting")
+                self._finish_morning_greeting()
+                return False
+
+            self._greet_id = GLib.timeout_add(500, _greet)
+            return
+
         def _wake() -> bool:
             self._greet_id = None
             if self._closing:
                 return False
+            self._scene_command("wake")
             self.controller.force(STATE_WAKING_UP, reason="startup")
+            self._greet_id = GLib.timeout_add(1500, _get_up)
             return False
 
-        def _greet() -> bool:
+        def _get_up() -> bool:
             self._greet_id = None
             if self._closing:
                 return False
-            self.controller.enter(STATE_GREETING, reason="greeting")
-            self._show_bubble(text, presentation.TONE_POSITIVE)
+            self._scene_command("get_up")
+            self._greet_id = GLib.timeout_add(1300, _walk)
             return False
 
-        def _wake_then_greet() -> bool:
+        def _walk() -> bool:
             self._greet_id = None
             if self._closing:
                 return False
-            self.controller.force(STATE_WAKING_UP, reason="startup")
-            self._greet_id = GLib.timeout_add(1300, _greet)
+            self._scene_command("move_to", position="greeting")
+            self.controller.enter(STATE_WALKING, reason="morning walk")
+            # Arrival normally finishes the greeting via _on_scene_event;
+            # this timer is a safety net so the chain always resolves.
+            self._greet_id = GLib.timeout_add(3600, _arrive)
             return False
 
-        self._greet_id = GLib.timeout_add(650, _wake_then_greet)
+        def _arrive() -> bool:
+            self._greet_id = None
+            if self._closing:
+                return False
+            self._finish_morning_greeting()
+            return False
+
+        self._greet_id = GLib.timeout_add(2500, _wake)
+
+    def _finish_morning_greeting(self) -> None:
+        self._cancel_morning()
+        if self._closing:
+            return
+        self.controller.enter(STATE_GREETING, reason="greeting")
+        self._show_bubble(self._morning_text, presentation.TONE_POSITIVE)
+
+    def _cancel_morning(self) -> None:
+        if self._greet_id is not None:
+            GLib.source_remove(self._greet_id)
+            self._greet_id = None
+        self._morning_active = False
+
+    def _now(self) -> float:
+        # The scene uses the same monotonic clock the renderer ticks on,
+        # so a command's start time lines up with the next frame.
+        return time.monotonic()
+
+    def _scene_command(self, name: str, *, position: Optional[str] = None) -> bool:
+        """Run one allowlisted scene command; scene bugs never propagate."""
+        try:
+            return self.scene.command(name, position=position, now=self._now())
+        except Exception:  # noqa: BLE001 - the scene is cosmetic only
+            return False
+
+    # ------------------------------------------------------------------ #
+    # Scene <-> character-state wiring (v0.8)
+    # ------------------------------------------------------------------ #
+
+    def _drive_scene_for_state(self, state: str) -> None:
+        """Map a *character* state to the matching scene command.
+
+        The scene never decides anything on its own — it only reflects
+        where Alwin should be for the current task stage.  Writing/coding
+        walk him to the desk; thinking returns him to the greeting spot;
+        an approval/failure/celebration stops the work animation and sets
+        an honest visual state; idle walks him back from the desk.  While
+        the morning sequence runs, this is suppressed so the two systems
+        never fight over the same character.
+        """
+        if self._morning_active:
+            return
+        cmd = {
+            STATE_WRITING: "begin_writing",
+            STATE_CODING: "begin_coding",
+            STATE_THINKING: "begin_thinking",
+            STATE_WAITING_FOR_APPROVAL: "begin_waiting",
+            STATE_ERROR: "begin_error",
+            STATE_CELEBRATING: "begin_celebrating",
+            STATE_IDLE: "return_idle",
+        }.get(state)
+        if cmd is None:
+            return
+        self._scene_command(cmd)
+
+    def _on_scene_event(self, event: str) -> None:
+        """Arrival events from the renderer's scene tick (main thread)."""
+        if self._closing:
+            return
+        if event == "arrived_at_greeting" and self._morning_active:
+            self._finish_morning_greeting()
+        # Desk arrivals are handled by the scene itself (the writing/
+        # coding phase begins on arrival), so nothing else to do here.
 
     # ------------------------------------------------------------------ #
     # Task updates (worker thread -> GTK main loop)
@@ -366,6 +507,11 @@ class CompanionWindow:
     def _on_record_main(self, record) -> bool:
         if self._closing:
             return False
+        # A real task arrived.  If the morning wake-up sequence is still
+        # running, cancel it cleanly — the task must never wait on a
+        # visual flourish.  The scene snaps coherent (Alwin is up) via
+        # the drive below / _ensure_up inside the scene commands.
+        self._cancel_morning()
         # The user is interacting with a task: wake a resting character.
         if self.controller.state in ("sleeping", "resting"):
             self.controller.force(STATE_IDLE, reason="task activity")
@@ -384,8 +530,10 @@ class CompanionWindow:
     def _on_state_change(self, state: str, expression: str, reason: str) -> None:
         # Controller callbacks run on the thread that entered the state
         # (the GTK main loop, via the marshalled observer).  Schedule
-        # the auto-return for transient outcome states.
+        # the auto-return for transient outcome states, and let the
+        # scene reflect where Alwin should be for this stage.
         self._schedule_auto_return(state)
+        self._drive_scene_for_state(state)
         if self._subtitle_label is not None:
             self._subtitle_label.set_text(
                 presentation.subtitle_view(self.controller.snapshot())
@@ -534,6 +682,7 @@ class CompanionWindow:
         _switch("greeting_enabled", "Startup greeting")
         _switch("show_subtitles", "Show subtitles")
         _switch("always_on_top", "Always on top (best effort)")
+        _switch("reduced_motion", "Reduced motion")
 
         mute_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL,
                            spacing=8)
@@ -557,6 +706,14 @@ class CompanionWindow:
                 settings_store.save(self._settings_path, self._settings)
             except settings_store.SettingsError:
                 pass  # surfaced by the store; never crash the window
+        # Reduced motion takes effect immediately on the scene (calmer,
+        # near-instant transitions for the wake-up and walks).
+        try:
+            self.scene.reduced_motion = bool(
+                self._settings.get("reduced_motion", False)
+            )
+        except Exception:  # noqa: BLE001 - cosmetic only
+            pass
         if self._subtitle_label is not None:
             self._subtitle_label.set_visible(
                 bool(self._settings.get("show_subtitles", True))

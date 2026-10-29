@@ -1,4 +1,4 @@
-"""Alwin's full-body 2D character drawing core (v0.7.0).
+"""Alwin's full-body 2D character drawing core (v0.8.0).
 
 This module is the *art* of the companion: an original, full-body
 cartoon boy drawn procedurally with cairo — large expressive head,
@@ -1340,9 +1340,24 @@ def _draw_laptop(ctx, t: float) -> None:
 # --------------------------------------------------------------------------- #
 
 
-def _draw_scene(ctx, state: str, pose: Pose, t: float) -> None:
+def _draw_scene(ctx, state: str, pose: Pose, t: float, *,
+                furniture: bool = True, floating: bool = True,
+                shadow: bool = True) -> None:
+    """Assemble one character frame in design-box coordinates.
+
+    ``furniture`` controls the *desk props* (desk + notebook/laptop) that
+    the standalone ``draw_character`` API draws around Alwin.  The
+    animated-world renderer turns this off and supplies a real room
+    (``companion.bedroom``) instead, so the notebook/laptop are not drawn
+    twice.  ``floating`` toggles the ambient props (z's, thought dots,
+    sparkles, …) — off while he lies rotated in bed, where the room
+    draws upright z's above the pillow.  ``shadow`` toggles the ground
+    shadow ellipse — off while lying (the bed casts its own).
+    Held props (pencil, book, magnifier) always follow the character.
+    """
     ox, oy = pose.sway, pose.bob
-    _draw_shadow(ctx, ox, oy, pose)
+    if shadow:
+        _draw_shadow(ctx, ox, oy, pose)
 
     hip_cx = CX + ox
     hip_cy = HIP_Y + oy
@@ -1372,7 +1387,7 @@ def _draw_scene(ctx, state: str, pose: Pose, t: float) -> None:
                        (pose.l_hand_x + ox, pose.l_hand_y + oy), pose.l_bend)
     hand_r = _draw_arm(ctx, sh_r[0], sh_r[1],
                        (pose.r_hand_x + ox, pose.r_hand_y + oy), pose.r_bend)
-    if desk:
+    if desk and furniture:
         _draw_desk(ctx)
         if state == "writing":
             _draw_notebook(ctx, t)
@@ -1397,7 +1412,9 @@ def _draw_scene(ctx, state: str, pose: Pose, t: float) -> None:
         _prop_gear(ctx, 172.0, 120.0 + 3.0 * math.sin(t * 2.0), t)
 
     # floating props
-    if state == "thinking":
+    if not floating:
+        pass
+    elif state == "thinking":
         _prop_thought_dots(ctx, head_x + 46.0, head_y - 44.0, t)
     elif state == "celebrating":
         _prop_sparkles(ctx, t)
@@ -1434,6 +1451,46 @@ def draw_character(ctx, width: float, height: float, state: str, *,
     return used
 
 
+def draw_character_placed(ctx, x: float, y: float, scale: float, state: str,
+                          *, expression: str = "neutral", t: float = 0.0,
+                          pose: Optional[Pose] = None,
+                          rotation: float = 0.0,
+                          furniture: bool = False,
+                          floating_props: bool = True,
+                          shadow: bool = True) -> Pose:
+    """Draw Alwin anchored at a **world** position (the animated world).
+
+    ``x``/``y`` is his feet anchor in *world* (scene) units, ``scale``
+    converts world units to pixels uniformly, and ``rotation`` rotates the
+    whole figure about his feet (used for the lying-in-bed pose).  This is
+    how the character can stand anywhere in a room instead of being stuck
+    at the centre of the window.
+
+    ``furniture=False`` (the default here) skips the standalone desk
+    props, because the room renderer already draws a real desk; pass
+    ``True`` only when drawing Alwin on his own without a room.
+    ``floating_props``/``shadow`` suppress the ambient z's and the ground
+    shadow while he lies rotated in bed (the room draws those itself).
+
+    ``t`` is seconds spent in *state*; when *pose* is given (the renderer
+    blends across state changes) it is used verbatim.  Returns the pose
+    that was drawn.
+    """
+    used = pose if pose is not None else compute_pose(state, t, expression)
+    ctx.save()
+    ctx.translate(x, y)
+    if rotation:
+        ctx.rotate(rotation)
+    ctx.scale(scale, scale)
+    ctx.translate(-CX, -GROUND_Y)
+    try:
+        _draw_scene(ctx, state, used, t, furniture=furniture,
+                    floating=floating_props, shadow=shadow)
+    finally:
+        ctx.restore()
+    return used
+
+
 __all__ = [
     "DESIGN_H",
     "DESIGN_W",
@@ -1442,4 +1499,5 @@ __all__ = [
     "blink_amount",
     "compute_pose",
     "draw_character",
+    "draw_character_placed",
 ]

@@ -1,4 +1,4 @@
-"""Companion settings: small, validated, local (v0.7.0).
+"""Companion settings: small, validated, local (v0.8.0).
 
 Persists the companion's preferences (greeting on/off, name, quiet
 hours, mute, always-on-top, subtitles) to a tiny JSON file in the
@@ -37,6 +37,7 @@ SCHEMA: Dict[str, tuple] = {
     "mute_voice": (bool, True),      # voice engine absent anyway (honest)
     "always_on_top": (bool, False),  # opt-in; Wayland may ignore it
     "show_subtitles": (bool, True),  # accessible text alternative
+    "reduced_motion": (bool, False),  # calmer, near-instant transitions
 }
 
 

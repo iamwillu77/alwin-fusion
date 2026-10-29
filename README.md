@@ -2,28 +2,32 @@
 
 **Open-source, offline-first AI-native operating system — in progress.**
 
-Version **0.7.0** · Milestone: **Animated Character & Morning Experience**
+Version **0.8.0** · Milestone: **Animated World & Walking Experience**
 
 Alwin Fusion lets you control your computer through natural-language
-commands. v0.7 upgrades **Alwin**, the persistent, lightweight desktop
-companion (`companion/`): the character is now a recognizable **full-body
-cartoon boy** — a large expressive head with tousled dark-brown hair, big
-brown eyes, a blue hoodie with an original ALWIN emblem, jointed arms and
-hands, legs and sneakers — drawn procedurally with cairo and brought to
-life with genuinely working animations (idle breathing and natural
-blinking, a greeting wave, thinking, listening, distinguishable writing
-and coding poses at a desk, an honest celebration on a **verified**
-success, and a concerned-but-friendly error). He mirrors *real* task
-states truthfully, shows a configurable startup greeting, and stays
-strictly outside the trusted pipeline — he observes curated task records
-and can neither grant a permission nor change an outcome. It builds on
-the unchanged trusted core (parse → plan → permission → approval →
-execute → verify → audit) and on the v0.5 task experience (`taskui`);
-there is no second execution engine. Fully offline, with an optional
-local Ollama model that is never required and never auto-downloaded.
+commands. v0.8 gives **Alwin**, the persistent, lightweight desktop
+companion (`companion/`), an **animated bedroom world**: he now lives in
+an illustrated room (pastel wall, window with a sunrise, bed, bedside
+table with an alarm clock, rug, desk with a notebook, pencil and laptop,
+chair) and genuinely **moves between places** — he wakes up in bed, gets
+up, and *walks* to his greeting spot or to his desk, driven by real
+elapsed-time movement (not frame counting). Writing/coding tasks walk
+him to the desk, where the notebook/pencil or laptop animate; thinking
+returns him to the greeting spot; an approval or failure stops the work
+animation and shows an honest waiting/error state. The character is the
+same recognizable **full-body cartoon boy** from v0.7 (expressive head,
+tousled hair, blue hoodie, jointed arms/legs) drawn procedurally with
+cairo. He mirrors *real* task states truthfully, shows a configurable
+startup greeting, and stays strictly outside the trusted pipeline — the
+scene can move him around his room but can never grant a permission or
+change an outcome. It builds on the unchanged trusted core (parse → plan
+→ permission → approval → execute → verify → audit) and on the v0.5 task
+experience (`taskui`); there is no second execution engine. Fully offline,
+with an optional local Ollama model that is never required and never
+auto-downloaded.
 
 ```
-ALWIN FUSION v0.7
+ALWIN FUSION v0.8
 Local AI Core + Documents + Applications + Desktop Automation
 Task experience: python3 -m taskui · Companion: python3 -m companion
 
@@ -78,7 +82,7 @@ $ python3 -m taskui
 └──────────────────────────────────────────────────────────────┘
 ```
 
-And, next to it, the v0.7 companion:
+And, next to it, the v0.8 companion:
 
 ```
 $ python3 -m taskui --companion
@@ -189,7 +193,7 @@ execution and verification stay where they were.
   closed schema on read, and malformed records are skipped and counted
   — never repaired or executed. It is a normal user-owned file, not
   tamper-proof.
-- **Alwin companion** (`companion/`, v0.7) — a persistent, lightweight
+- **Alwin companion** (`companion/`, v0.8) — a persistent, lightweight
   desktop character beside the task window (`python3 -m taskui
   --companion`, or `python3 -m companion` alone): a small GTK4 window
   showing an **original full-body cartoon boy** (large expressive head,
@@ -391,9 +395,9 @@ python3 -m taskui --check         # headless self-check (no window): prints
                                   # AI/automation status + history location
 python3 -m taskui --smoke         # scripted headless walkthrough of the
                                   # full lifecycle (used by the UI smoke test)
-python3 -m taskui --companion      # v0.7: task window + Alwin companion together
+python3 -m taskui --companion      # v0.8: task window + Alwin companion together
 
-# v0.7: the Alwin companion (full-body animated character window)
+# v0.8: the Alwin companion (full-body animated character window)
 python3 -m companion               # companion alone (its Settings can open
                                    # the task window in the same process)
 python3 -m companion --no-greeting # skip the startup greeting this run
@@ -447,7 +451,7 @@ blocks.
 > openpyxl does not calculate either. Open the workbook in a
 > spreadsheet application (LibreOffice Calc, Excel, …) to calculate.
 
-## The Alwin companion (v0.7)
+## The Alwin companion (v0.8)
 
 ### Launching it
 
@@ -493,6 +497,66 @@ that fallback). A failed, rejected or cancelled task **never** renders a
 success animation; only the verified `completed` lifecycle state reaches
 `celebrating`.
 
+### The animated world (v0.8)
+
+Alwin is no longer stuck at the centre of the window — he lives in an
+**illustrated bedroom** and genuinely moves around it. The world is split
+into a small, renderer-independent **scene model** and a cairo **room
+drawing**, so the same logic drives today's 2D window and a future 3D
+renderer:
+
+- **`companion/scene.py` (the model, pure Python)** — scene objects with
+  stable identity and bounds, four **named positions** (`bed`,
+  `beside_bed`, `greeting`, `desk`), **elapsed-time movement**, the
+  wake-up sequence, and a **closed command allowlist** (`wake`, `get_up`,
+  `move_to`, `begin_writing`, `begin_coding`, `begin_thinking`,
+  `begin_waiting`, `begin_error`, `begin_celebrating`, `return_idle`,
+  `place`, `stop`, `reset`). It has no cairo, no GTK, no I/O and no task
+  engine — it is unit-tested headless with a simulated clock.
+- **`companion/bedroom.py` (the drawing, pure cairo)** — the pastel room:
+  wall and plank floor, a window with curtains and a **sunrise** that
+  brightens as he wakes, a bed with a pillow and a blanket that tucks
+  over him, a bedside table with a **ringing alarm clock**, a rug, a wall
+  clock, and a desk with a notebook, a pencil and a laptop. It reads the
+  scene snapshot and never mutates it.
+
+**Real movement.** A walk is a request with a start time, a duration and
+a target; the current position is a pure function of *elapsed time*
+(smoothstep-eased), so a delayed or dropped frame simply advances him to
+the correct spot — movement never overshoots by frames. Repeating the
+same request is a no-op; a new request replaces the old one from wherever
+he currently is. He is anchored by his feet on the single walking plane
+(soles on the floor at every window size), and the whole room **and** the
+character scale uniformly when you resize — nothing stretches. An
+off-plane or out-of-room destination is rejected without disturbing his
+current position, and the failure is reported honestly.
+
+**The morning sequence.** When the greeting preferences allow it, Alwin
+starts asleep in bed (eyes closed, breathing, drifting `z`), then **wakes**
+(the sunrise brightens, the alarm rings, he stretches and yawns), **gets
+up** beside the bed, **walks** to the greeting spot, and **waves** with a
+configurable greeting bubble (the name is never hard-coded) before
+settling into `idle`. It runs once per window (never again on a redraw),
+its timers are cleaned up when the window closes or hides, it respects
+quiet hours and the disable toggle, and a **reduced-motion** setting
+collapses it to a calm near-instant placement. A real task arriving
+mid-sequence cancels it cleanly — the task never waits on the visuals.
+
+**Scene-aware tasks.** A writing/coding task walks Alwin to the desk,
+where the notebook-and-pencil or the laptop animate (driven only by
+trusted action identifiers); thinking returns him to the greeting spot;
+an approval or failure **stops** the work animation and shows an honest
+waiting/error state; and celebration is shown **only** after a verified
+completion. The scene controller never executes, approves or modifies a
+task — it is only ever a place Alwin stands — and finishing a walk
+animation is never treated as task success.
+
+**Timers and cost.** All animation is elapsed-time based (~12 fps while
+active, ~6 fps when calm), pauses entirely while the window is hidden and
+resumes on show, and never leaks a duplicate. There is still **no** game
+engine, no blur or particle system, and no AI model is used to move him —
+it is plain cairo on the existing stack.
+
 ### Real behaviour, original procedural artwork
 
 The *states, transitions and task mapping are real behaviour* — they are
@@ -501,14 +565,14 @@ driven by actual `TaskRecord` updates from the trusted pipeline, and the
 by `companion/character.py` as a pure function of **elapsed time**
 (correct even when frames are delayed), blended smoothly (~0.25 s)
 across state changes, and drawn with cairo as an original full-body
-cartoon boy. There are no shipped image assets; drop a `frame.png` into
+cartoon boy **placed in the room** at his world position. There are no
+shipped image assets; drop a `frame.png` into
 `companion/assets/character/<state>/` to replace **one** state's art
 (see the README there). Lively states animate at ~12 fps; the subtle
-`idle` state ticks at ~6 fps, and `sleeping`/`resting` draw once and
-stop the frame timer entirely — an idle companion costs almost nothing.
-The frame timer is also stopped whenever the window is hidden.
+`idle` state ticks at ~6 fps, and the frame timer stops entirely whenever
+the window is hidden — an idle companion costs almost nothing.
 
-### Startup greeting
+### Startup greeting and the morning sequence
 
 Configurable and honest: the name comes from `ALWIN_COMPANION_NAME` or
 your saved settings (default: `friend` — no name is hard-coded), it
@@ -516,11 +580,14 @@ fires **once per session** (never again on redraw) with an optional
 once-per-day marker, respects the enable toggle and quiet hours
 (`22:00-07:00`), and is **text only** — nothing is spoken, no
 microphone is opened, and presence is never assumed. `--no-greeting`
-skips it for one run. The greeting is *sequenced*: Alwin stretches and
-yawns (`waking_up`), then waves with a smile (`greeting`) while the
-bubble appears, then settles back into `idle` through the normal
-validated state machine — and every timer is cleaned up when the
-window closes.
+skips it for one run. When the greeting fires, it plays the full
+**morning sequence**: Alwin sleeps in bed, wakes (sunrise + alarm +
+stretch), gets up, **walks** to the greeting spot, and waves with a smile
+while the bubble appears, then settles back into `idle` through the normal
+validated state machine. When the greeting is disabled or it is quiet
+hours, he simply stands up at the greeting spot, ready — no sequence. A
+**reduced-motion** preference (in Settings) shortens the whole thing to a
+calm placement, and every timer is cleaned up when the window closes.
 
 ### How it connects to the task engine
 
@@ -539,11 +606,14 @@ Renderers implement one small interface (`companion/renderer.py`:
 `show_state`, `set_expression`, `tick`, `attach`, `detach`,
 `is_available`). A future 3D renderer swaps in behind exactly that
 interface and reuses the state vocabulary, transition graph,
-task-event adapter, greeting, speech content and controls unchanged;
-3D-specific concerns (scene, room, meshes, lip-sync) stay out of
-`ai_core`/`integrations`. v0.7 deliberately ships **no** game engine or
-3D runtime — the character is plain cairo, and the pose system was
-structured so a future 3D renderer can reuse it unchanged.
+task-event adapter, greeting, speech content, controls **and the scene
+model** unchanged; 3D-specific concerns (meshes, lighting, lip-sync) stay
+out of `ai_core`/`integrations`. The v0.8 **scene model**
+(`companion/scene.py`) is deliberately renderer-independent — it owns
+where Alwin is and how he moves, while `companion/bedroom.py` is just the
+cairo view of it — so a 3D renderer would draw the same room and the same
+movement from the same model. v0.8 still ships **no** game engine or 3D
+runtime — the room and character are plain cairo.
 
 ## Configuration
 
@@ -560,7 +630,7 @@ structured so a future 3D renderer can reuse it unchanged.
 | `ALWIN_COMPANION_QUIET_HOURS` | *(settings, else off)* | `HH:MM-HH:MM` window in which Alwin does not greet |
 
 Companion preferences (greeting on/off, name, quiet hours, mute
-placeholder, always-on-top, subtitles) persist to
+placeholder, always-on-top, subtitles, reduced motion) persist to
 `$ALWIN_STATE_DIR/companion_settings.json` (mode 0600, closed schema —
 unknown keys are ignored; this file is cosmetic-only and never read by
 the trusted core).
@@ -624,7 +694,7 @@ badges, approval affordances, step rendering, verification evidence,
 bounded untrusted text), and AST-based source meta-checks (no
 subprocess/os.system/eval/exec anywhere in `taskui/`, only the manager
 imports the execution engine, the GTK view never renders markup). The
-v0.7 companion is covered the same way (204 headless tests, no window
+v0.8 companion is covered the same way (247 headless tests, no window
 and no display): the 16-state controller (valid/invalid
 transitions, calm fallbacks, truthful-target recovery, renderer errors
 contained and recorded), the task-event adapter (every lifecycle state
@@ -658,7 +728,16 @@ genuinely oscillating, **celebration only from a trusted verified
 `completed`** (failed and needs-attention records never celebrate),
 graceful handling of zero/tiny canvases, and expression overrides —
 plus a source purity meta-test pinning `companion/character.py` to
-cairo/math/dataclasses/typing only. The spreadsheet/PDF pipeline tests skip themselves politely when the
+cairo/math/dataclasses/typing only. The v0.8 animated world is covered
+by its own suite (`tests/test_companion_scene.py`, 40 tests): scene
+objects with stable bounds inside the design box, uniform non-distorting
+scaling, smoothstep-eased elapsed-time movement (delayed frames land on
+the right spot, invalid destinations are refused without disturbing his
+position, an arrival fires once), the full morning sequence
+(sleep → wake → get up → walk → arrive) plus its reduced-motion
+variant, scene-driven writing/coding/thinking/waiting/error, the closed
+command allowlist, deterministic headless room rendering, and a
+desk-hand drift guard. The spreadsheet/PDF pipeline tests skip themselves politely when the
 optional package is not installed (the standard library validator
 tests always run).
 
@@ -832,8 +911,16 @@ verified `completed`, and a concerned-but-friendly error — with
 elapsed-time animation, smooth pose blending across state changes,
 adaptive frame cadence, a sequenced morning greeting
 (wake → wave → bubble → idle), animation timers stopped while the
-window is hidden, and 27 dedicated headless character tests. The suite
-is now **767 tests**, all headless.
+window is hidden, and 27 dedicated headless character tests. v0.8 adds
+the **animated world**: a renderer-independent scene model
+(`companion/scene.py` — named positions, elapsed-time movement, the
+wake-up sequence, a closed command allowlist) and an original cairo
+bedroom (`companion/bedroom.py` — wall, floor, window with a sunrise,
+bed with a tucking blanket, bedside alarm clock, rug, desk with
+notebook/pencil/laptop, chair), so Alwin genuinely **walks** between the
+bed, the greeting spot and the desk, driven by real task events, with a
+reduced-motion option and 40 dedicated headless scene tests. The suite
+is now **809 tests**, all headless.
 
 Known limitations (details in `docs/SECURITY.md`):
 

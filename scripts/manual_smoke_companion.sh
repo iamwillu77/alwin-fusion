@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Opt-in manual smoke test for the v0.7 Alwin companion (companion/).
+# Opt-in manual smoke test for the v0.8 Alwin companion (companion/).
 #
 # This script is NEVER run by the automated test suite (which uses only
 # mocks, temporary directories and headless cairo surfaces, and never
@@ -13,16 +13,19 @@
 #   1. reports the environment (Python, GTK4, display, pycairo),
 #   2. runs the HEADLESS self-check (python3 -m companion --check):
 #      state graph, task-event mapping (including "failed never
-#      celebrates"), greeting rules, settings and 2D rendering of all
-#      16 states of the full-body character,
+#      celebrates"), greeting rules, settings, 2D rendering of all
+#      16 states of the full-body character, and the v0.8 bedroom
+#      scene model (movement, closed command allowlist, cairo render),
 #   3. runs the HEADLESS walkthrough (python3 -m companion --smoke):
 #      greeting dedup + quiet hours, approval mapping, renderer-error
-#      isolation, asset fallback, settings permissions,
+#      isolation, asset fallback, settings permissions, and the v0.8
+#      animated-world morning sequence (sleep -> wake -> get up ->
+#      walk -> arrive) plus scene-driven writing/coding,
 #   4. runs the companion's automated tests (renderer, character,
-#      states, window, greeting, presentation, adapter, security),
+#      states, window, greeting, presentation, adapter, scene, security),
 #   5. opens the REAL companion window next to the real task window
-#      (python3 -m taskui --companion) so you can watch the full-body
-#      cartoon boy (hair, hoodie, arms, legs, shoes) blink, breathe,
+#      (python3 -m taskui --companion) so you can watch Alwin wake up in
+#      his illustrated bedroom, walk to his desk, and blink, breathe,
 #      wave, think and show writing/coding/celebrating/error poses as
 #      you submit a task yourself.  Close the window to finish.
 #
@@ -110,15 +113,19 @@ echo
 if [[ "$HAVE_GTK" == "1" && "$HAVE_DISPLAY" == "1" ]]; then
   echo "== 5) Opening the real task window + companion =="
   echo "   Try, in order:"
-  echo "     a) Watch Alwin's startup greeting (text bubble; no voice, no mic)."
+  echo "     a) Watch Alwin's morning: he wakes up in his illustrated bedroom"
+  echo "        (sunrise, alarm), gets up and walks to the greeting spot"
+  echo "        (text bubble; no voice, no mic)."
   echo "     b) In the task window submit 'Show files and folders in my Documents.'"
-  echo "        -> Alwin thinks, then celebrates only when the task VERIFIES."
+  echo "        -> Alwin thinks, walks to his desk, then celebrates only when"
+  echo "           the task VERIFIES."
   echo "     c) Submit 'Create a folder named CompanionSmoke in Documents.'"
   echo "        -> Alwin waits for approval (it never approves itself);"
   echo "           the plan/approve buttons live only in the task window."
   echo "     d) Reject it: Alwin stays calm — no celebration on rejection."
-  echo "     e) Use the companion's Settings (greeting/subtitles/always on top)"
-  echo "        and its Hide control; the task engine keeps running."
+  echo "     e) Use the companion's Settings (greeting/subtitles/always on"
+  echo "        top/reduced motion) and its Hide control; the task engine keeps"
+  echo "        running."
   echo "   Close the windows to finish the smoke test."
   echo
   python3 -m taskui --companion

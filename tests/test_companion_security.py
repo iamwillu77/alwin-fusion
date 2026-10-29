@@ -34,9 +34,9 @@ MODULES = sorted(p for p in COMPANION.glob("*.py"))
 
 #: Expected module set — a rename must be a deliberate act.
 EXPECTED_MODULES = {
-    "__init__.py", "__main__.py", "adapter.py", "character.py", "greeting.py",
-    "presentation.py", "renderer.py", "renderer2d.py", "settings.py",
-    "states.py", "voice.py", "window.py",
+    "__init__.py", "__main__.py", "adapter.py", "bedroom.py", "character.py",
+    "greeting.py", "presentation.py", "renderer.py", "renderer2d.py",
+    "scene.py", "settings.py", "states.py", "voice.py", "window.py",
 }
 
 #: Dotted module names that must never be imported anywhere in companion.
@@ -219,6 +219,29 @@ class CompanionSourceTests(unittest.TestCase):
             roots, {"__future__", "math", "dataclasses", "typing", "cairo"},
         )
         for banned in EXECUTION_ENGINE | TASK_EXPERIENCE:
+            self.assertNotIn(banned, info.module_imports)
+
+    def test_scene_model_is_pure_python(self):
+        # The scene/world model must stay pure Python: no cairo, no GTK,
+        # no I/O, no threads, no task engine — so movement and the
+        # wake-up sequence are unit-testable headless with simulated time.
+        info = collect(COMPANION / "scene.py")
+        roots = {name.split(".")[0] for name in info.module_imports}
+        self.assertLessEqual(roots,
+                             {"__future__", "math", "dataclasses", "typing"})
+        for banned in EXECUTION_ENGINE | TASK_EXPERIENCE | BANNED_IMPORTS:
+            self.assertNotIn(banned, info.module_imports)
+
+    def test_bedroom_drawing_module_is_pure_cairo(self):
+        # The bedroom artwork is the view half of the scene layer: pure
+        # cairo + math, reading only the scene model.  No GTK, no I/O, no
+        # engine — it can render headless onto an ImageSurface.
+        info = collect(COMPANION / "bedroom.py")
+        roots = {name.split(".")[0] for name in info.module_imports}
+        self.assertLessEqual(
+            roots, {"__future__", "math", "typing", "cairo", "companion"},
+        )
+        for banned in EXECUTION_ENGINE | TASK_EXPERIENCE | BANNED_IMPORTS:
             self.assertNotIn(banned, info.module_imports)
 
     def test_window_never_renders_text_as_markup(self):

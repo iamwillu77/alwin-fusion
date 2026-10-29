@@ -208,10 +208,11 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(
             set(settings_store.SCHEMA),
             {"greeting_enabled", "greeting_name", "quiet_hours",
-             "mute_voice", "always_on_top", "show_subtitles"},
+             "mute_voice", "always_on_top", "show_subtitles",
+             "reduced_motion"},
         )
         allowed_prefixes = ("greeting", "quiet", "mute", "always",
-                            "show_subtitles")
+                            "show_subtitles", "reduced")
         for key in settings_store.SCHEMA:
             self.assertTrue(key.startswith(allowed_prefixes),
                             f"{key} is not a cosmetic preference")
@@ -221,6 +222,7 @@ class SettingsTests(unittest.TestCase):
         self.assertTrue(defaults["greeting_enabled"])
         self.assertFalse(defaults["always_on_top"])
         self.assertTrue(defaults["show_subtitles"])
+        self.assertFalse(defaults["reduced_motion"])
 
     def test_unknown_keys_are_dropped(self):
         clean = settings_store.sanitize({"execute_without_approval": True})

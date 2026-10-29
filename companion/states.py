@@ -1,4 +1,4 @@
-"""Character state controller for the Alwin companion (v0.7.0).
+"""Character state controller for the Alwin companion (v0.8.0).
 
 This module owns the companion character's *current animation state*
 and the validated transition graph between states.  It is deliberately
@@ -82,7 +82,11 @@ FALLBACK_STATE = STATE_IDLE
 #: invalid transition and is handled by the safe fallback.
 TRANSITIONS: Dict[str, frozenset] = {
     STATE_SLEEPING: frozenset({STATE_WAKING_UP, STATE_IDLE}),
-    STATE_WAKING_UP: frozenset({STATE_GREETING, STATE_IDLE, STATE_ERROR}),
+    STATE_WAKING_UP: frozenset(
+        # v0.8: waking_up may flow into walking (the morning walk from
+        # the bed to the greeting position) before settling on greeting.
+        {STATE_GREETING, STATE_IDLE, STATE_ERROR, STATE_WALKING}
+    ),
     STATE_GREETING: frozenset(
         {STATE_IDLE, STATE_LISTENING, STATE_THINKING, STATE_SLEEPING}
     ),
@@ -128,10 +132,11 @@ TRANSITIONS: Dict[str, frozenset] = {
         }
     ),
     # "walking" is a short 2D transition (moving to the work), never a
-    # claim of a literal 3D walk through a room.
+    # claim of a literal 3D walk through a room.  v0.8: the morning walk
+    # from the bed also resolves into greeting on arrival.
     STATE_WALKING: frozenset(
         {STATE_WORKING, STATE_WRITING, STATE_CODING, STATE_READING,
-         STATE_VERIFYING, STATE_IDLE, STATE_ERROR,
+         STATE_VERIFYING, STATE_IDLE, STATE_ERROR, STATE_GREETING,
          STATE_CELEBRATING,  # robustness: fast trusted success
          STATE_WAITING_FOR_APPROVAL}
     ),

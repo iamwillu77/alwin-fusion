@@ -1,6 +1,6 @@
 # Alwin Fusion — Security Model and Limitations
 
-Version: 0.4.0 — Milestone: Desktop Automation Engine
+Version: 0.8.0 — Milestone: Animated World & Walking Experience
 
 This document states what the prototype defends against, how, and —
 importantly — **what it does not defend against**. Passing tests does
@@ -383,10 +383,11 @@ types. Its own security properties and the new surface it introduces:
 * **One task at a time.** The manager refuses a second submission
   while one is running, so there is no queue to race or confuse.
 
-### 3d. Companion presentation (v0.6/v0.7) and its new attack surface
+### 3d. Companion presentation (v0.6/v0.7/v0.8) and its new attack surface
 
 The Alwin companion (`companion/`) is a **presentation layer only**. It
-observes curated task records and animates a character; it adds no
+observes curated task records and animates a character in an animated
+bedroom scene; it adds no
 execution engine, no permission path, no approval path and no network
 client. Its security properties:
 
@@ -404,7 +405,27 @@ client. Its security properties:
   `companion.*`, and — new in v0.7 — the entire character drawing core
   (`companion/character.py`) is pinned to `cairo`/`math`/`dataclasses`/
   `typing` (tested): the artwork cannot read a file, open a socket or
-  learn about the task engine.
+  learn about the task engine. v0.8 extends the same pins to the two
+  new modules: the **scene model** (`companion/scene.py`) is pinned to
+  `math`/`dataclasses`/`typing` — no cairo, no GTK, no I/O, no task
+  engine, so the world/movement logic is inert data — and the
+  **bedroom artwork** (`companion/bedroom.py`) to `cairo`/`math`/
+  `typing`/`companion.scene` (tested).
+* **The animated world cannot act, script or be scripted.** The scene
+  is driven exclusively through a **closed command allowlist** (13
+  names: `wake`, `get_up`, `move_to`, `begin_writing`, `begin_coding`,
+  `begin_thinking`, `begin_waiting`, `begin_error`, `begin_celebrating`,
+  `return_idle`, `place`, `stop`, `reset`) with only enumerated string
+  positions (`bed`, `beside_bed`, `greeting`, `desk`) as arguments —
+  there is no scripting surface, no eval of scene input, no file path
+  or name ever passed into the scene (tested: unknown commands and
+  positions are refused without moving the character). The scene model
+  executes, approves and modifies nothing: `begin_waiting`/`begin_error`/
+  `begin_celebrating` only set an honest visual phase, and a walk
+  finishing is never treated as task success (the scene has no notion
+  of approval or completion at all). Mouse clicks and other input never
+  reach the scene — the GTK view exposes no scene command surface, and
+  the closed allowlist is the only interaction vocabulary (tested).
 * **The observer feed is read-only and cannot approve.**
   `TaskManager.add_observer()` delivers the same curated `TaskRecord`
   the task window renders; the manager ignores observer return values,
@@ -473,6 +494,18 @@ New surface introduced by v0.6, stated honestly:
    re-activation (the existing window is presented instead) and stops
    the animation timer while the window is hidden (no off-screen
    redraws).
+5. *The animated world (v0.8) adds no new file, network or process
+   surface.* The scene model and the bedroom artwork are pure
+   computation over in-memory data (source-pinned, tested); the room is
+   drawn from the same window that already existed (no new window, no
+   new widget that accepts input — clicks never trigger commands). The
+   morning sequence and walks are driven only by elapsed time and the
+   same closed command allowlist; every timer id is tracked and
+   cancelled on close/hide (tested), and a task record arriving
+   mid-sequence cancels the visuals without touching the task. The new
+   `reduced_motion` preference lives in the same cosmetic-only
+   settings file (closed schema) and cannot influence any trust
+   decision.
 
 ### 4. Verification before success
 
@@ -759,26 +792,37 @@ New surface introduced by v0.6, stated honestly:
     concurrency control: there is still no file locking between
     separate Alwin Fusion processes (see 5).
 30. **The companion's character is procedural vector artwork, not
-    hand-drawn frame animation** (updated in v0.7). Alwin is now a
+    hand-drawn frame animation** (updated in v0.8). Alwin is a
     full-body cartoon boy drawn with cairo and driven by a
     parameterized `Pose` system — real, elapsed-time-based motion
-    (breathing, blinking, waving, typing, jumping) — but there are no
-    sprite sheets, no lip-sync and no full room/bed scene beyond
-    per-state props. The *states and mapping are real behaviour*; the
-    artwork remains replaceable per state via
-    `companion/assets/character/<state>/frame.png`, and a
-    hostile-but-valid image file can at worst change what one state
-    looks like (see 3d, new surface 2). The drawing core itself is
-    pinned to pure cairo/math/dataclasses/typing imports (tested).
+    (breathing, blinking, waving, typing, jumping) — and, since v0.8,
+    lives in a **2D illustrated bedroom** (wall, floor, window with a
+    sunrise, bed, bedside alarm clock, rug, desk with
+    notebook/pencil/laptop, chair) that he genuinely **walks around**
+    (smoothstep-eased world movement between named positions). There
+    are no sprite sheets, no lip-sync, no 3D scene and the poses are
+    simplified (the "getting out of bed" and "lying in bed" poses are a
+    rotation + blanket layer, not a full articulated lying animation —
+    stated honestly). The *states and mapping are real behaviour*; the
+    per-state artwork remains replaceable via
+    `companion/assets/character/<state>/frame.png` (scene-less mode),
+    and a hostile-but-valid image file can at worst change what one
+    state looks like (see 3d, new surface 2). The drawing core and the
+    bedroom artwork are pinned to pure imports (cairo/math/… and
+    cairo/math/typing/companion.scene) and the scene model to
+    math/dataclasses/typing (tested).
 31. **The companion has no voice.** `NullVoice` honestly reports no
     speech engine connected: nothing is spoken, recorded or listened
     for, no microphone is opened and no voice model exists. The TTS/ASR
     interface is a seam for a future local engine only.
-32. **`walking` is a 2D waddle, not locomotion**, and the companion is
+32. **The companion's "walking" is movement inside a 2D room, not
+    desktop locomotion**, and the companion is
     a small character window — not a desktop shell, not a wallpaper
-    overlay; it never draws over or blocks other applications.
-    Always-on-top is off by default and best-effort (Wayland
-    compositors may ignore it).
+    overlay; it never draws over or blocks other applications. The
+    character moves between positions *within his room* (bed, greeting
+    spot, desk) — he never leaves the window, never follows the mouse
+    and never touches the desktop. Always-on-top is off by default and
+    best-effort (Wayland compositors may ignore it).
 33. **The companion window has not been tested on a clean
     installation**, same as limitation 27: verified on the development
     machine (Ubuntu 26.04.1, GNOME/Wayland, GTK 4.22) via the opt-in

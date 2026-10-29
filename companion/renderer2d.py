@@ -1,4 +1,4 @@
-"""2D character renderer for the Alwin companion (v0.7.0).
+"""2D character renderer for the Alwin companion (v0.8.0).
 
 The first implementation of :class:`companion.renderer.CharacterRenderer`:
 a lightweight, **original** procedural vector character drawn with
@@ -7,6 +7,15 @@ shape with expressive eyes, blush, a state-tinted antenna orb, and two
 little hands).  No image assets are required to run it, no new
 dependencies are added (cairo ships with PyGObject), and it is fully
 drawable **headless** onto a ``cairo.ImageSurface`` for tests.
+
+**v0.8 — the animated world.**  When a scene is attached (via
+:meth:`Character2DRenderer.set_scene`), the renderer draws the bedroom
+from :mod:`companion.bedroom` and places Alwin at his *world* position
+with :func:`companion.character.draw_character_placed`, so he can stand
+at the bed, the greeting spot or the desk instead of being locked to the
+centre of the window.  The renderer only *renders* the scene snapshot it
+is given — movement, wake-up and scene transitions all live in
+:mod:`companion.scene`, and task outcomes stay in the trusted pipeline.
 
 Replaceable assets: every state may be overridden by dropping a
 ``frame.png`` into ``companion/assets/character/<state>/``.  When an
@@ -83,6 +92,10 @@ STATE_ACCENTS: Dict[str, Tuple[float, float, float]] = {
     "resting": (0.478, 0.541, 0.698),
 }
 
+#: Fill for the area outside the scene box (the window's letterbox
+#: margins while resizing) — a calm dark plum that suits the bedroom.
+SURROUND = (0.160, 0.140, 0.180)
+
 
 # --------------------------------------------------------------------------- #
 # Pure drawing core (headless-testable: cairo only, no GTK)
@@ -98,7 +111,10 @@ from companion.character import (  # noqa: E402  (re-export for tests/hosts)
     Pose,
     compute_pose,
     draw_character,
+    draw_character_placed,
 )
+from companion import bedroom  # noqa: E402  (the room artwork)
+from companion.scene import CHAR_SCALE, SceneController, SceneTransform  # noqa: E402
 
 #: Accent colour per state (kept for compatibility with v0.6 hosts).
 STATE_ACCENTS = {
@@ -205,9 +221,32 @@ class Character2DRenderer(CharacterRenderer):
         self._now: float = 0.0
         self._timer: Optional[int] = None
         self._attached = False
+        # True while the host has paused us (window hidden).  A late frame
+        # callback must not resurrect the timer once stop() has run.
+        self._paused: bool = False
         # smooth state transitions: remember the last drawn pose and blend
         self._last_pose: Optional[Pose] = None
         self._blend_started: float = 0.0
+        # v0.8 — optional animated world (a SceneController).  When set,
+        # the renderer draws the bedroom and places the character in it.
+        self._scene: Optional[SceneController] = None
+        self._on_scene_event: Optional[Callable[[str], None]] = None
+
+    # ---- scene (animated world) ----------------------------------------- #
+
+    def set_scene(self, scene: Optional[SceneController],
+                  on_event: Optional[Callable[[str], None]] = None) -> None:
+        """Attach/detach the bedroom scene.
+
+        ``on_event`` (optional) is called with each scene event name
+        (e.g. ``"arrived_at_desk"``) during :meth:`tick`, so a host can
+        advance its own state machine on arrival.  It is always invoked
+        outside the draw call, and any exception it raises is swallowed
+        — a scene callback can never break the render loop.
+        """
+        self._scene = scene
+        self._on_scene_event = on_event
+        self._queue_draw()
 
     # ---- interface ----------------------------------------------------- #
 
@@ -250,31 +289,70 @@ class Character2DRenderer(CharacterRenderer):
         self._queue_draw()
 
     def tick(self, now: float) -> None:
-        """Advance to *now* (host-driven; also used directly in tests)."""
+        """Advance to *now* (host-driven; also used directly in tests).
+
+        When a scene is attached, this also advances movement and emits
+        any arrival events to the host callback (outside the draw call).
+        """
         self._now = now
+        if self._scene is not None:
+            try:
+                events = self._scene.tick(now)
+            except Exception:  # noqa: BLE001 - scene bugs never break the loop
+                events = ()
+            for event in events:
+                self._emit_scene_event(event)
+            # an arrival may have changed whether he is moving; keep the
+            # frame timer in sync so a walk never freezes mid-floor.
+            self._sync_timer()
         self._queue_draw()
+
+    def _emit_scene_event(self, event: str) -> None:
+        if self._on_scene_event is None:
+            return
+        try:
+            self._on_scene_event(event)
+        except Exception:  # noqa: BLE001 - host callback errors stay contained
+            pass
 
     # ---- frame timer (host-owned cadence) -------------------------------- #
 
     def start(self) -> None:
         """Begin the frame timer if the current state animates."""
+        self._paused = False
         self._sync_timer()
 
     def stop(self) -> None:
+        # Pausing flips a flag *and* removes the source.  The flag is what
+        # actually freezes the loop: a frame callback may already be
+        # dispatched in this loop iteration, and without the flag it would
+        # re-add the source via tick() -> _sync_timer() and the room would
+        # keep animating off-screen.  start() clears the flag.
+        self._paused = True
         if self._timer is not None and GLib is not None:
             GLib.source_remove(self._timer)
             self._timer = None
 
     def _animating(self) -> bool:
-        # Only the two "sleeping-like" states render one frame and stop
-        # (eyes closed, z's drifting is drawn once).  Every other state
-        # — including the subtle idle breathing/blinking — keeps the
-        # timer alive at its cadence so the character always reads alive.
+        # With a scene attached the room is *always* gently alive (the
+        # wall clock ticks, the clouds drift, Alwin breathes), so the
+        # timer stays on at a low cadence; the window pauses it whenever
+        # it is hidden.  Without a scene, only the two "sleeping-like"
+        # states render one frame and stop — every other state keeps the
+        # timer alive so the character always reads alive.
+        if self._scene is not None:
+            return True
         return self._state not in ("sleeping", "resting")
 
     def _frame_interval_ms(self) -> int:
         # Subtle states (idle breathing/blinking) tick slower; lively
         # states get the full cadence.  Idle stays "alive" but cheap.
+        if self._scene is not None:
+            if self._scene.moving:
+                return FRAME_INTERVAL_MS        # ~12 fps while walking
+            if self._state in ("idle", "sleeping", "resting"):
+                return FRAME_INTERVAL_MS_SLOW   # calm breathing / drift
+            return FRAME_INTERVAL_MS
         return FRAME_INTERVAL_MS_SLOW if self._state == "idle" else FRAME_INTERVAL_MS
 
     def _current_pose(self) -> Pose:
@@ -283,6 +361,11 @@ class Character2DRenderer(CharacterRenderer):
 
     def _sync_timer(self) -> None:
         if GLib is None:  # pragma: no cover - headless
+            return
+        if self._paused:
+            # Paused (window hidden): never (re)arm the timer here.  This
+            # is the guard that stops a late frame callback from
+            # resurrecting the source after stop().
             return
         if self._animating() and self._timer is None:
             self._timer = GLib.timeout_add(self._frame_interval_ms(),
@@ -293,8 +376,19 @@ class Character2DRenderer(CharacterRenderer):
     def _on_frame(self) -> bool:
         import time as _time
 
-        self._now = _time.monotonic()
-        self._queue_draw()
+        if self._paused:
+            # stop() ran (window hidden) but a callback was already
+            # dispatched this iteration.  Do nothing and let the source
+            # expire — returning False drops it from the main loop.
+            return False
+        now = _time.monotonic()
+        if self._scene is not None:
+            # Advance the scene (movement, wake-up) and emit any arrival
+            # events; tick() also re-syncs the cadence and queues a draw.
+            self.tick(now)
+        else:
+            self._now = now
+            self._queue_draw()
         return True  # keep the timer alive while animating
 
     def _queue_draw(self) -> None:
@@ -307,7 +401,11 @@ class Character2DRenderer(CharacterRenderer):
         # Background: nothing — the window CSS supplies the warm panel,
         # so the character composites over whatever the host renders.
         t = max(0.0, self._now - self._state_started)
-        texture = self.assets.texture_for(self._state)
+        # In scene mode the procedural room+character must be drawn as a
+        # whole (a flat per-state frame.png cannot be honestly placed in
+        # the world), so asset overrides apply only to the plain mode.
+        texture = None if self._scene is not None else \
+            self.assets.texture_for(self._state)
         if texture is not None:
             # Asset override: show the real asset for this state,
             # scaled to fit.  (Gdk.cairo_set_source_for_texture is the
@@ -334,6 +432,9 @@ class Character2DRenderer(CharacterRenderer):
 
     def _draw_vector(self, cr, width, height) -> None:
         """Draw the procedural character with a smooth pose blend."""
+        if self._scene is not None:
+            self._draw_scene_vector(cr, width, height)
+            return
         t = max(0.0, self._now - self._state_started)
         target = compute_pose(self._state, t, self._expression)
         pose = target
@@ -350,14 +451,69 @@ class Character2DRenderer(CharacterRenderer):
         except Exception:  # noqa: BLE001 - a drawing bug degrades, never crashes
             pass
 
+    def _draw_scene_vector(self, cr, width, height) -> None:
+        """Draw the bedroom and place Alwin at his world position."""
+        scene = self._scene
+        assert scene is not None
+        try:
+            tr = SceneTransform.for_viewport(width, height)
+            now = self._now
+            view = scene.render_view(now)
+            # the room's own clock: seconds since the current state began
+            t = max(0.0, now - self._state_started)
+
+            # while a walk is in flight the walking animation plays, even
+            # though the *semantic* state (e.g. "coding") is unchanged.
+            draw_state = "walking" if view.moving else self._state
+            target = compute_pose(draw_state, t, self._expression)
+            pose = target
+            if self._last_pose is not None:
+                blend = now - self._blend_started
+                if blend < POSE_BLEND_SECONDS:
+                    pose = Pose.lerp(self._last_pose, target,
+                                     blend / POSE_BLEND_SECONDS)
+                else:
+                    self._last_pose = None
+
+            # fill the whole surface (including margins) so the room never
+            # floats on an unpainted background at unusual window ratios.
+            cr.set_source_rgb(*SURROUND)
+            cr.paint()
+
+            bedroom.draw_scene_back(cr, view, t, tr)
+
+            # Alwin, anchored at his feet in world space, uniform scale.
+            cr.save()
+            cr.translate(tr.offset_x, tr.offset_y)
+            cr.scale(tr.scale, tr.scale)
+            # z's follow the head while he sleeps (they rotate with the
+            # lying pose); the ground shadow only makes sense standing.
+            floating = True
+            draw_character_placed(
+                cr, view.x, view.y, CHAR_SCALE, draw_state,
+                expression=self._expression, t=t, pose=pose,
+                rotation=view.rotation, furniture=False,
+                floating_props=floating,
+                shadow=abs(view.rotation) < 0.01,
+            )
+            cr.restore()
+
+            bedroom.draw_scene_front(cr, view, t, tr)
+        except Exception:  # noqa: BLE001 - a drawing bug degrades, never crashes
+            pass
+
 
 __all__ = [
     "Character2DRenderer",
     "DEFAULT_ASSET_ROOT",
     "FRAME_INTERVAL_MS",
     "FRAME_INTERVAL_MS_SLOW",
+    "SURROUND",
     "AssetStore",
     "Pose",
+    "SceneController",
+    "SceneTransform",
     "compute_pose",
     "draw_character",
+    "draw_character_placed",
 ]

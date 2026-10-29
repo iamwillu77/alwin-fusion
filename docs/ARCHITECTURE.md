@@ -1,6 +1,6 @@
 # Alwin Fusion — Architecture
 
-Version: 0.4.0 — Milestone: Desktop Automation Engine
+Version: 0.8.0 — Milestone: Animated World & Walking Experience
 
 Alwin Fusion is an open-source, offline-first AI-native operating
 system in the making. This document describes what exists today, how
@@ -104,15 +104,27 @@ taskui/                  v0.5 task experience (UI-agnostic core + thin view)
                          --companion opens the task window together with the
                          Alwin companion, --check headless self-check,
                          --smoke scripted headless lifecycle walkthrough)
-companion/                 v0.7 Alwin companion (presentation layer only)
+companion/                 v0.8 Alwin companion (presentation layer only)
     states.py            the 16-state character controller: validated
                          transition graph, calm safe fallbacks, truthful
                          target recovery, expression/label tables, auto-
                          return delays, error-isolated renderer dispatch
                          (an animation exception is recorded, never raised)
+    scene.py             v0.8 renderer-independent world model (pure
+                         Python, headless): scene objects + named
+                         positions (bed/beside_bed/greeting/desk),
+                         elapsed-time smoothstep movement, wake-up
+                         sequence phases, arrival events and a CLOSED
+                         13-command allowlist (never executes/approves)
+    bedroom.py           v0.8 the illustrated room (pure cairo, headless):
+                         wall/floor, window with sunrise, bed with a
+                         tucking blanket, bedside alarm clock, rug, desk
+                         with notebook/pencil/laptop, chair — reads a
+                         SceneView snapshot, never mutates the scene
     renderer.py          the renderer interface (CharacterRenderer ABC:
                          show_state/set_expression/tick/attach/detach/
-                         start/stop/is_available) — the seam a future 3D
+                         start/stop/is_available + set_scene for a scene-
+                         aware renderer) — the seam a future 3D
                          renderer implements — plus NullRenderer for
                          headless use
     character.py         the full-body character drawing core (pure cairo,
@@ -121,15 +133,17 @@ companion/                 v0.7 Alwin companion (presentation layer only)
                          pose builders computed from ELAPSED TIME (never
                          frame counts), a natural blink rhythm, two-link
                          arm IK, shared components (head/hair/eyes/hoodie/
-                         arms/hands/legs/shoes) and per-state props (desk,
-                         notebook, laptop, book, magnifier, wrench,
-                         sparkles, thought dots, z's, sun, sweat drop)
+                         arms/hands/legs/shoes), per-state props, and v0.8
+                         draw_character_placed (feet-anchored world
+                         placement, rotation, furniture/prop flags)
     renderer2d.py        the GTK implementation: re-exports the character
                          core, blends poses (~0.25s) across state changes,
                          adaptive frame cadence (~12fps lively, ~6fps
-                         idle), AssetStore for optional <state>/frame.png
-                         overrides (missing/corrupt asset = graceful
-                         vector fallback)
+                         idle), optional <state>/frame.png overrides
+                         (missing/corrupt asset = graceful vector
+                         fallback), and the v0.8 scene loop: advances the
+                         scene each frame, emits arrival events, draws
+                         room back → placed character → room front
     adapter.py           TaskEventAdapter: the ONLY bridge from trusted
                          TaskRecords to character states + bounded curated
                          speech; celebrates only on `completed`, maps
@@ -333,11 +347,12 @@ codebase talks to a local Ollama server), not as a network probe. When
 AI is unavailable the deterministic parser keeps working and the status
 says so.
 
-## Alwin companion (companion/, v0.7)
+## Alwin companion (companion/, v0.8)
 
 A presentation layer **on top of** the task experience. It gives the
 desktop a small, persistent character window (Alwin) whose animation
-state reflects *real* task states. Five responsibilities stay strictly
+state reflects *real* task states, and (v0.8) an **animated bedroom
+world** he genuinely walks around. Six responsibilities stay strictly
 separated, each depending only on the one below it:
 
 ```
@@ -348,11 +363,17 @@ presentation.py  pure view-model: bubble / subtitle / status / controls
 adapter.py       trusted TaskRecord  ──►  character state + bounded speech
    │  enters states in
 states.py        CharacterController: validated transitions + fallbacks
-   │  dispatches to
-renderer.py      CharacterRenderer interface  (renderer2d.py implements it
-   │             today; a future renderer3d.py implements the same one)
-character.py     pure-cairo Pose system + full-body drawing core
-                 (renderer2d.py drives it; renderer3d.py could reuse poses)
+   │  dispatches to                    │  mirrored by (v0.8)
+renderer.py      CharacterRenderer     scene.py   renderer-independent world
+   │             (renderer2d.py        │          model: objects, named
+   │              implements it        │          positions, elapsed-time
+   │              today; a future      │          movement, wake-up sequence,
+   │              renderer3d.py        │          CLOSED command allowlist
+   │              implements the       │          (pure Python, no I/O)
+   │              same one)            ▼
+character.py     pure-cairo Pose      bedroom.py  pure-cairo room artwork
+                 system + full-body   (reads a SceneView snapshot; never
+                 drawing core         mutates the scene; headless-safe)
 ```
 
 **State controller** (`states.py`) — 16 explicit states with a single
@@ -376,7 +397,11 @@ expressions degrade to `neutral`. Rendering is host-driven: no
 renderer starts its own thread — the GTK layer owns the frame clock
 and calls `start()`/`stop()` as the window is mapped/unmapped, so no
 timer runs while the character is hidden. `NullRenderer` is the
-headless implementation used by `--check`, `--smoke` and tests.
+headless implementation used by `--check`, `--smoke` and tests. A
+renderer that understands the animated world additionally implements
+`set_scene(scene, on_event)` (v0.8); a renderer without it (the null
+one) degrades to the text-only companion — the window probes for the
+method rather than requiring it.
 
 **Character core** (`character.py`) — the v0.7 full-body character:
 an *original* cartoon boy drawn procedurally with cairo (large head,
@@ -401,20 +426,70 @@ sparkles, thought dots, drifting `z`'s, sweat drop, rising sun, pulsing
 `…`) are honest depictions of activity, never outcome claims. The
 module imports only cairo/math/dataclasses/typing — pinned by a source
 meta-test — so a future 3D renderer can reuse the pose vocabulary
-without dragging in any trusted-core concept.
+without dragging in any trusted-core concept. v0.8 adds
+`draw_character_placed(ctx, x, y, scale, state, *, pose, rotation,
+furniture, floating_props, shadow)`: the same character **anchored by
+his feet at a world position** (rotated about the soles when lying in
+bed, with the in-room furniture/props handed to the room layer), so
+the scene places him anywhere instead of the widget centre.
+
+**Scene model** (`scene.py`, v0.8 — the world, pure Python) — a
+renderer-independent model of the room: `SceneObject`s with stable
+identity and bounds (bed, window, desk, …), named positions (`bed`,
+`beside_bed`, `greeting`, `desk`) on a single walking plane, and a
+`MovementController` where a walk is *elapsed-time interpolation*
+(smoothstep-eased) between a start point and a target — never a frame
+counter, so a delayed or dropped frame lands on the correct spot.
+Repeated requests for the same target are a no-op; a new request
+replaces the in-flight one from the current position; off-plane,
+out-of-room or non-finite destinations are **refused** without moving
+him (reported in `status`, never faked). `SceneController` layers the
+phases (`bedroom_sleeping`, `bedroom_waking`, `getting_up`,
+`walking_to_*`, `greeting`, `writing`, `coding`, `thinking`,
+`waiting_for_approval`, `error`, `celebrating`, idle positions) over a
+**closed 13-command allowlist** — `wake`, `get_up`, `move_to`,
+`begin_writing`, `begin_coding`, `begin_thinking`, `begin_waiting`,
+`begin_error`, `begin_celebrating`, `return_idle`, `place`, `stop`,
+`reset` — so the only scene interaction surface is a fixed vocabulary
+(no scripting, no names, no paths, no code). `tick(now)` returns
+arrival events (`arrived_at_<position>`), which the window uses to
+finish the morning sequence. **The scene executes, approves and
+modifies nothing**: an approval/error command only sets an honest
+visual phase, and finishing a walk is never treated as task success.
+The module imports only math/dataclasses/typing (pinned by a meta-test)
+and is unit-tested with a simulated clock.
+
+**Bedroom artwork** (`bedroom.py`, v0.8 — the room's cairo view) —
+`draw_scene_back`/`draw_scene_front` read a `SceneView` snapshot (the
+scene's position/phase flags) and draw an *original* illustrated room:
+pastel wall with skirting, plank floor, window with curtains and a
+**sunrise** that brightens through the wake-up, drifting clouds, a
+poster, a rug at the greeting spot, the bed (with a blanket flap in
+front that tucks over a lying Alwin), a bedside table with a **ringing
+alarm clock**, a live wall clock, and the desk with notebook, pencil
+and a laptop whose `</>` glyphs appear while coding. The split into
+back/character/front layers lets the blanket and desk occlude him
+correctly. The module is pure cairo + math (pinned by a meta-test), the
+room scales **uniformly** with the window via `SceneTransform`, and it
+never mutates the scene it draws.
 
 **2D renderer** (`renderer2d.py`) — the GTK implementation of the
 renderer interface on top of the character core: it re-exports
 `draw_character`, advances elapsed time on each frame, **blends
 poses** (~0.25 s) whenever the state changes so transitions never
-snap, and picks an **adaptive cadence** (~12 fps for lively states,
-~6 fps for the subtle `idle` breathing/blinking; `sleeping`/`resting`
-draw a single frame and stop entirely). Optional per-state overrides
-live at `companion/assets/character/<state>/frame.png` (`AssetStore`):
-present → shown (scaled); missing or corrupt → the vector character
-renders (graceful, never a crash). Drawing is wrapped so an animation
-bug degrades to a static frame instead of raising — and, via the
-controller's isolation, can never reach the task engine.
+snap, and picks an **adaptive cadence** (~12 fps for lively states and
+while walking, ~6 fps for calm `idle` breathing and sleeping in the
+room). With a scene attached (v0.8) each frame advances the scene
+(`tick`), emits arrival events *outside* the draw call, and draws
+surround → room back layers → the placed character (walking pose
+override while moving) → room front layers; without one it draws the
+v0.7 state-centric character. Optional per-state overrides
+live at `companion/assets/character/<state>/frame.png` (`AssetStore`,
+scene-less mode only): present → shown (scaled); missing or corrupt →
+the vector character renders (graceful, never a crash). Drawing is
+wrapped so an animation bug degrades to a static frame instead of
+raising — and, via the controller's isolation, can never reach the
+task engine.
 
 **Task-event adapter** (`adapter.py`) — the only bridge from the
 trusted pipeline: it reads curated fields of a `TaskRecord`
@@ -440,10 +515,11 @@ manager reference, exposes no approve/reject/execute method and returns
 nothing — its power is limited to "what the character is doing".
 
 **Companion window** (`window.py`) — a thin GTK4 view: speech bubble,
-character area, accessible subtitle (text alternative to the
-animation), minimal task status, and controls (open task window, hide,
-settings with greeting/subtitles/always-on-top, honest voice status).
-Worker-thread records are marshalled to the main loop with
+character area (a 520×380 room by default), accessible subtitle (text
+alternative to the animation), minimal task status, and controls (open
+task window, hide, settings with
+greeting/subtitles/always-on-top/**reduced motion**, honest voice
+status). Worker-thread records are marshalled to the main loop with
 `GLib.idle_add`; all dynamic text uses `set_text` (never markup).
 Closing hides the window; when hosted by the task application the task
 engine keeps running. Re-activation presents the existing window
@@ -453,6 +529,18 @@ the renderer's frame timer so nothing animates off-screen. Focus:
 companion never steals keyboard focus. Always-on-top is off by default
 and best-effort (Wayland may ignore it). No web server, no remote
 service, no new threads beyond the manager's existing worker.
+
+The window also owns the **morning sequence** and the state→scene
+drive (v0.8): a character state maps to exactly one allowlisted scene
+command (`writing`/`coding` → walk to the desk and animate,
+`thinking` → walk to the greeting spot, `waiting_for_approval`/
+`error`/`celebrating` → stop the work animation and set the honest
+visual, `idle` → walk back), suppressed while the morning chain runs so
+the two systems never fight. The whole thing is cosmetic: it reads
+trusted task records like everything else in this package and can
+neither grant a permission nor change an outcome, and a task record
+arriving mid-sequence cancels the chain cleanly so work never waits on
+the visuals.
 
 **Event feed** (`taskui/manager.py`, additive) — `add_observer()` /
 `remove_observer()` deliver the same curated `TaskRecord` the task
@@ -467,10 +555,19 @@ hard-coded user), enable toggle, quiet hours (`HH:MM-HH:MM`, wraps
 midnight), once per session plus an optional once-per-day 0600 marker;
 text-only (the bubble), no audio, no microphone, no presence
 assumption, no re-greet on redraw. `--no-greeting` disables it for one
-run. The window *sequences* the greeting through real states — a
-`waking_up` stretch/yawn, then `greeting` (wave + bubble), settling
-back to `idle` via the normal transition graph — with every timer id
-tracked and cancelled on teardown.
+run. When the greeting fires, the window plays the v0.8 **morning
+sequence**: the scene resets to a pre-dawn bedroom with Alwin asleep in
+bed (eyes closed, breathing, drifting `z`), the sunrise brightens and
+the alarm rings as he **wakes** (stretch/yawn), he **gets up** beside
+the bed, **walks** to the greeting spot (ending on the scene's arrival
+event, with a timer as a safety net), and **waves** with the greeting
+bubble before settling into `idle` through the normal transition graph.
+When the greeting is disabled or it is quiet hours, the sequence is
+skipped and he is simply placed standing at the greeting spot, ready.
+A **reduced-motion** preference collapses the sequence to a calm
+near-instant placement (and makes the wake-up/sunrise/alarm static).
+Every timer id is tracked and cancelled on teardown, and the sequence
+runs at most once per window.
 
 **Voice** (`voice.py`) — a small `VoiceEngine` ABC (`speak`/`stop`/
 `status`/`available`) with `NullVoice` implementing it honestly:
@@ -485,13 +582,15 @@ The renderer interface is the *only* seam that changes:
 
 1. implement `CharacterRenderer` in a new `companion/renderer3d.py`
    (attach to a viewport widget, translate `show_state`/`expression`
-   into scene/animation-clip selections, advance `tick`),
+   into scene/animation-clip selections, implement `set_scene` to draw
+   the v0.8 room from the same model, advance `tick`),
 2. construct it in `CompanionWindow` (renderer selection is already a
    constructor argument) and keep everything else — state vocabulary,
-   transition graph, adapter mapping, greeting, speech, presentation,
-   controls, observer feed — byte-for-byte unchanged,
-3. keep 3D-only concepts (scene graph, room/bed/desk props, meshes,
-   lip-sync timing) inside that module: `ai_core`/`integrations` must
+   transition graph, adapter mapping, **scene model**, greeting,
+   morning sequence, speech, presentation, controls, observer feed —
+   byte-for-byte unchanged,
+3. keep 3D-only concepts (meshes, materials, lighting, lip-sync
+   timing) inside that module: `ai_core`/`integrations` must
    never learn about them (enforced by the package-wide import
    meta-checks).
 
@@ -499,11 +598,16 @@ The v0.7 `Pose` system eases this migration: the per-state pose
 builders in `character.py` are renderer-agnostic animation *recipes*
 (elapsed-time functions over float knobs) that a 3D skeleton could
 consume directly, so the motion design survives even if the artwork
-does not.
+does not. The v0.8 `scene.py` completes the picture: **where** Alwin
+is, **how** he moves and **which** room state is active is already
+renderer-independent data — only the *drawing* of the room
+(`bedroom.py`) is 2D-specific, and a 3D renderer replaces it along
+with the character art.
 
-v0.7 deliberately adds **no** game engine, 3D runtime, model load or
-sprite pipeline; the future room/walking/object-interaction/lip-sync
-features are planned, not present.
+v0.8 deliberately adds **no** game engine, 3D runtime, model load or
+sprite pipeline; deeper object interaction, lip-sync and true 3D
+scenes are planned, not present — the room is a 2D illustrated room
+that the character genuinely walks around in.
 
 ## The action model
 
@@ -793,7 +897,11 @@ desktop is ever inspected or driven by the automated suite**. The
 v0.4 suite is **404 tests**; v0.5 adds **149 more** (total **553**);
 v0.6 adds **185 companion tests** for a total of **738 tests**; v0.7
 adds **29 more** (27 dedicated character tests, 1 character-purity
-meta-test, 1 updated idle-animation pin) for a total of **767 tests**:
+meta-test, 1 updated idle-animation pin) for a total of **767 tests**;
+v0.8 adds **42 more** (the 40-test dedicated animated-world scene
+suite plus 2 new source-purity meta-tests for `scene.py`/`bedroom.py`;
+the module-set and settings-schema pins were extended) for a total of
+**809 tests**:
 the full
 v0.1/v0.2 set (242, preserved
 unchanged — covering supported/unsupported commands, traversal,
@@ -949,8 +1057,8 @@ manager with mocked/sandboxed dependencies):
   and never calls `set_markup` (no Pango) — untrusted text can never
   be rendered as markup; and the package imports headless.
 
-Plus the 204 v0.6+v0.7 companion tests (also all headless — no window,
-no display, no animation loop; drawing is exercised on in-memory
+Plus the 247 v0.6+v0.7+v0.8 companion tests (also all headless — no
+window, no display, no animation loop; drawing is exercised on in-memory
 `cairo.ImageSurface`s and GTK objects are only imported/constructed,
 never shown):
 
@@ -1039,16 +1147,18 @@ invoked by the automated suite:
   display. Everything inside a throwaway sandbox home; skipped with an
   honest message if GTK4 or a display is missing.
 * `ALWIN_COMPANION_SMOKE=1 scripts/manual_smoke_companion.sh` — the
-  v0.7 companion: the headless self-check (`python3 -m companion
-  --check`), the headless walkthrough (`--smoke`, including greeting
-  dedup, approval mapping, renderer-error isolation and asset
-  fallback), the companion's automated tests, and finally the real task
+  v0.8 companion: the headless self-check (`python3 -m companion
+  --check`, including the bedroom scene model), the headless walkthrough
+  (`--smoke`, including the morning wake-up sequence, greeting dedup,
+  approval mapping, renderer-error isolation and asset fallback), the
+  companion's automated tests, and finally the real task
   window **and** the real Alwin window (`python3 -m taskui
-  --companion`) in a throwaway sandbox home so you can watch the
-  full-body character breathe, blink, wave, think and show its
-  writing/coding/celebrating/error poses, the greeting, subtitles and
-  the companion controls. Skipped with an honest message if GTK4 or a
-  display is missing.
+  --companion`) in a throwaway sandbox home so you can watch him wake up
+  in his illustrated bedroom, **walk** to his greeting spot and desk,
+  breathe, blink, wave, think and show the
+  writing/coding/celebrating/error poses, the greeting, subtitles,
+  reduced motion and the companion controls. Skipped with an honest
+  message if GTK4 or a display is missing.
 
 ## Future compatibility
 
