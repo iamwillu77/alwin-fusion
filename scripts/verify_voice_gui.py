@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""v0.9.1 GUI end-to-end verification (real ASR + live Ollama + TTS).
+"""v0.10.0 GUI end-to-end verification (real ASR + live Ollama + TTS).
 
 Real GTK4 window in the live Wayland session, temp APP_ID, sandbox
 state dir, EAGER voice stack. Honest substitutions, clearly labeled:

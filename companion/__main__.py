@@ -1,4 +1,4 @@
-"""Entry point for the Alwin companion (v0.9.1).
+"""Entry point for the Alwin companion (v0.10.0).
 
 Launch the companion window::
 
@@ -221,6 +221,26 @@ def _run_check() -> int:
     print(f"  note: voice engine — {voice_probe.status}")
     expect(NullVoice().speak("hello") is False,
            "NullVoice never claims to have spoken")
+
+    # --- v0.10 wake word (import + pattern + honest status, no I/O heavy)
+    from companion.wake_word import (
+        DEFAULT_PHRASE, phrase_pattern, wake_status,
+    )
+    import re as _re
+
+    expect(DEFAULT_PHRASE == "Hey Alwin",
+           "default wake phrase is 'Hey Alwin'")
+    expect(_re.search(phrase_pattern(DEFAULT_PHRASE), "Hey, Alwin!",
+                      _re.IGNORECASE) is not None,
+           "acceptance pattern matches the phrase with punctuation")
+    expect(_re.search(phrase_pattern(DEFAULT_PHRASE), "heyallwin",
+                      _re.IGNORECASE) is None,
+           "acceptance pattern requires word separation")
+    wake_probe = wake_status(None)
+    expect(isinstance(wake_probe.get("available"), bool)
+           and len(str(wake_probe.get("detail", ""))) <= 300,
+           "wake-word status is honest and bounded")
+    print(f"  note: wake word — {wake_probe['detail']}")
 
     # v0.8 — the animated world: scene model, movement, and room render.
     from companion.scene import (

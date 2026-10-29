@@ -1,4 +1,4 @@
-"""2D character renderer for the Alwin companion (v0.9.1).
+"""2D character renderer for the Alwin companion (v0.10.0).
 
 The first implementation of :class:`companion.renderer.CharacterRenderer`:
 a lightweight, **original** procedural vector character drawn with

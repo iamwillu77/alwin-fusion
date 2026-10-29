@@ -1,4 +1,4 @@
-"""Companion window: the GTK4 view for the Alwin character (v0.9.1).
+"""Companion window: the GTK4 view for the Alwin character (v0.10.0).
 
 A lightweight, persistent window that shows the character, a speech
 bubble, a minimal task status and a small control row.  It is a **thin
@@ -99,6 +99,7 @@ from companion.states import (
 from companion.voice import voice_status
 from companion.voice_input import VoiceInputService
 from companion.voice_output import CompanionVoice
+from companion.wake_word import WakeWordService, wake_status
 
 APP_ID = "org.alwin.fusion.companion"
 
@@ -165,6 +166,7 @@ class CompanionWindow:
         conversation=None,
         voice_input=None,
         recognizer=None,
+        wake_service=None,
         application=None,
         open_task_window: Optional[Callable[[], None]] = None,
         greeting_config: Optional[GreetingConfig] = None,
@@ -235,10 +237,25 @@ class CompanionWindow:
         self.recognizer = recognizer or SpeechRecognitionService(
             model_size=model_size
         )
+        # v0.10.0 hands-free wake word: cheap to construct (device and
+        # model work happen on its worker when monitoring starts);
+        # shares the recognizer so only ONE Whisper model exists in RAM.
+        # Injected instances (tests) are honoured as-is.
+        self.wake_service = wake_service or WakeWordService(
+            recognizer=self.recognizer,
+            phrase=str(self._settings.get("wake_phrase",
+                                          "Hey Alwin") or "Hey Alwin"),
+            on_trigger=lambda phrase: GLib.idle_add(
+                self._on_wake_triggered, phrase
+            ),
+            on_error=lambda message: GLib.idle_add(
+                self._on_wake_error, message
+            ),
+        )
         # One voice turn at a time: phase + generation counter.  The
         # counter invalidates any in-flight recognition/reply result, so
         # a cancelled turn can never be delivered late.
-        self._voice_phase = "off"  # off|listening|recognizing|replying|speaking
+        self._voice_phase = "off"  # off|wake|listening|recognizing|replying|speaking
         self._turn_serial = 0
         self._meter_id: Optional[int] = None
         self._configure_services()
@@ -483,6 +500,7 @@ class CompanionWindow:
         """No greeting (disabled/quiet): place Alwin up, idle, ready."""
         self._scene_command("place", position="greeting")
         self.controller.force(STATE_IDLE, reason="ready")
+        self._maybe_resume_wake()
 
     # ------------------------------------------------------------------ #
     # Morning wake-up sequence (v0.8): sleep -> wake -> get up -> walk ->
@@ -555,6 +573,7 @@ class CompanionWindow:
             return
         self.controller.enter(STATE_GREETING, reason="greeting")
         self._show_bubble(self._morning_text, presentation.TONE_POSITIVE)
+        self._maybe_resume_wake()
 
     def _cancel_morning(self) -> None:
         if self._greet_id is not None:
@@ -634,6 +653,10 @@ class CompanionWindow:
             self.controller.force(STATE_IDLE, reason="task activity")
         self.adapter.on_task_update(record)
         self._refresh_status(record)
+        # v0.10: a finished (or calm) task is a resume point for
+        # wake-word monitoring; the helper itself refuses unless the
+        # character is calm, monitoring is off and the setting is on.
+        self._maybe_resume_wake()
         return False
 
     def _queue_speech(self, text: str) -> None:
@@ -658,6 +681,124 @@ class CompanionWindow:
     PHASE_RECOGNIZING = "recognizing"
     PHASE_REPLYING = "replying"
     PHASE_SPEAKING = "speaking"
+    PHASE_WAKE = "wake"          # v0.10.0: monitoring for the phrase
+
+    # ------------------------------------------------------------------ #
+    # v0.10.0 wake-word monitoring (opt-in, off by default)
+    #
+    # Lifecycle: (disabled) -> WAKE_LISTENING --phrase--> ack ->
+    # command capture (the existing PHASE_LISTENING turn cycle) ->
+    # PHASE_REPLYING/PHASE_SPEAKING -> WAKE_LISTENING again.  The
+    # service owns the microphone EXCLUSIVELY while monitoring and
+    # stops itself on a trigger, so a capture session never overlaps;
+    # every resume goes through _maybe_resume_wake, which refuses
+    # unless it is calm, not closing and the setting is on.
+    # ------------------------------------------------------------------ #
+
+    def _wake_enabled(self) -> bool:
+        return bool(self._settings.get("wake_word_enabled", False))
+
+    def _wake_calm(self) -> bool:
+        """The only states in which monitoring may (re)start."""
+        return (
+            self.controller.state in (STATE_IDLE, STATE_GREETING,
+                                      STATE_RESTING)
+            and not self._morning_active
+        )
+
+    def _begin_wake(self, *, announce: bool = True) -> None:
+        """Start (or restart) monitoring; honest about every failure.
+
+        ``announce=False`` (automatic resumes after turns/failures)
+        shows only the meter indicator so the turn's own last bubble —
+        a reply, an honest error, a silence refusal — is not clobbered;
+        explicit user enablement always explains itself.
+        """
+        if self._closing or not self._wake_enabled():
+            return
+        if self._voice_phase != self.PHASE_OFF:
+            return                      # a turn owns the audio pipeline
+        if not self._wake_calm():
+            return
+        if self.wake_service.running:
+            self._voice_phase = self.PHASE_WAKE
+            if announce:
+                self._show_wake_indicator()
+            else:
+                self._start_level_meter()
+            return                      # already monitoring (idempotent)
+        if not self.wake_service.start():
+            error = self.wake_service.last_error or (
+                "Wake-word listening could not start."
+            )
+            self._show_bubble(error[:300], presentation.TONE_NEGATIVE)
+            return
+        self._voice_phase = self.PHASE_WAKE
+        if announce:
+            self._show_wake_indicator()
+        else:
+            self._start_level_meter()
+
+    def _show_wake_indicator(self) -> None:
+        """Visible 'listening for the phrase' state (meter + bubble)."""
+        self._show_bubble(
+            f"Listening for “{self.wake_service.phrase}” — say it, or "
+            "tap Mic to talk now.",
+            presentation.TONE_CALM,
+        )
+        self._start_level_meter()
+
+    def _end_wake(self) -> None:
+        """Stop monitoring now (immediate stop control / takeover)."""
+        try:
+            self.wake_service.stop()   # idempotent; discards buffered audio
+        except Exception:  # noqa: BLE001 - stop never raises
+            pass
+        if self._voice_phase == self.PHASE_WAKE:
+            self._voice_phase = self.PHASE_OFF
+            if self.voice_input.listening:
+                self._start_level_meter()   # capture's own meter
+            else:
+                self._stop_level_meter()
+
+    def _maybe_resume_wake(self) -> None:
+        """Return to monitoring after a turn, a failure or a cancel."""
+        if (self._closing
+                or self._voice_phase != self.PHASE_OFF
+                or not self._wake_enabled()
+                or not self._wake_calm()):
+            return
+        self._begin_wake(announce=False)
+
+    def _on_wake_triggered(self, phrase: str) -> None:
+        """Verified phrase (marshalled from the wake worker)."""
+        if self._closing or self._voice_phase != self.PHASE_WAKE:
+            return                      # stale trigger: state moved on
+        # The service stopped itself first: the microphone is free.
+        self._voice_phase = self.PHASE_OFF
+        if not self._wake_calm():
+            # Busy with something visible: no ack, no capture; the
+            # normal calm hooks will resume monitoring later.
+            return
+        # Acknowledge, then listen for the COMMAND — the wake phrase
+        # itself is never the user's request (it belongs to the
+        # monitoring session, which has already ended).
+        self._show_bubble(
+            "Yes? I'm listening.", presentation.TONE_CALM
+        )
+        self._start_listening()
+
+    def _on_wake_error(self, message: str) -> None:
+        """Honest wake failure (marshalled); never auto-retry-storms."""
+        if self._closing:
+            return
+        if self._voice_phase == self.PHASE_WAKE:
+            self._voice_phase = self.PHASE_OFF
+            self._stop_level_meter()
+        self._show_bubble(str(message)[:300],
+                          presentation.TONE_NEGATIVE)
+        # Deliberately NO immediate resume: a dead device would loop.
+        # Recovery hooks (turn end, window map, settings toggle) retry.
 
     def _configure_services(self) -> None:
         """Apply the persisted voice/language settings to the services.
@@ -710,6 +851,13 @@ class CompanionWindow:
         if getattr(self.voice, "speaking", False) or \
                 self._voice_phase == self.PHASE_SPEAKING:
             self._stop_speech()
+            return
+        if self._voice_phase == self.PHASE_WAKE:
+            # Push-to-talk overrides monitoring: pause the wake session
+            # (its mic is released) and take over with capture — one
+            # audio owner at a time, never two sessions.
+            self._end_wake()
+            self._start_listening()
             return
         if not bool(self._settings.get("mic_enabled", True)):
             self._show_bubble(
@@ -957,6 +1105,7 @@ class CompanionWindow:
             # always resolves calmly (the 120 s auto-return in states
             # is only the safety net for a lost callback).
             self.controller.enter(STATE_IDLE, reason="reply finished")
+        self._maybe_resume_wake()
         return False
 
     def _stop_speech(self) -> None:
@@ -992,11 +1141,13 @@ class CompanionWindow:
             self.controller.enter(STATE_IDLE, reason="cancelled")
         if was_announced:
             self._show_bubble("Okay — cancelled.", presentation.TONE_CALM)
+        self._maybe_resume_wake()
 
     def _return_to_calm(self) -> None:
         """Back to idle from the voice-only states (never from a task)."""
         if self.controller.state in (STATE_LISTENING, STATE_THINKING):
             self.controller.enter(STATE_IDLE, reason="turn over")
+        self._maybe_resume_wake()
 
     # ---- push-to-talk button + level meter ------------------------------- #
 
@@ -1005,6 +1156,17 @@ class CompanionWindow:
             return
         self._mic_btn.set_label(MIC_LABEL_LISTENING
                                 if listening else MIC_LABEL_OFF)
+
+    def _meter_active(self) -> bool:
+        """The meter reads whichever input currently owns the audio."""
+        if self._voice_phase == self.PHASE_WAKE:
+            return bool(self.wake_service.running)
+        return bool(self.voice_input.listening)
+
+    def _meter_value(self) -> float:
+        if self._voice_phase == self.PHASE_WAKE:
+            return float(self.wake_service.level())
+        return float(self.voice_input.level())
 
     def _start_level_meter(self) -> None:
         """Live input level (100 ms) while the mic is open — opt-out."""
@@ -1016,12 +1178,12 @@ class CompanionWindow:
         self._level_bar.set_visible(True)
 
         def _tick() -> bool:
-            if self._closing or not self.voice_input.listening:
+            if self._closing or not self._meter_active():
                 self._meter_id = None
                 self._hide_level_meter()
                 return False
             try:
-                self._level_bar.set_value(self.voice_input.level())
+                self._level_bar.set_value(self._meter_value())
             except Exception:  # noqa: BLE001 - cosmetic feedback only
                 pass
             return True
@@ -1084,6 +1246,7 @@ class CompanionWindow:
                 self.controller.enter(STATE_IDLE, reason="calm return")
                 if state in (STATE_CELEBRATING, STATE_ERROR):
                     self._show_bubble("", presentation.TONE_CALM)
+                self._maybe_resume_wake()
             return False
 
         self._auto_return_id = GLib.timeout_add(int(delay * 1000), _back)
@@ -1160,6 +1323,13 @@ class CompanionWindow:
 
     def _on_map(self, *_args) -> None:  # pragma: no cover - display
         self._sync_animation()
+        # v0.10: monitoring keeps running while hidden (documented), so
+        # restoring the window restores its visible indicator; if
+        # monitoring stopped while hidden, this is also a recovery hook.
+        if self._voice_phase == self.PHASE_WAKE:
+            self._start_level_meter()
+        else:
+            self._maybe_resume_wake()
 
     def _on_unmap(self, *_args) -> None:  # pragma: no cover - display
         # Hidden: pause the frame timer so nothing animates off-screen.
@@ -1297,20 +1467,54 @@ class CompanionWindow:
                   lambda chosen: self._set_voice_choice(
                       chosen, voice_labels))
 
-        # Wake word: honest placeholder — v0.9 has none, so the switch
-        # exists but cannot be turned on (nothing is ever claimed
-        # before it is implemented and tested).
-        wake_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL,
-                           spacing=8)
-        wake_row.add_css_class("settings-row")
-        wake_row.append(_label("Wake word — not available yet (v0.9)"))
-        wake_switch = Gtk.Switch()
-        wake_switch.active = False
-        wake_switch.set_sensitive(False)
-        wake_switch.set_halign(Gtk.Align.END)
-        wake_switch.set_hexpand(True)
-        wake_row.append(wake_switch)
-        box.append(wake_row)
+        # ---- v0.10 wake word (opt-in; OFF unless the user chooses) ------ #
+        heading_wake = _label("Wake word", "settings-heading")
+        box.append(heading_wake)
+        _switch("wake_word_enabled", "Hands-free “Hey Alwin” listening",
+                default=False)
+
+        # Phrase entry: the two-stage detector genuinely supports
+        # arbitrary phrases (vosk keyword + hotword bias + pattern are
+        # all derived from this value). Press Enter to apply.
+        phrase_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL,
+                             spacing=8)
+        phrase_row.add_css_class("settings-row")
+        phrase_row.append(_label("Phrase"))
+        phrase_entry = Gtk.Entry()
+        phrase_entry.set_max_length(40)
+        phrase_entry.set_text(
+            str(self._settings.get("wake_phrase", "Hey Alwin")
+                or "Hey Alwin")
+        )
+        phrase_entry.set_placeholder_text("Hey Alwin")
+        phrase_entry.set_halign(Gtk.Align.END)
+        phrase_entry.set_hexpand(True)
+        phrase_entry.set_width_chars(14)
+
+        def _phrase_activate(entry_widget):
+            value = (entry_widget.get_text() or "").strip()[:40]
+            if not value:
+                value = "Hey Alwin"
+                entry_widget.set_text(value)
+            self._settings["wake_phrase"] = value
+            self._apply_settings()
+
+        phrase_entry.connect("activate", _phrase_activate)
+        phrase_row.append(phrase_entry)
+        box.append(phrase_row)
+
+        # Honest status: is the two-stage detector actually usable here?
+        try:
+            wake_detail = wake_status(
+                self.recognizer,
+                phrase=str(self._settings.get("wake_phrase",
+                                              "Hey Alwin")),
+            )["detail"]
+        except Exception:  # noqa: BLE001 - status is diagnostic only
+            wake_detail = "Wake-word status is unavailable."
+        wake_note = _label(str(wake_detail), "subtitle-label")
+        wake_note.set_wrap(True)
+        box.append(wake_note)
 
         # Honest status lines: speech model, voice engine, privacy.
         try:
@@ -1393,6 +1597,35 @@ class CompanionWindow:
         # through the listening flag; here we stop it outright).
         if not bool(self._settings.get("mic_level_meter", True)):
             self._stop_level_meter()
+        # v0.10: wake-word enable/disable and phrase apply LIVE — the
+        # enable switch doubles as the immediate stop control.
+        self._apply_wake_settings()
+
+    def _apply_wake_settings(self) -> None:
+        """Enable / stop / re-phrase monitoring without a restart."""
+        phrase = (
+            str(self._settings.get("wake_phrase", "Hey Alwin") or "")
+            .strip()[:40] or "Hey Alwin"
+        )
+        if phrase != self.wake_service.phrase:
+            # The phrase feeds both detector stages: apply it only
+            # between sessions (stop first, restart below if still on).
+            if (self.wake_service.running
+                    or self._voice_phase == self.PHASE_WAKE):
+                self._end_wake()
+            if not self.wake_service.running:
+                try:
+                    self.wake_service.phrase = phrase
+                except Exception:  # noqa: BLE001 - cosmetic setting
+                    pass
+        if self._wake_enabled():
+            # Explicit settings change: announce the state once (the
+            # switch is the user's own action, so this is the moment
+            # to say what it did); stays idempotent while running.
+            self._begin_wake(announce=True)
+        else:
+            # Turning the switch off is the immediate stop control.
+            self._end_wake()
 
     # ------------------------------------------------------------------ #
     # Lifecycle
@@ -1416,7 +1649,8 @@ class CompanionWindow:
         self._turn_serial += 1
         self._stop_level_meter()
         for action in (self.recognizer.cancel, self.voice_input.release,
-                       getattr(self.voice, "stop", None)):
+                       getattr(self.voice, "stop", None),
+                       getattr(self.wake_service, "release", None)):
             if action is None:
                 continue
             try:

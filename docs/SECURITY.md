@@ -1,6 +1,6 @@
 # Alwin Fusion — Security Model and Limitations
 
-Version: 0.9.1 — Milestone: End-to-End Voice Intelligence
+Version: 0.10.0 — Milestone: Wake Word & Hands-Free Voice
 
 This document states what the prototype defends against, how, and —
 importantly — **what it does not defend against**. Passing tests does
@@ -482,8 +482,10 @@ client. Its security properties:
   and `audioop` modules are banned package-wide, the voice modules
   perform no file writes at all, and no cloud ASR/TTS exists to upload
   to). Teardown and cancellation release the device and drop captured
-  PCM (tested). There is no wake word and no continuous listening —
-  the setting exists only as an honestly disabled placeholder. Speech,
+  PCM (tested). Wake-word monitoring (v0.10) reads audio **only while
+  the opt-in switch is on** (default off) through the bounded in-memory
+  queue/window described above — never a recording, never an
+  always-on mode. Speech,
   when it happens, is claimed only after the engine reports it; a
   missing engine keeps `NullVoice`'s honest `available = False` /
   `speak() → False` behaviour, and nothing is ever claimed as heard,
@@ -580,7 +582,9 @@ New surface introduced by v0.6, stated honestly:
      worst change voice/language preferences — never a permission,
      never an execution (the bool/str-only schema pin now covers
      them). The `mute_voice` placeholder key was removed rather than
-     repurposed.
+     repurposed. v0.10 adds `wake_word_enabled` (default **off**) and
+     `wake_phrase` — same cosmetic-only guarantees; neither can grant
+     anything.
    - **Reply-failure reasons are scrubbed before display** (v0.9.1):
      embedded exception text is bounded and stripped of URL userinfo
      (`scheme://user:pass@`) and bearer/token/key-style secrets by a
@@ -593,6 +597,36 @@ New surface introduced by v0.6, stated honestly:
      pose with the same structural guarantees as every other state
      (only entered on valid transitions, auto-returns after 120 s,
      renderer errors contained).
+7. *Wake-word monitoring (v0.10) adds one opt-in audio-reading mode
+   and no new trust decision.* Stated precisely:
+   - **Off by default** — the application never listens unless the user
+     flips `wake_word_enabled`; the same switch is the immediate stop
+     control, and monitoring runs only while the character is calm
+     (never during the morning sequence, never mid-turn).
+   - **Audio contract**: ambient audio is read ONLY while monitoring,
+     flows through a bounded drop-oldest queue (≤ 12.8 s worst case)
+     and a bounded 112 KB rolling window, is decoded locally (vosk +
+     the local speech model) and **never written to disk, never
+     logged, never transmitted** — the wake path cannot reach Ollama
+     (AST/meta-tested: no network library is importable in the module,
+     no file writes, `wave`/`audioop` remain banned package-wide).
+     Only the user's spoken *command*, after an acknowledged trigger,
+     becomes a transcript — and it enters the same validate → detect →
+     `manager.submit()` path as typed text (same allowlist, same
+     permissions, same approval; the wake phrase itself is never
+     submitted).
+   - **Exclusivity**: the monitoring session stops itself before a
+     turn's capture opens (no overlapping sessions), cancellations and
+     teardown discard all buffered audio, and `listening` reports the
+     real capture state (never "listening" after a device failure).
+   - **Verification is local and language-guarded**: acceptance needs
+     the exact phrase in a local decode AND detected `en` — a hotword-
+     biased decode of foreign audio cannot fabricate a trigger
+     (measured), so monitoring cannot be tricked into starting a turn
+     by non-English ambient streams. False-trigger measurements and
+     sample counts are reported by `scripts/verify_wake_word.py`;
+     detection on real acoustic input was BLOCKED on the development
+     machine (no working microphone — reported, not faked).
 
 ### 4. Verification before success
 
@@ -905,9 +939,10 @@ New surface introduced by v0.6, stated honestly:
     - nothing is recorded to disk and nothing is uploaded; audio lives
       in memory for one turn (enforced by banned modules and
       no-file-I/O meta-tests),
-    - no wake word and no continuous listening: the microphone opens
-      only on an explicit click, and the wake-word setting is an
-      honestly disabled placeholder,
+    - the microphone opens only on an explicit click (push-to-talk) or,
+      since v0.10, while the **opt-in** wake-word switch is on (default
+      off; bounded in-memory buffers; no other continuous listening —
+      see the wake-word bullet below),
     - recognition requires a locally installed model (manual,
       confirm-first installer; the app itself **never downloads**);
       without it, an honest error — never an invented transcript,
@@ -925,6 +960,17 @@ New surface introduced by v0.6, stated honestly:
     - the `speaking` animation is simple mouth motion (no lip-sync
       tracking), and an LLM reply is never fed back into the task
       pipeline.
+    - **wake word (v0.10) is opt-in and measured**: 25/25 recall on
+      synthesized utterances and 0/149 false accepts on human-speech
+      fixtures (stated sample counts, not statistical rates); the gate
+      accepts only English windows, so foreign ambient audio cannot
+      fabricate a trigger. Physical acoustic detection could NOT be
+      demonstrated on the development machine — its only capture device
+      carries line noise with zero acoustic coupling (measured; the
+      verification script reports BLOCKED with the evidence instead of
+      claiming success). Wake-word quality for other languages of the
+      phrase is untested, and this says nothing new about the 15-
+      language recognition table above.
 32. **The companion's "walking" is movement inside a 2D room, not
     desktop locomotion**, and the companion is
     a small character window — not a desktop shell, not a wallpaper

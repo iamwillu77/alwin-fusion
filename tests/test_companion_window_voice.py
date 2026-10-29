@@ -606,5 +606,230 @@ class VoiceWindowTests(unittest.TestCase):
         self.assertEqual(self.window._voice_phase, "off")
 
 
+# --------------------------------------------------------------------------- #
+# v0.10.0 wake-word window lifecycle (FAKE wake service — mocked)
+# --------------------------------------------------------------------------- #
+
+
+class FakeWake:
+    """WakeWordService stand-in (duck-typed; counts every call)."""
+
+    def __init__(self):
+        self.phrase = "Hey Alwin"
+        self.running = False
+        self.released_flag = False
+        self.last_error = None
+        self.start_count = 0
+        self.stop_count = 0
+        self.release_count = 0
+        self.level_value = 0.33
+
+    def start(self):
+        self.start_count += 1
+        if self.last_error:               # simulate a dead service
+            return False
+        self.running = True
+        return True
+
+    def stop(self):
+        self.stop_count += 1
+        self.running = False
+
+    def release(self):
+        self.release_count += 1
+        self.running = False
+        self.released_flag = True
+
+    def level(self):
+        return self.level_value if self.running else 0.0
+
+
+class WakeWindowTests(unittest.TestCase):
+    """Opt-in monitoring lifecycle, exactly as the window orchestrates it."""
+
+    def setUp(self):
+        if Gtk is None or GLib is None:  # pragma: no cover - headless
+            self.skipTest("GTK4 not available")
+
+        from companion.conversation import ConversationService
+        from companion.language_detection import LanguageDetectionService
+        from companion.speech_recognition import SpeechRecognitionService
+        from companion.voice_input import VoiceInputService
+        from companion.window import CompanionWindow
+
+        self.engine = FakeEngine()
+        self.backends = []
+        self.manager = FakeManager()
+        self.llm = FakeLLM()
+        self.voice = FakeVoice()
+        self.wake = FakeWake()
+
+        def backend_factory():
+            backend = FakeBackend()
+            self.backends.append(backend)
+            return backend
+
+        try:
+            self.window = CompanionWindow(
+                self.manager,
+                renderer=NullRenderer(),
+                voice=self.voice,
+                llm_client=self.llm,
+                wake_service=self.wake,
+                voice_input=VoiceInputService(
+                    backend_factory=backend_factory
+                ),
+                recognizer=SpeechRecognitionService(
+                    engine_factory=lambda _size: self.engine
+                ),
+                conversation=ConversationService(
+                    manager=self.manager,
+                    detector=LanguageDetectionService(),
+                    llm_client=self.llm,
+                ),
+            )
+        except Exception as exc:  # pragma: no cover - environment-specific
+            self.skipTest(f"cannot construct GTK objects headless: {exc}")
+
+    def tearDown(self):
+        self.window._teardown()
+
+    # -- helpers ---------------------------------------------------------- #
+
+    def enable(self):
+        self.window._settings["wake_word_enabled"] = True
+        self.window._apply_settings()
+
+    def disable(self):
+        self.window._settings["wake_word_enabled"] = False
+        self.window._apply_settings()
+
+    def bubble(self):
+        return self.window._bubble_text
+
+    # -- tests ------------------------------------------------------------ #
+
+    def test_wake_is_disabled_by_default(self):
+        from companion.settings import defaults
+
+        self.assertIs(defaults()["wake_word_enabled"], False)
+        self.assertEqual(defaults()["wake_phrase"], "Hey Alwin")
+        self.window._apply_settings()          # applies defaults
+        self.assertEqual(self.wake.start_count, 0)
+        self.assertNotEqual(self.window._voice_phase,
+                            self.window.PHASE_WAKE)
+
+    def test_enabling_starts_monitoring_with_visible_indicator(self):
+        self.enable()
+        self.assertEqual(self.wake.start_count, 1)
+        self.assertEqual(self.window._voice_phase,
+                         self.window.PHASE_WAKE)
+        self.assertIn("Listening for", self.bubble())
+        self.assertIn("Hey Alwin", self.bubble())
+        self.assertTrue(self.window._meter_active())
+        # Idempotent: a second apply does not open a second session.
+        self.window._apply_settings()
+        self.assertEqual(self.wake.start_count, 1)
+        self.assertTrue(self.wake.running)
+
+    def test_switching_off_is_the_immediate_stop_control(self):
+        self.enable()
+        self.disable()
+        self.assertGreaterEqual(self.wake.stop_count, 1)
+        self.assertFalse(self.wake.running)
+        self.assertEqual(self.window._voice_phase,
+                         self.window.PHASE_OFF)
+        self.assertFalse(self.window._meter_active())
+
+    def test_push_to_talk_takeover_pauses_monitoring(self):
+        self.enable()
+        self.window._on_mic()                  # takeover
+        self.assertGreaterEqual(self.wake.stop_count, 1)
+        self.assertFalse(self.wake.running)
+        self.assertEqual(self.window._voice_phase,
+                         self.window.PHASE_LISTENING)
+        self.assertTrue(self.window.voice_input.listening)
+        self.assertEqual(self.window.controller.state, "listening")
+
+    def test_trigger_acknowledges_then_captures_the_command(self):
+        self.enable()
+        self.window._on_wake_triggered("Hey Alwin")
+        self.assertEqual(self.window._voice_phase,
+                         self.window.PHASE_LISTENING)
+        self.assertIn("listening", self.bubble().lower())
+        self.assertTrue(self.window.voice_input.listening)
+        self.assertEqual(self.window.controller.state, "listening")
+        # The wake PHRASE itself was never submitted as a request:
+        self.assertEqual(self.manager.submissions, [])
+
+    def test_silence_rejection_returns_to_wake_monitoring(self):
+        self.enable()
+        self.window._on_wake_triggered("Hey Alwin")
+        # stop & send with an empty capture -> honest silence refusal
+        self.window._on_mic()
+        pump_until(lambda: self.window._voice_phase
+                   in (self.window.PHASE_OFF,
+                       self.window.PHASE_WAKE), timeout=5.0)
+        self.assertIn("didn't hear anything", self.bubble())
+        # The resume hook restarted monitoring (new session):
+        self.assertEqual(self.window._voice_phase,
+                         self.window.PHASE_WAKE)
+        self.assertTrue(self.wake.running)
+
+    def test_stale_trigger_is_ignored(self):
+        # Monitoring is NOT active (setting off): a late callback from
+        # a stopped session must not open the mic or ack.
+        self.assertFalse(self.window._voice_phase ==
+                         self.window.PHASE_WAKE)
+        self.window._on_wake_triggered("Hey Alwin")
+        self.assertEqual(self.window._voice_phase,
+                         self.window.PHASE_OFF)
+        self.assertEqual(self.backends, [])
+        self.assertNotIn("Yes?", self.bubble())
+
+    def test_wake_error_is_honest_and_never_retry_storms(self):
+        self.enable()
+        starts = self.wake.start_count
+        self.window._on_wake_error(
+            "The wake-word model is not installed. Install it "
+            "explicitly with: python3 scripts/install_wake_word_model.py"
+        )
+        self.assertIn("install_wake_word_model.py", self.bubble())
+        self.assertEqual(self.window._voice_phase,
+                         self.window.PHASE_OFF)
+        self.assertEqual(self.wake.start_count, starts,
+                         "no automatic retry after a failure")
+
+    def test_trigger_during_a_task_is_ignored_then_resumes_when_idle(self):
+        self.enable()
+        self.window.controller.force("working", reason="test")
+        self.window._on_wake_triggered("Hey Alwin")
+        self.assertEqual(self.window._voice_phase,
+                         self.window.PHASE_OFF)
+        self.assertEqual(self.backends, [])     # no capture mid-task
+        # Task finishes -> calm resume hook:
+        self.window.controller.enter("idle", reason="task over")
+        self.window._maybe_resume_wake()
+        self.assertEqual(self.window._voice_phase,
+                         self.window.PHASE_WAKE)
+        self.assertTrue(self.wake.running)
+
+    def test_teardown_releases_the_wake_service(self):
+        self.enable()
+        self.window._teardown()
+        self.assertEqual(self.wake.release_count, 1)
+        self.assertFalse(self.wake.running)
+        self.assertEqual(self.window._voice_phase,
+                         self.window.PHASE_OFF)
+
+    def test_wake_level_drives_the_meter_value(self):
+        self.enable()
+        self.assertAlmostEqual(self.window._meter_value(), 0.33)
+        self.disable()
+        # Not monitoring: the meter falls back to the capture input
+        # (which reports 0.0 when idle).
+        self.assertEqual(self.window._meter_value(), 0.0)
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

@@ -212,7 +212,9 @@ class SettingsTests(unittest.TestCase):
              # v0.9 voice & language
              "mic_enabled", "mic_level_meter", "language_auto",
              "language_preferred", "spoken_responses", "speech_rate",
-             "voice_id", "asr_model", "wake_word_enabled"},
+             "voice_id", "asr_model", "wake_word_enabled",
+             # v0.10 wake word
+             "wake_phrase"},
         )
         allowed_prefixes = ("greeting", "quiet", "always", "show_subtitles",
                             "reduced", "mic", "language", "spoken",

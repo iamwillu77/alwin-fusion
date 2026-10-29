@@ -1,6 +1,6 @@
 # Alwin Fusion — Architecture
 
-Version: 0.9.1 — Milestone: End-to-End Voice Intelligence
+Version: 0.10.0 — Milestone: Wake Word & Hands-Free Voice
 
 Alwin Fusion is an open-source, offline-first AI-native operating
 system in the making. This document describes what exists today, how
@@ -159,20 +159,29 @@ companion/                 v0.9 Alwin companion (presentation layer only)
                          bool/str only, cosmetic-only — the trusted core
                          never reads it); v0.9 voice keys (mic, level
                          meter, language auto/fallback, spoken replies,
-                         rate, voice, ASR model, wake-word placeholder)
+                         rate, voice, ASR model) + v0.10 wake keys
+                         (wake_word_enabled default OFF, wake_phrase)
     voice.py             VoiceEngine ABC + NullVoice (honest "no engine
                          connected") — the injection seam for tests
     voice_input.py       v0.9 push-to-talk capture: GStreamer
                          autoaudiosrc → appsink (16 kHz mono S16) on a
                          worker; start/stop/cancel/release; silence is
                          rejected before any model runs; PCM lives in
-                         memory only (never written to disk)
+                         memory only (never written to disk). v0.10 adds
+                         an optional on_sample streaming observer (the
+                         wake-word service receives every chunk in
+                         addition to — never instead of — the bounded
+                         capture buffer; a raising observer is isolated)
     speech_recognition.py v0.9 offline ASR: faster-whisper with
                          local_files_only=True (the app NEVER downloads),
                          decode on a worker thread, no-speech/short-audio
                          rejection, forced-vs-auto language, honest
                          model-status reporting (install via
-                         scripts/install_voice_models.py)
+                         scripts/install_voice_models.py). v0.10 adds
+                         decode_window(): hotword-biased + AUTO-language
+                         short-window decode sharing THIS service's
+                         engine (one model in RAM) — the wake-word
+                         verifier's stage 2
     language_registry.py v0.9 the CLOSED set of 15 languages (code, name,
                          native sample, script, RTL flag, espeak voice) —
                          the single source of truth for detection, the
@@ -205,6 +214,22 @@ companion/                 v0.9 Alwin companion (presentation layer only)
                          overrides, generation-counter cancellation,
                          completion truth to the caller; the ONLY module
                          allowed to import ctypes
+    wake_word.py         v0.10 hands-free wake word (opt-in, off by
+                         default): TWO-StageDetector (vosk KWS candidate
+                         gate, Apache-2.0 model, LOWERCASE keyword —
+                         capitalized words silently drop from vosk's
+                         vocabulary — plus text-gated confidence floor,
+                         verify rate limit, bounded rolling window) +
+                         shared-engine hotword verification with
+                         auto-language acceptance (phrase pattern AND
+                         detected language 'en'); WakeWordService owns
+                         the microphone EXCLUSIVELY while monitoring
+                         (bounded drop-oldest queue, single alwin-wake
+                         worker, self-stops on trigger, idempotent
+                         start/stop/release, wait_stopped() for clean
+                         shutdown, honest last_error/on_error); the
+                         window grafts it onto the turn phases as
+                         PHASE_WAKE with ack -> command -> resume hooks
     window.py            thin GTK4 view: speech bubble, character area,
                          subtitle/status, controls (push-to-talk mic +
                          level meter), settings popover (voice/language
@@ -235,6 +260,16 @@ scripts/verify_voice_e2e.py  real-device Tests A-E (real ASR/Ollama/
                          TTS/mic; file-fed capture labeled as such)
 scripts/verify_voice_gui.py  real-GUI end-to-end turn (temp APP_ID,
                          sandbox state; recording manager)
+scripts/install_wake_word_model.py  explicit confirm-first wake-model
+                         installer (--status/--yes): Apache-2.0 licence
+                         stated, size + free space reported — the app
+                         itself never downloads anything
+scripts/verify_wake_word.py  real-hardware wake tests: mic capture +
+                         acoustic-coupling probe, speaker->mic phrase
+                         loopback, missed/false-trigger windows with
+                         stated counts, failure paths, idle CPU/RSS,
+                         GUI acceptance loop; BLOCKED (not faked) when
+                         the machine has no working microphone
 scripts/manual_smoke_apps.sh  opt-in real-launch smoke test (ALWIN_MANUAL_SMOKE=1)
 scripts/manual_smoke_automation.sh  opt-in real-AT-SPI automation smoke test
                          (ALWIN_AUTOMATION_SMOKE=1)
@@ -590,8 +625,10 @@ task window, **push-to-talk mic + input-level meter** (v0.9), hide,
 settings with
 greeting/subtitles/always-on-top/**reduced motion** plus the v0.9 voice
 & language section: mic, level meter, auto-detection, fallback
-language, spoken replies, rate, voice, ASR model and the disabled
-wake-word placeholder). Worker-thread records are marshalled to the
+language, spoken replies, rate, voice, ASR model — and the v0.10 wake
+section: enable switch (the immediate stop control), phrase entry
+(Enter applies) and an honest detector-status line). Worker-thread
+records are marshalled to the
 main loop with
 `GLib.idle_add`; all dynamic text uses `set_text` (never markup).
 Closing hides the window; when hosted by the task application the task
@@ -634,6 +671,40 @@ push-to-talk through explicit phases (`off → listening → recognizing →
    as spoken,
 6. teardown releases the microphone, cancels recognition and speech so
    no voice work outlives the window.
+
+**Wake-word monitoring** (`wake_word.py` + `PHASE_WAKE`, v0.10) —
+opt-in (`wake_word_enabled`, default **off**), exclusive, and never a
+second pipeline:
+
+- **Mic exclusivity**: monitoring and command capture never overlap.
+  `WakeWordService` owns one `VoiceInputService` session while active
+  and **stops itself before firing `on_trigger`**, so the window can
+  open capture immediately; tapping **Mic** during monitoring is an
+  explicit takeover (`_end_wake()` → `_start_listening()`), and every
+  turn end / cancellation / recoverable failure / window re-show flows
+  through `_maybe_resume_wake()`, which refuses unless the character is
+  calm, the phase is `off` and the setting is on.
+- **Verified triggers only**: stage 1 (vosk KWS, lowercase keyword,
+  alternatives must *contain* the configured words with confidence ≥
+  50 — silence yields empty-text results with huge confidence and is
+  gated out) proposes candidates at most once per `VERIFY_MIN_INTERVAL`;
+  stage 2 re-decodes the trailing 3.5 s with the shared speech model
+  (hotword bias + auto language) and accepts only on the phrase pattern
+  **and** detected `en`.
+- **Lifecycle**: `PHASE_WAKE` → verified phrase (marshalled via
+  `GLib.idle_add`, late triggers dropped by the phase guard) →
+  "Yes? I'm listening." acknowledgement → the ordinary
+  `PHASE_LISTENING` turn (the phrase itself is never submitted) →
+  reply/speaking as configured → monitoring resumes. Wake failures show
+  one honest bubble and deliberately do **not** auto-retry (no dead-
+  device storms); recovery hooks are turn end, map and settings.
+- **Indicator**: live level meter (reads whichever input owns the
+  audio) + the "Listening for …" bubble on explicit enable (automatic
+  resumes stay silent so they never clobber the turn's last bubble).
+- **Shutdown**: `release()` on teardown; `wait_stopped(timeout)` lets
+  launchers/verification drivers join the worker before interpreter
+  exit (a worker inside vosk/whisper C code during finalization can
+  crash the process — observed and fixed).
 
 The window also owns the **morning sequence** and the state→scene
 drive (v0.8): a character state maps to exactly one allowlisted scene
@@ -1067,7 +1138,12 @@ v0.8 adds **42 more** (the 40-test dedicated animated-world scene
 suite plus 2 new source-purity meta-tests for `scene.py`/`bedroom.py`;
 the module-set and settings-schema pins were extended) for a total of
 **809 tests**; v0.9 adds **167 more** for a total of **976 tests**
-(974 passed, 2 skipped on this machine): the six voice-stack suites
+(974 passed, 2 skipped on this machine); v0.9.1 adds **16 more**
+(credential redaction in reply-failure reasons + mic-recovery
+regressions) and v0.10 adds **46 more** — the wake-word service/
+detector/window suites, the `wait_stopped` shutdown contract and the
+21-module security pin — for a total of **1038 tests (1036 passed, 2
+skipped)**. The v0.9 additions were: the six voice-stack suites
 (registry, detection, conversation, capture, recognition, voice output),
 the window voice-cycle suite (real `GLib.idle_add` marshalling pumped
 on the default main context, all devices/models/LLM faked), the

@@ -1,4 +1,4 @@
-"""Local text-to-speech for the companion (v0.9.1) — espeak-ng + Gst.
+"""Local text-to-speech for the companion (v0.10.0) — espeak-ng + Gst.
 
 Implements the existing :class:`companion.voice.VoiceEngine` seam (the
 window already accepts any VoiceEngine; ``NullVoice`` stays the

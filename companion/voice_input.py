@@ -1,4 +1,4 @@
-"""Microphone capture for the companion (v0.9.1) — memory only, honest.
+"""Microphone capture for the companion (v0.10.0) — memory only, honest.
 
 Opens the default microphone through **GStreamer** (``autoaudiosrc`` →
 16 kHz mono S16 PCM into an ``appsink``) and buffers samples *in RAM
@@ -229,8 +229,14 @@ class VoiceInputService:
     """
 
     def __init__(self, *, backend_factory: Optional[Callable[[], Any]] = None,
+                 on_sample: Optional[Callable[[bytes], None]] = None,
                  time_func: Callable[[], float] = time.monotonic) -> None:
         self._backend_factory = backend_factory or GStreamerBackend
+        # v0.10.0: optional streaming observer (the wake-word service)
+        # receives every chunk as it arrives — in addition to (never
+        # instead of) the bounded in-memory capture buffer.  A raising
+        # observer is isolated: capture itself never breaks.
+        self._on_sample = on_sample
         self._time = time_func
         self._backend: Optional[Any] = None
         self._buffer = bytearray()
@@ -285,6 +291,12 @@ class VoiceInputService:
         def _on_sample(chunk: bytes) -> None:
             with self._lock:
                 self._buffer.extend(chunk)
+            observer = self._on_sample
+            if observer is not None:
+                try:
+                    observer(chunk)
+                except Exception:  # noqa: BLE001 - observer isolation
+                    pass
 
         def _on_error(message: str) -> None:
             self._last_error = message

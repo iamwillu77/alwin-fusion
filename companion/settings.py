@@ -1,4 +1,4 @@
-"""Companion settings: small, validated, local (v0.9.1).
+"""Companion settings: small, validated, local (v0.10.0).
 
 Persists the companion's preferences (greeting on/off, name, quiet
 hours, always-on-top, subtitles, and — v0.9 — microphone, language
@@ -59,9 +59,11 @@ SCHEMA: Dict[str, tuple] = {
     "speech_rate": (str, "1.0"),       # multiplier as text, clamped 0.5-2.0
     "voice_id": (str, ""),             # "" = espeak voice per language
     "asr_model": (str, "small"),       # tiny|base|small|medium (start-up)
-    # Honest placeholder: wake-word detection is NOT implemented in v0.9
-    # and the settings UI shows the switch as unavailable.
+    # v0.10 hands-free wake word (opt-in; the app never listens by
+    # default). The phrase feeds both detector stages — the settings UI
+    # only offers it because the detector genuinely supports it.
     "wake_word_enabled": (bool, False),
+    "wake_phrase": (str, "Hey Alwin"),
 }
 
 

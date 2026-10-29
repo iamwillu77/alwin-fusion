@@ -1,4 +1,4 @@
-"""Speech recognition for the companion (v0.9.1) — local, lazy, honest.
+"""Speech recognition for the companion (v0.10.0) — local, lazy, honest.
 
 Runs **faster-whisper** (a local CTranslate2 Whisper port) over the
 in-memory PCM from :mod:`companion.voice_input`.  Design rules:
@@ -154,6 +154,25 @@ def model_status(model_size: str = DEFAULT_MODEL_SIZE) -> dict:
 # --------------------------------------------------------------------------- #
 
 
+@dataclass(frozen=True)
+class WindowDecode:
+    """A short-window decode used by wake-word verification (v0.10.0).
+
+    Unlike :class:`RecognitionResult` this carries the engine's
+    *detected* language unconditionally (verification needs to know
+    what language the window actually was, even when it does not
+    match the wake phrase) and applies no no-speech filtering — any
+    phrase-like mention counts as evidence.
+    """
+
+    #: All segment texts joined (verbatim, bounded by the caller).
+    text: str
+    #: Engine-detected language ('' -> None); never a forced value.
+    language: Optional[str]
+    #: Confidence in ``language`` (0.0 when unavailable).
+    language_probability: float
+
+
 class SpeechRecognitionService:
     """Turns captured PCM into text on a worker thread.
 
@@ -293,6 +312,61 @@ class SpeechRecognitionService:
             not text,
             seconds,
             self.model_size,
+        )
+
+    def decode_window(
+        self,
+        pcm: bytes,
+        *,
+        hotwords: Optional[str] = None,
+        language: Optional[str] = None,
+        beam_size: int = 5,
+    ) -> WindowDecode:
+        """Decode a short audio window with optional hotword bias.
+
+        v0.10.0: the wake-word verifier shares **this service's
+        engine** (one model in RAM — no second copy) and is safe to
+        call from the wake worker while no foreground recognition is
+        running (the mic-exclusivity design keeps the two from
+        overlapping; ctranslate2 additionally supports concurrent
+        inference and engine creation is lock-guarded).
+
+        ``hotwords`` biases decoding toward a phrase (used to confirm
+        "Hey Alwin"); ``language=None`` keeps AUTO detection — the
+        auto result is what defeats hotword-induced hallucinations on
+        foreign audio. Raises :class:`RecognitionError` for a missing
+        engine/model or a broken decode (the caller reports honestly).
+        """
+        audio = self._to_float32(pcm)
+        engine = self._ensure_engine()
+        kwargs: dict = {
+            "language": language,
+            "beam_size": beam_size,
+            "condition_on_previous_text": False,
+        }
+        if hotwords:
+            kwargs["hotwords"] = hotwords
+        try:
+            segments, info = engine.transcribe(audio, **kwargs)
+        except TypeError:
+            # Fakes/alternate engines may not accept the full set.
+            try:
+                segments, info = engine.transcribe(audio)
+            except Exception as exc:  # noqa: BLE001
+                raise RecognitionError(
+                    f"Window decode failed: {exc}"
+                ) from exc
+        except Exception as exc:  # noqa: BLE001
+            raise RecognitionError(f"Window decode failed: {exc}") from exc
+        parts = []
+        for segment in segments:
+            text = str(getattr(segment, "text", "") or "").strip()
+            if text:
+                parts.append(text)
+        detected = str(getattr(info, "language", "") or "") or None
+        probability = float(getattr(info, "language_probability", 0.0) or 0.0)
+        return WindowDecode(
+            " ".join(parts).strip(), detected, probability
         )
 
     def recognize_async(

@@ -1,4 +1,4 @@
-"""Alwin's full-body 2D character drawing core (v0.9.1).
+"""Alwin's full-body 2D character drawing core (v0.10.0).
 
 This module is the *art* of the companion: an original, full-body
 cartoon boy drawn procedurally with cairo — large expressive head,

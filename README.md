@@ -2,7 +2,7 @@
 
 **Open-source, offline-first AI-native operating system — in progress.**
 
-Version **0.9.1** · Milestone: **End-to-End Voice Intelligence**
+Version **0.10.0** · Milestone: **Wake Word & Hands-Free Voice**
 
 Alwin Fusion lets you control your computer through natural-language
 commands. v0.9 gives **Alwin**, the persistent, lightweight desktop
@@ -283,9 +283,18 @@ execution and verification stay where they were.
     itself; no model → an install hint with the exact command; no
     espeak/audio → the text reply still shows. Nothing is ever claimed
     as heard, recognized or spoken before it actually happened.
-  - **Wake word: not implemented** (v0.9). The settings switch exists
-    but is disabled and labelled as unavailable — it will not be
-    claimed until it is implemented and tested.
+  - **Wake word (v0.10, opt-in, off by default)**: a **real two-stage
+    local detector** — vosk KWS candidate gate (Apache-2.0 model,
+    explicitly installed by `scripts/install_wake_word_model.py`) +
+    hotword-biased, auto-language verification through the shared
+    speech model. Measured **25/25 recall on synthesized utterances,
+    0/149 false accepts on human-speech fixtures** (raw vosk KWS alone
+    was measured unusable and is *not* trusted as the accept decision;
+    the `tiny` verifier was tested and rejected). Acknowledged "Yes?
+    I'm listening." → command capture (the phrase is never the
+    request) → the normal turn → monitoring again; push-to-talk always
+    remains as the fallback, and every audio buffer is bounded, in
+    memory only, and discarded (see the privacy table).
 - **Two-phase pipeline** (`preview()` + `run_previewed()`,
   `ai_core/pipeline.py`) — the additive split the desktop UI needs:
   `preview()` runs parse → plan → permission and **never executes**;
@@ -503,6 +512,13 @@ python3 scripts/install_voice_models.py --status   # what is installed
 python3 scripts/install_voice_models.py            # install 'small' (~484 MiB)
 python3 scripts/install_voice_models.py --model tiny   # or a smaller one
 
+# v0.10 hands-free wake word (opt-in in Settings → Wake word)
+python3 scripts/install_wake_word_model.py --status  # Apache-2.0 model probe
+python3 scripts/install_wake_word_model.py           # ~40 MiB, asks first
+python3 scripts/verify_wake_word.py                  # real-hardware tests
+                                                     # (mic, detection loopback,
+                                                     #  GUI loop, performance)
+
 # Use the local Ollama model to propose actions (always validated;
 # falls back to the built-in parser with a visible note)
 OLLAMA_MODEL=qwen3:0.6b python3 -m ai_core.cli --llm "make a folder called Reports in Documents"
@@ -647,10 +663,71 @@ sent — **never** a fabricated reply, and the microphone is never left
 disabled by an error. `NullVoice` (still
 available for tests/injection) never claims to have spoken.
 
-**Push-to-talk only in v0.9** — there is no wake word (the Settings
-switch is shown disabled and labelled "not available yet"), no
-continuous listening, and no hands-free mode; those are future work and
-are not claimed.
+**Push-to-talk is always available** (v0.9+), and v0.10 adds an
+**opt-in wake word** — see *Hands-free wake word (v0.10.0)* below.
+There is still **no** always-on mode: monitoring exists only when you
+enable it, and no hands-free mode is claimed beyond the measured
+wake-phrase detection.
+
+### Hands-free wake word (v0.10.0)
+
+**Off by default.** Settings → Wake word → "Hands-free “Hey Alwin”
+listening" opts in; the switch is also the immediate stop control, and
+the phrase itself is configurable (the detector genuinely derives both
+stages from it — press Enter in the Phrase field to apply).
+
+**How detection actually works** (two local stages — why two is
+measured, not decorative):
+
+1. **Candidate gate** — a vosk keyword-spotting recognizer
+   (`vosk-model-small-en-us-0.15`, **Apache 2.0**, ~68 MiB) streams the
+   microphone cheaply. Vosk's KWS grammar forces the keyword into its
+   hypotheses, so raw KWS fires on most speech (measured: 149/149 human
+   fixtures) with unusable confidence overlap — it is *only* a gate,
+   never the accept decision.
+2. **Verification** — on a candidate, the trailing 3.5 s (a bounded
+   ~112 KB rolling window) is decoded by the *shared* speech model with
+   `hotwords` bias **and auto language detection**. Acceptance requires
+   the exact phrase pattern **and** a detected language of `en`; the
+   auto-language rule exists because a forced-English decode was
+   measured fabricating "Hey Alwin…" out of Bengali audio.
+
+Measured on 25 synthesized utterances (5 phrasings × 5 speeds) and all
+**149 FLEURS human-speech fixtures**: **25/25 recall, 0/149 false
+accepts** with the production rule (the `tiny` model was tested and
+rejected as the verifier: 17/25, 23/149). Real-hardware loopback and
+GUI-loop results are reported below in *Verifying voice on real
+hardware* and by `scripts/verify_wake_word.py`.
+
+**Lifecycle:** monitoring (opt-in) → verified phrase → visible "Yes?
+I'm listening." acknowledgement → **command capture** (the wake phrase
+is never treated as your request) → the normal v0.9 turn (transcript →
+same conversation pipeline → optional spoken reply) → monitoring again.
+Push-to-talk always remains: tapping **Mic** while monitoring takes the
+microphone over immediately. Errors (missing model, dead device) show
+an honest bubble and do **not** auto-retry-loop; the next turn end,
+window re-show or settings toggle retries.
+
+**Install the detector model explicitly** (the app never downloads):
+
+```bash
+python3 scripts/install_wake_word_model.py --status   # licence + state
+python3 scripts/install_wake_word_model.py            # ~40 MiB, asks first
+```
+
+**When audio is captured, retained and sent (privacy contract):**
+
+| Stage | Captured | Retained | Leaves the process? |
+|---|---|---|---|
+| Wake monitoring | yes, while the switch is on | bounded queue (12.8 s worst case, drop-oldest) + 112 KB rolling window — **never written to disk** | no — local vosk/whisper only |
+| Verification decode | window around a candidate | discarded with the window; transcript used only for accept/reject | no |
+| Command capture (after ack) | your utterance | in memory for the turn (v0.9 rules) | transcript → local Ollama **only** (your `--llm` endpoint) |
+| Playback | — | — | local speakers only |
+
+No continuous ambient audio reaches Ollama; nothing is recorded to
+disk; the monitoring indicator is the live level meter + the
+"Listening for …" bubble + the Settings switch (the software reading
+the mic is never described as the hardware being disconnected).
 
 ### Speech-model and language quality (measured, honest)
 
@@ -742,13 +819,14 @@ evaluation* below; JSON output includes every per-sample record
 (engine, reference, hypothesis, WER/CER, stage failures) for
 reproducibility.
 
-### Verifying voice on real hardware (v0.9.1)
+### Verifying voice on real hardware (v0.9.1 → v0.10.0)
 
-Two verification scripts separate **real-device checks** from the
-mocked unit suite (which never opens a microphone or speaker). Both
-need the voice venv (`faster-whisper`, `espeakng-loader`, `av`), the
-installed `small` model, and — for reply checks — a running local
-Ollama with a model you name via `OLLAMA_MODEL`:
+Three verification scripts separate **real-device checks** from the
+mocked unit suite (which never opens a microphone or speaker). All
+need the voice venv (`faster-whisper`, `espeakng-loader`, `av`, and —
+for wake tests — `vosk`), the installed `small` model, and — for reply
+checks — a running local Ollama with a model you name via
+`OLLAMA_MODEL`:
 
 ```bash
 # Service-level end-to-end: Tests A-E (English/Tamil/Hindi turns,
@@ -764,6 +842,13 @@ OLLAMA_MODEL=qwen3:0.6b python3 scripts/verify_voice_e2e.py
 # dir), file-fed capture, real ASR -> real Ollama reply -> real
 # speaking state -> real playback -> idle. Recording manager again.
 OLLAMA_MODEL=qwen3:0.6b python3 scripts/verify_voice_gui.py
+
+# v0.10 wake word: physical mic, speaker->mic phrase loopback, missed/
+# false-trigger windows with STATED sample counts, failure paths,
+# idle CPU/RSS, and the full GUI loop
+# (wake -> ack -> command -> Ollama -> TTS -> monitoring, twice) with
+# a recording manager. Each check prints REAL/EXECUTED/BLOCKED.
+OLLAMA_MODEL=qwen3:0.6b python3 scripts/verify_wake_word.py
 ```
 
 Every check prints `ok`/`FAIL` with the observed value; the scripts
@@ -993,8 +1078,9 @@ runtime — the room and character are plain cairo.
 Companion preferences (greeting on/off, name, quiet hours,
 always-on-top, subtitles, reduced motion, and — v0.9 — microphone on
 off, level meter, auto language detection on/off, preferred fallback
-language, spoken replies, speech rate, voice, ASR model, wake-word
-placeholder) persist to
+language, spoken replies, speech rate, voice, ASR model; and — v0.10 —
+wake-word listening **off by default** and the configurable wake
+phrase) persist to
 `$ALWIN_STATE_DIR/companion_settings.json` (mode 0600, closed schema —
 bool/str values only; unknown keys are ignored; this file is
 cosmetic-only, never read by the trusted core, and can never grant a
@@ -1020,7 +1106,7 @@ All tests run in temporary directories; they never modify your real
 launch adapter's `popen`/`which`, the automation backend's AT-SPI
 session, adapter factory, clock and `/proc` root are all injected
 fakes; fake `/proc` trees are temporary directories of `<pid>/comm`
-files). The suite (974 tests) covers supported/unsupported commands,
+files). The suite (1038 tests: 1036 passing, 2 skipped) covers supported/unsupported commands,
 traversal and symlink escapes, permission denial, approval rejection,
 directory creation, verification failure, Ollama-unavailable operation,
 absence of overwrite/delete capability, dry-run inertness,
@@ -1336,7 +1422,10 @@ voice & language settings (closed schema, bool/str only), the `--llm`
 wiring for optional replies (also fixing `taskui --llm`, which was
 previously inert), and the honest wake-word placeholder. The suite is
 now **974 tests**, all headless (voice hardware, models and the LLM are
-faked or injected).
+faked or injected); v0.9.1 brought it to **990** (credential redaction
+in failure reasons + recovery regressions), and v0.10 adds the
+wake-word suites (service/detector/window lifecycle + privacy pins) —
+**1038 tests total (1036 passing, 2 skipped)**.
 
 Known limitations (details in `docs/SECURITY.md`):
 
@@ -1403,11 +1492,22 @@ Known limitations (details in `docs/SECURITY.md`):
   replaced by dropping a `frame.png` into
   `companion/assets/character/<state>/`, and the renderer interface
   keeps the door open for a future 3D or sprite-based implementation.
-- **Voice is real but strictly optional and locally installed** (v0.9):
-  - The microphone only opens when *you* click the mic (push-to-talk);
-    there is no wake word and no continuous listening — the wake-word
-    Settings switch exists but is disabled and labelled "not available
-    yet (v0.9)" because it is not implemented.
+- **Voice is real but strictly optional and locally installed** (v0.9,
+  wake word v0.10):
+  - The microphone opens when *you* click the mic (push-to-talk), or —
+    **only if you enable it** — for wake-word monitoring (v0.10, off by
+    default; the Settings switch is the immediate stop control). There
+    is no other continuous listening and no always-on mode.
+  - **Wake-word detection quality is measured, not assumed**: 25/25
+    recall on synthesized utterances, 0/149 false accepts on human-speech
+    fixtures (production rule; stated sample counts, not statistical
+    rates). The phrase gate requires English — a non-English ambient
+    stream cannot falsely trigger it (hotword hallucinations are
+    defeated by auto-language detection). Detection on *real* acoustic
+    input could **not** be demonstrated on the development machine: its
+    only capture device delivers line noise with no acoustic coupling
+    (measured; reported as BLOCKED by `scripts/verify_wake_word.py`
+    rather than faked).
   - **Nothing you say is ever saved or uploaded**: audio lives in
     memory during a turn and is discarded (no `.wav`/recording files, no
     cloud ASR; `wave`/`audioop` are banned in the companion package and

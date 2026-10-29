@@ -45,7 +45,8 @@ EXPECTED_MODULES = {
     "conversation.py", "greeting.py", "language_detection.py",
     "language_registry.py", "presentation.py", "renderer.py", "renderer2d.py",
     "scene.py", "settings.py", "speech_recognition.py", "states.py",
-    "voice.py", "voice_input.py", "voice_output.py", "window.py",
+    "voice.py", "voice_input.py", "voice_output.py", "wake_word.py",
+    "window.py",
 }
 
 #: Dotted module names that must never be imported **at module level**
@@ -106,6 +107,10 @@ VOICE_MODULE_IMPORTS = {
                               "dataclasses", "typing"},
     "voice_output.py": {"__future__", "threading", "dataclasses",
                         "typing", "companion"},
+    # v0.10.0 wake word: stdlib streaming scaffolding only at module
+    # level (bounded queue + worker + regex acceptance pattern).
+    "wake_word.py": {"__future__", "os", "queue", "re", "threading",
+                     "time", "typing"},
 }
 
 #: The *additional* imports those modules may use **lazily** (inside a
@@ -122,6 +127,10 @@ VOICE_MODULE_LAZY_IMPORTS = {
     # ctypes drives espeak-ng — allowed HERE and nowhere else, and only
     # with explicit prototypes (a default-typed espeak_Synth segfaults).
     "voice_output.py": {"ctypes", "espeakng_loader", "gi"},
+    # v0.10.0: the detector loads the local vosk engine + JSON for the
+    # keyword API, and lazily grabs VoiceInputService when no factory
+    # was injected. Still no network, no recording, no process.
+    "wake_word.py": {"json", "vosk", "companion"},
 }
 
 #: Roots neither allowed nor lazy: the hard bans for the voice modules

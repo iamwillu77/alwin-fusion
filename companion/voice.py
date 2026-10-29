@@ -1,29 +1,30 @@
-"""Voice interface for the Alwin companion (v0.9.1) — a clean seam for the future.
+"""Voice interface for the Alwin companion (v0.10.0) — the engine seam.
 
-This module defines a **small, replaceable interface** that a future
-local text-to-speech and speech-recognition engine can implement.
+This module defines the **small, replaceable interface**
+(``VoiceEngine``: speak/stop/status/available) that the companion
+window talks to. What lives here and around it:
 
-What exists today:
-
-* :class:`VoiceEngine` — the abstract interface (speak/stop/status),
+* :class:`VoiceEngine` — the abstract interface,
 * :class:`NullVoice` — the honest "no engine connected" implementation:
   it does not synthesize sound, does not pretend to speak, and reports
   ``available = False`` with a clear status line for the UI,
 * :func:`voice_status` — a pure, bounded view-model helper for the
   status pill.
 
-What deliberately does NOT exist (and will not be faked):
+What this module deliberately does NOT do (and never will be faked):
 
 * no fake voice engine that pretends to talk,
 * no audio playback of pre-recorded clips,
-* no microphone capture, no continuous listening, no wake word,
+* no microphone capture, no continuous listening, no wake word —
+  those live in ``voice_input.py`` (push-to-talk capture), and
+  ``wake_word.py`` (opt-in two-stage wake detection), never here,
 * no model installation, no cloud service, no large background process.
 
-When a real engine is connected in a future milestone, it will
-implement :class:`VoiceEngine` and be passed to the companion window;
-everything else (states, adapter, greeting, speech content) stays
-unchanged.  Until then the companion is honest: it speaks through text
-bubbles only, and the status line says so.
+The *real* engines are separate and optional: ``voice_output.py``
+(espeak-ng synthesis + GStreamer playback) implements ``VoiceEngine``
+and is passed to the companion window by default; anything missing is
+reported honestly through this interface (text bubbles still work,
+and ``NullVoice`` still never claims speech).
 """
 
 from __future__ import annotations
