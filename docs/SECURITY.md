@@ -1,6 +1,6 @@
 # Alwin Fusion — Security Model and Limitations
 
-Version: 0.10.0 — Milestone: Wake Word & Hands-Free Voice
+Version: 0.11.0 — Milestone: Context-Aware AI Companion
 
 This document states what the prototype defends against, how, and —
 importantly — **what it does not defend against**. Passing tests does
@@ -584,7 +584,10 @@ New surface introduced by v0.6, stated honestly:
      them). The `mute_voice` placeholder key was removed rather than
      repurposed. v0.10 adds `wake_word_enabled` (default **off**) and
      `wake_phrase` — same cosmetic-only guarantees; neither can grant
-     anything.
+     anything. v0.11 adds `context_enabled` (default **on**) and
+     `context_turns` ("8", clamped 2–20) — they only bound how many
+     *in-memory* turns are quoted into a local prompt; no permission,
+     execution or data-retention effect (tested).
    - **Reply-failure reasons are scrubbed before display** (v0.9.1):
      embedded exception text is bounded and stripped of URL userinfo
      (`scheme://user:pass@`) and bearer/token/key-style secrets by a
@@ -627,6 +630,39 @@ New surface introduced by v0.6, stated honestly:
      sample counts are reported by `scripts/verify_wake_word.py`;
      detection on real acoustic input was BLOCKED on the development
      machine (no working microphone — reported, not faked).
+8. *Conversation context & routing (v0.11) add no persistence and no
+   new trust decision.* Stated precisely:
+   - **In-memory only**: session history lives in a bounded deque
+     inside `ConversationService` (2–20 exchanges × 400-char entries,
+     default 8) — never written to disk, never logged, discarded with
+     the service (application run) or on the explicit **Clear
+     conversation** control; no database, no "personal memory", no
+     side-channel retention (module allowlist still bans all file I/O;
+     tested).
+   - **History is untrusted data**: it is quoted into the *system*
+     prompt with explicit rules — never followed as instructions,
+     never overriding safety/permission/approval rules — and the reply
+     prompt keeps the *latest* turn's language (history cannot steer
+     it). Redaction of failure reasons (item 6) still applies with
+     history present (tested).
+   - **Routing cannot authorize anything**: the injected predicate is
+     the deterministic parser's own verdict, evaluated inside the
+     engine-free conversation module. Actions go through the unchanged
+     validate → permission → approval → verification chain; chat
+     never reaches the manager (so it can neither execute nor create
+     fake task history); predicate *errors fail closed* (submitted as
+     actions). Voice/typed input share the identical path — speech
+     still cannot bypass approval (tested). The model is told the true
+     routing outcome (`action=` clause) so a reply cannot claim an
+     action that was never sent, and the conversational failure bubble
+     no longer says "still sent" when nothing was.
+   - **Interruption remains counter-guarded**: cancelled/superseded
+     turns drop their late ASR/reply/TTS results by serial
+     (including the v0.11 stale-completion guard), `_cancel_turn`
+     stops speech and releases its audio, and the sliced bus wait
+     restores user control within ~0.2–0.5 s (measured 117 ms) —
+     still one exclusive capture owner (no hot-mic barge-in; push-to-
+     talk stays the fallback).
 
 ### 4. Verification before success
 
@@ -971,6 +1007,20 @@ New surface introduced by v0.6, stated honestly:
       claiming success). Wake-word quality for other languages of the
       phrase is untested, and this says nothing new about the 15-
       language recognition table above.
+    - **context & routing (v0.11) are bounded, local and English-gated**:
+      history is in-memory only (nothing survives a restart; no
+      personal memory feature), bounded 2–20 exchanges and quoted as
+      untrusted data — follow-up answer *quality* depends on the local
+      model (verified with `qwen3:0.6b`; other models vary). Routing
+      uses the English deterministic parser, so a command spoken in
+      another language becomes a conversational turn with **no task
+      record** — the reply prompt forbids claiming the action ran, but
+      the user must repeat it in English (or type it) to execute it.
+      No hot-mic barge-in exists (one exclusive capture owner);
+      interrupted speech now returns control within ~0.5 s (measured
+      117 ms), and a *real* spoken multi-turn conversation could not be
+      demonstrated on this machine (no working microphone — BLOCKED,
+      reported with evidence).
 32. **The companion's "walking" is movement inside a 2D room, not
     desktop locomotion**, and the companion is
     a small character window — not a desktop shell, not a wallpaper

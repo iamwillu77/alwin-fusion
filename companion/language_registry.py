@@ -1,4 +1,4 @@
-"""Closed language registry for multilingual voice (v0.10.0).
+"""Closed language registry for multilingual voice (v0.11.0).
 
 One module owns *what* a supported language is everywhere in the voice
 stack: its ISO code, display names, right-to-left flag, and the

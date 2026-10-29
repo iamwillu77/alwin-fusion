@@ -214,11 +214,13 @@ class SettingsTests(unittest.TestCase):
              "language_preferred", "spoken_responses", "speech_rate",
              "voice_id", "asr_model", "wake_word_enabled",
              # v0.10 wake word
-             "wake_phrase"},
+             "wake_phrase",
+             # v0.11 conversation context
+             "context_enabled", "context_turns"},
         )
         allowed_prefixes = ("greeting", "quiet", "always", "show_subtitles",
                             "reduced", "mic", "language", "spoken",
-                            "speech", "voice", "asr", "wake")
+                            "speech", "voice", "asr", "wake", "context")
         for key in settings_store.SCHEMA:
             self.assertTrue(key.startswith(allowed_prefixes),
                             f"{key} is not a cosmetic preference")

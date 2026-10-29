@@ -1,4 +1,4 @@
-"""Local text-to-speech for the companion (v0.10.0) — espeak-ng + Gst.
+"""Local text-to-speech for the companion (v0.11.0) — espeak-ng + Gst.
 
 Implements the existing :class:`companion.voice.VoiceEngine` seam (the
 window already accepts any VoiceEngine; ``NullVoice`` stays the
@@ -45,6 +45,7 @@ so importing the module itself stays cheap and headless.
 from __future__ import annotations
 
 import threading
+import time
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
@@ -267,6 +268,36 @@ class EspeakSynthesizer:
 # --------------------------------------------------------------------------- #
 
 
+def await_playback_end(bus: Any, total_seconds: float, stopped: Any,
+                       eos_or_error: Any, second_ns: int,
+                       slice_seconds: float = 0.2):
+    """Wait for EOS/ERROR on *bus*, waking promptly on stop().
+
+    Returns ``(outcome, message)`` with outcome in
+    ``{"message", "stopped", "timeout"}``.
+
+    v0.11 fix (measured on real hardware): a single
+    ``timed_pop_filtered(total)`` blocks the FULL deadline after
+    ``stop()`` NULLs the pipeline — the bus never delivers EOS for a
+    destroyed pipeline, so ``play()`` returned ~9 s late and
+    ``on_done`` (the UI's leave-speaking signal) arrived seconds after
+    the user interrupted.  Slicing the wait keeps stop latency ≤
+    ``slice_seconds`` without any extra threads.
+    """
+    end = time.monotonic() + max(0.0, total_seconds)
+    while True:
+        if stopped.is_set():
+            return "stopped", None
+        remaining = end - time.monotonic()
+        if remaining <= 0:
+            return "timeout", None
+        wait = min(slice_seconds, remaining)
+        message = bus.timed_pop_filtered(int(wait * second_ns),
+                                         eos_or_error)
+        if message is not None:
+            return "message", message
+
+
 class GStreamerPlayer:
     """Blocking playback of one PCM buffer; interruptible via stop().
 
@@ -341,18 +372,18 @@ class GStreamerPlayer:
             # gst_app_src_end_of_stream() exposes); "end-stream" does
             # not exist and raises, which real playback caught.
             src.emit("end-of-stream")
-            # Wait for EOS or ERROR (bounded: buffer time + 5 s).
-            deadline = int(
-                (self._speech.seconds + 5.0) * Gst.SECOND
+            # Wait for EOS or ERROR (bounded: buffer time + 5 s) —
+            # sliced so stop() wakes us within ~200 ms (see
+            # await_playback_end).
+            outcome, message = await_playback_end(
+                self._bus, self._speech.seconds + 5.0, self._stopped,
+                Gst.MessageType.EOS | Gst.MessageType.ERROR, Gst.SECOND,
             )
-            message = self._bus.timed_pop_filtered(
-                deadline, Gst.MessageType.EOS | Gst.MessageType.ERROR
-            )
-            if message is None:
-                if self._stopped.is_set():
-                    error = "stopped"
-                else:
-                    error = "Speech playback timed out."
+            if outcome == "stopped":
+                error = "stopped"
+            elif outcome == "timeout":
+                error = ("stopped" if self._stopped.is_set()
+                         else "Speech playback timed out.")
             elif message.type == Gst.MessageType.ERROR:
                 err, _debug = message.parse_error()
                 error = f"Audio playback failed: {err.message}"

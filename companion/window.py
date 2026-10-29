@@ -1,4 +1,4 @@
-"""Companion window: the GTK4 view for the Alwin character (v0.10.0).
+"""Companion window: the GTK4 view for the Alwin character (v0.11.0).
 
 A lightweight, persistent window that shows the character, a speech
 bubble, a minimal task status and a small control row.  It is a **thin
@@ -72,6 +72,7 @@ except (ImportError, ValueError):  # pragma: no cover - headless fallback
 from companion import settings as settings_store
 from companion import presentation
 from companion.adapter import TaskEventAdapter
+from ai_core.command_parser import EXIT, UNSUPPORTED, parse_command
 from companion.conversation import ConversationService
 from companion.greeting import GreetingConfig, GreetingController
 from companion.language_registry import LANGUAGES, choices_for_ui
@@ -229,6 +230,10 @@ class CompanionWindow:
             llm_client=llm_client,
             replies_enabled=bool(self._settings.get("spoken_responses",
                                                     False)),
+            # v0.11 routing: the trusted deterministic parser decides
+            # ACTION (full task pipeline) vs CONVERSATIONAL (reply only).
+            # The conversation module stays engine-free (injected).
+            is_action=self._is_action_text,
         )
         self.voice_input = voice_input or VoiceInputService()
         requested_model = str(self._settings.get("asr_model", "small"))
@@ -695,6 +700,24 @@ class CompanionWindow:
     # unless it is calm, not closing and the setting is on.
     # ------------------------------------------------------------------ #
 
+    def _is_action_text(self, text: str) -> bool:
+        """Trusted routing predicate for ConversationService (v0.11).
+
+        The deterministic parser — the SAME validator the task pipeline
+        starts from — decides whether an utterance is a desktop action.
+        Actions take the unchanged validate → permission → approval →
+        verification path; parser-unsupported text (and bare `exit`)
+        becomes a conversational turn that never creates a task record.
+        Voice cannot bypass anything: anything actionable still goes
+        through the full pipeline, and the predicate fails CLOSED
+        (routing errors treat the text as an action).
+        """
+        try:
+            intent = parse_command(text).intent
+        except Exception:  # noqa: BLE001 - never crash a turn
+            return True
+        return intent not in (UNSUPPORTED, EXIT)
+
     def _wake_enabled(self) -> bool:
         return bool(self._settings.get("wake_word_enabled", False))
 
@@ -815,6 +838,14 @@ class CompanionWindow:
             )
             self.conversation.set_replies_enabled(
                 bool(self._settings.get("spoken_responses", False))
+            )
+        except Exception:  # noqa: BLE001 - cosmetic settings only
+            pass
+        try:
+            # v0.11: bounded in-memory context (live; never persisted).
+            self.conversation.configure_context(
+                enabled=bool(self._settings.get("context_enabled", True)),
+                turns=str(self._settings.get("context_turns", "8") or "8"),
             )
         except Exception:  # noqa: BLE001 - cosmetic settings only
             pass
@@ -1001,13 +1032,34 @@ class CompanionWindow:
 
         if turn.uncertain_language:
             # Detection is uncertain: ask the user instead of guessing.
-            # (The task itself still runs — the words were clear; only
-            # the language claim is refused.)
+            # (For actions the task still runs — the words were clear;
+            # only the language claim is refused.)
             self._show_bubble(
                 "I couldn't tell which language that was — set your "
                 "fallback language in Settings, or say it again.",
                 presentation.TONE_ATTENTION,
             )
+
+        if turn.record is None:
+            # v0.11 conversational turn: no manager record exists, so
+            # nothing will drive the character through task states.
+            if not want_reply:
+                self._voice_phase = self.PHASE_OFF
+                self._return_to_calm()
+                return
+            # With a reply pending, stay in `thinking` until it is
+            # generated (reply/speaking paths resolve the state).
+            self._voice_phase = self.PHASE_REPLYING
+            language = turn.language
+            serial = self._turn_serial
+            threading.Thread(
+                target=self._reply_worker,
+                args=(result.text.strip(), language, serial,
+                      turn.record is not None),
+                daemon=True,
+                name="alwin-reply",
+            ).start()
+            return
 
         if not want_reply:
             # The manager's record drives the character from here (the
@@ -1020,17 +1072,23 @@ class CompanionWindow:
         serial = self._turn_serial
         threading.Thread(
             target=self._reply_worker,
-            args=(result.text.strip(), language, serial),
+            args=(result.text.strip(), language, serial,
+                      turn.record is not None),
             daemon=True,
             name="alwin-reply",
         ).start()
 
-    def _reply_worker(self, text: str, language, serial: int) -> None:
+    def _reply_worker(self, text: str, language, serial: int,
+                      sent: bool) -> None:
         """Generate the optional reply off the GTK thread, then marshal."""
-        reply, reason = self.conversation.reply_with_reason(text, language)
-        GLib.idle_add(self._on_reply_ready, reply, reason, language, serial)
+        reply, reason = self.conversation.reply_with_reason(
+            text, language, action=sent
+        )
+        GLib.idle_add(self._on_reply_ready, reply, reason, language,
+                      serial, sent)
 
-    def _on_reply_ready(self, reply, reason, language, serial: int) -> bool:
+    def _on_reply_ready(self, reply, reason, language, serial: int,
+                        sent: bool) -> bool:
         """A reply (or its honest failure) arrived on the main loop."""
         if (self._closing or serial != self._turn_serial
                 or self._voice_phase != self.PHASE_REPLYING):
@@ -1038,27 +1096,38 @@ class CompanionWindow:
         if not reply:
             # No reply: the local model failed, returned nothing, or is
             # not attached.  Say so honestly (v0.9.1) instead of going
-            # quiet — the *task* was already submitted and stands; only
-            # the optional acknowledgement is missing.
+            # quiet — and only claim "still sent" when a task actually
+            # was submitted (v0.11: conversational turns never were).
             self._voice_phase = self.PHASE_OFF
             detail = str(reason or "no reply was generated")[:300]
+            tail = (". Your request was still sent." if sent
+                    else "")
             self._show_bubble(
-                f"I couldn't write a reply ({detail}). Your request "
-                "was still sent.",
+                f"I couldn't write a reply ({detail}){tail}",
                 presentation.TONE_ATTENTION,
             )
             self._return_to_calm()
             return False
         self._show_bubble(reply, presentation.TONE_CALM)
+        # v0.11: the reply reached the UI — confirm it into the session
+        # context (serial already validated; failures/cancels never get
+        # here, so history only holds replies the user actually saw).
+        try:
+            self.conversation.record_reply(reply)
+        except Exception:  # noqa: BLE001 - context is cosmetic-only
+            pass
         set_language = getattr(self.voice, "set_language", None)
         if language and callable(set_language):
             try:
                 set_language(language)  # False = keep current voice (honest)
             except Exception:  # noqa: BLE001
                 pass
+        current = self._turn_serial
         try:
             dispatched = bool(self.voice.speak(
-                reply, on_done=self._on_speech_done
+                reply,
+                on_done=lambda ok, err, s=current:
+                    self._on_speech_done(ok, err, s),
             ))
         except Exception:  # noqa: BLE001 - a broken engine must not crash
             dispatched = False
@@ -1085,8 +1154,17 @@ class CompanionWindow:
         if is_valid_transition(state, STATE_SPEAKING):
             self.controller.enter(STATE_SPEAKING, reason="voice reply")
 
-    def _on_speech_done(self, success: bool, error: Optional[str]) -> None:
-        """VoiceEngine completion callback (TTS worker): marshal."""
+    def _on_speech_done(self, success: bool, error: Optional[str],
+                        serial: Optional[int] = None) -> None:
+        """VoiceEngine completion callback (TTS worker): marshal.
+
+        v0.11: a completion carrying a STALE turn serial (the turn was
+        cancelled/superseded after dispatch) is dropped here — the
+        engine already released its audio resources, and touching the
+        UI could clobber the newer turn's state.
+        """
+        if serial is not None and serial != self._turn_serial:
+            return
         GLib.idle_add(self._speech_finished, bool(success), error)
 
     def _speech_finished(self, success: bool, error: Optional[str]) -> bool:
@@ -1123,6 +1201,15 @@ class CompanionWindow:
     def _cancel_turn(self) -> None:
         """Cancel capture/recognition/reply (mic pressed mid-turn)."""
         self._turn_serial += 1          # invalidates in-flight results
+        # v0.11: a full-turn cancel also interrupts speech — the engine
+        # releases its audio resources, and its (now stale) completion
+        # is dropped by the serial guard instead of disturbing the UI.
+        stop_speech = getattr(self.voice, "stop", None)
+        if callable(stop_speech):
+            try:
+                stop_speech()
+            except Exception:  # noqa: BLE001 - cancel never raises
+                pass
         if self.voice_input.listening:
             try:
                 self.voice_input.cancel()   # discard what was heard
@@ -1137,7 +1224,8 @@ class CompanionWindow:
         self._voice_phase = self.PHASE_OFF
         self._stop_level_meter()
         self._set_mic_button(listening=False)
-        if self.controller.state in (STATE_LISTENING, STATE_THINKING):
+        if self.controller.state in (STATE_LISTENING, STATE_THINKING,
+                                     STATE_SPEAKING):
             self.controller.enter(STATE_IDLE, reason="cancelled")
         if was_announced:
             self._show_bubble("Okay — cancelled.", presentation.TONE_CALM)
@@ -1516,6 +1604,45 @@ class CompanionWindow:
         wake_note.set_wrap(True)
         box.append(wake_note)
 
+        # ---- v0.11 conversation context (in-memory only) ---------------- #
+        heading_conv = _label("Conversation", "settings-heading")
+        box.append(heading_conv)
+        _switch("context_enabled", "Remember this conversation",
+                default=True)
+
+        context_labels = ["2", "4", "8", "12", "20"]
+        current_turns = str(self._settings.get("context_turns", "8")
+                            or "8")
+        try:
+            ctx_index = context_labels.index(current_turns)
+        except ValueError:
+            ctx_index = context_labels.index("8")
+        _dropdown("Recent turns kept", context_labels, ctx_index,
+                  lambda chosen: self._set_context_turns(chosen))
+
+        clear_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL,
+                            spacing=8)
+        clear_row.add_css_class("settings-row")
+        clear_row.append(_label("Session"))
+        clear_btn = Gtk.Button(label="Clear conversation")
+        clear_btn.add_css_class("control-btn")
+        clear_btn.connect("clicked", self._on_clear_context)
+        clear_row.append(clear_btn)
+        box.append(clear_row)
+
+        try:
+            kept = len(self.conversation.context)
+        except Exception:  # noqa: BLE001 - diagnostic only
+            kept = 0
+        ctx_note = _label(
+            f"Context is in memory only ({kept} recent turns) — never "
+            "written to disk, never logged, and discarded when Alwin "
+            "closes. Clearing drops it immediately.",
+            "subtitle-label",
+        )
+        ctx_note.set_wrap(True)
+        box.append(ctx_note)
+
         # Honest status lines: speech model, voice engine, privacy.
         try:
             model_detail = str(self.recognizer.status().get("detail", ""))
@@ -1550,6 +1677,25 @@ class CompanionWindow:
                 break
         self._settings["language_preferred"] = code
         self._apply_settings()
+
+    def _set_context_turns(self, chosen: str) -> None:
+        """Dropdown handler for the context budget (2..20 exchanges)."""
+        value = str(chosen or "8").strip()
+        if value not in ("2", "4", "8", "12", "20"):
+            value = "8"
+        self._settings["context_turns"] = value
+        self._apply_settings()
+
+    def _on_clear_context(self, *_args) -> None:
+        """Explicit clear-conversation control (immediate, in-memory)."""
+        try:
+            dropped = self.conversation.clear_context()
+        except Exception:  # noqa: BLE001 - control must never crash
+            dropped = 0
+        self._show_bubble(
+            f"Conversation cleared ({dropped} earlier turns dropped).",
+            presentation.TONE_CALM,
+        )
 
     def _set_voice_choice(self, chosen_label: str, labels) -> None:
         """Dropdown handler: '' (first entry) means automatic."""

@@ -1,6 +1,6 @@
 # Alwin Fusion — Architecture
 
-Version: 0.10.0 — Milestone: Wake Word & Hands-Free Voice
+Version: 0.11.0 — Milestone: Context-Aware AI Companion
 
 Alwin Fusion is an open-source, offline-first AI-native operating
 system in the making. This document describes what exists today, how
@@ -161,6 +161,8 @@ companion/                 v0.9 Alwin companion (presentation layer only)
                          meter, language auto/fallback, spoken replies,
                          rate, voice, ASR model) + v0.10 wake keys
                          (wake_word_enabled default OFF, wake_phrase)
+                         + v0.11 context keys (context_enabled default
+                         ON, context_turns "8" clamped 2..20)
     voice.py             VoiceEngine ABC + NullVoice (honest "no engine
                          connected") — the injection seam for tests
     voice_input.py       v0.9 push-to-talk capture: GStreamer
@@ -206,14 +208,26 @@ companion/                 v0.9 Alwin companion (presentation layer only)
                          off / --llm missing / model error / empty /
                          unusable) with credential-looking material
                          (URL userinfo, bearer/token labels) scrubbed by
-                         a pure-string redactor — no new imports
+                         a pure-string redactor — no new imports.
+                         v0.11 adds SessionContext (bounded in-memory
+                         deque: 2–20 exchanges × 400 chars, retry
+                         dedupe, explicit clear — never persisted),
+                         history quoted into the system prompt as DATA
+                         with anti-injection + clarify-on-ambiguity
+                         rules, injected is_action routing (trusted
+                         parser verdict: actions → manager, chat →
+                         never), and action= prompt clauses so the
+                         model cannot claim un-sent or failed actions
     voice_output.py      v0.9 local TTS: espeak-ng through ctypes (full
                          argtypes — a naive call would crash) + GStreamer
                          appsrc→alsasink playback on a worker; per-
                          language voice selection, rate/voice-id
                          overrides, generation-counter cancellation,
                          completion truth to the caller; the ONLY module
-                         allowed to import ctypes
+                         allowed to import ctypes. v0.11: sliced
+                         stop-aware bus wait (await_playback_end) — a
+                         user interrupt completes in ~0.1–0.5 s measured
+                         (the old single bus wait delayed on_done by ~9 s)
     wake_word.py         v0.10 hands-free wake word (opt-in, off by
                          default): TWO-StageDetector (vosk KWS candidate
                          gate, Apache-2.0 model, LOWERCASE keyword —
@@ -270,6 +284,13 @@ scripts/verify_wake_word.py  real-hardware wake tests: mic capture +
                          stated counts, failure paths, idle CPU/RSS,
                          GUI acceptance loop; BLOCKED (not faked) when
                          the machine has no working microphone
+scripts/verify_context_conversation.py  real-service context tests:
+                         live-Ollama multi-turn prompts/replies with
+                         recording-proxy evidence, clearing, EN/TA/HI
+                         reply languages, real TTS interrupt timing,
+                         window routing/clear/wake compatibility,
+                         dead-endpoint recovery; BLOCKED for physical
+                         spoken turns without a working microphone
 scripts/manual_smoke_apps.sh  opt-in real-launch smoke test (ALWIN_MANUAL_SMOKE=1)
 scripts/manual_smoke_automation.sh  opt-in real-AT-SPI automation smoke test
                          (ALWIN_AUTOMATION_SMOKE=1)
@@ -705,6 +726,31 @@ second pipeline:
   launchers/verification drivers join the worker before interpreter
   exit (a worker inside vosk/whisper C code during finalization can
   crash the process — observed and fixed).
+
+**Conversation context & routing** (`SessionContext`, `PHASE_*` glue,
+v0.11) — the turn cycle gained one branch and two guards:
+
+- **Routing**: the window injects `_is_action_text` (the deterministic
+  parser's verdict: `UNSUPPORTED`/`EXIT` → conversation) into
+  `ConversationService`. An action reaches `manager.submit()` exactly
+  as before; a conversational turn never touches the manager, records
+  its user turn in the session context, and resolves calmly (with a
+  reply it stays `thinking` → `speaking` → idle; without one it
+  returns to idle immediately — no task records exist to drive it).
+  The reply worker forwards `sent` so the prompt carries the routing
+  clause (never claim an un-sent action; never deny a sent one).
+- **Context confirmation**: `_on_reply_ready` calls
+  `conversation.record_reply()` only after its serial/phase check —
+  history contains exactly the replies the user saw; `_configure_
+  services` applies `context_enabled`/`context_turns` live, and the
+  Settings **Clear conversation** control drops the history
+  immediately.
+- **Stale-TTS guard**: the speak callback closes over the turn serial;
+  `_on_speech_done` drops completions whose serial is stale, and
+  `_cancel_turn` now also stops speech (releasing audio) and exits the
+  `speaking` state — a cancelled turn can never be clobbered by its
+  own late callback, and the real interrupt round-trip measured
+  **117 ms** end-to-end (was ~9 s before the sliced bus wait).
 
 The window also owns the **morning sequence** and the state→scene
 drive (v0.8): a character state maps to exactly one allowlisted scene
@@ -1142,8 +1188,11 @@ the module-set and settings-schema pins were extended) for a total of
 (credential redaction in reply-failure reasons + mic-recovery
 regressions) and v0.10 adds **46 more** — the wake-word service/
 detector/window suites, the `wait_stopped` shutdown contract and the
-21-module security pin — for a total of **1038 tests (1036 passed, 2
-skipped)**. The v0.9 additions were: the six voice-stack suites
+21-module security pin — and v0.11 adds **35 more** (session-context
+recording/bounds/clearing, action-vs-chat routing, routing-honesty
+prompt clauses, window conversational/stale-TTS/clear-control tests,
+the sliced stop-aware bus-wait fix) — for a total of **1073 tests
+(1071 passed, 2 skipped)**. The v0.9 additions were: the six voice-stack suites
 (registry, detection, conversation, capture, recognition, voice output),
 the window voice-cycle suite (real `GLib.idle_add` marshalling pumped
 on the default main context, all devices/models/LLM faked), the

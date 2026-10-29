@@ -1,4 +1,4 @@
-"""Companion settings: small, validated, local (v0.10.0).
+"""Companion settings: small, validated, local (v0.11.0).
 
 Persists the companion's preferences (greeting on/off, name, quiet
 hours, always-on-top, subtitles, and — v0.9 — microphone, language
@@ -64,6 +64,10 @@ SCHEMA: Dict[str, tuple] = {
     # only offers it because the detector genuinely supports it.
     "wake_word_enabled": (bool, False),
     "wake_phrase": (str, "Hey Alwin"),
+    # v0.11 conversational context (in-memory only; never persisted):
+    # on by default, bounded by a recent-exchange budget.
+    "context_enabled": (bool, True),
+    "context_turns": (str, "8"),       # exchanges, clamped 2..20
 }
 
 

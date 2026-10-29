@@ -831,5 +831,186 @@ class WakeWindowTests(unittest.TestCase):
         self.assertEqual(self.window._meter_value(), 0.0)
 
 
+# --------------------------------------------------------------------------- #
+# v0.11.0 context & cancellation (mocked engines — see module docstring)
+# --------------------------------------------------------------------------- #
+
+
+class ContextWindowTests(unittest.TestCase):
+    """Session context and interruption through the REAL window glue."""
+
+    def setUp(self):
+        if Gtk is None or GLib is None:  # pragma: no cover - headless
+            self.skipTest("GTK4 not available")
+
+        from companion.conversation import ConversationService
+        from companion.language_detection import LanguageDetectionService
+        from companion.speech_recognition import SpeechRecognitionService
+        from companion.voice_input import VoiceInputService
+        from companion.window import CompanionWindow
+
+        self.engine = FakeEngine()
+        self.backends = []
+        self.manager = FakeManager()
+        self.llm = FakeLLM()
+        self.voice = FakeVoice()
+        self.conversation = ConversationService(
+            manager=self.manager,
+            detector=LanguageDetectionService(),
+            llm_client=self.llm,
+            replies_enabled=True,
+        )
+
+        def backend_factory():
+            backend = FakeBackend()
+            self.backends.append(backend)
+            return backend
+
+        try:
+            self.window = CompanionWindow(
+                self.manager,
+                renderer=NullRenderer(),
+                voice=self.voice,
+                llm_client=self.llm,
+                voice_input=VoiceInputService(
+                    backend_factory=backend_factory
+                ),
+                recognizer=SpeechRecognitionService(
+                    engine_factory=lambda _size: self.engine
+                ),
+                conversation=self.conversation,
+            )
+        except Exception as exc:  # pragma: no cover - environment-specific
+            self.skipTest(f"cannot construct GTK objects headless: {exc}")
+
+    def tearDown(self):
+        self.window._teardown()
+
+    # -- helpers ---------------------------------------------------------- #
+
+    def mic(self):
+        self.window._on_mic()
+
+    def start_listening(self):
+        self.mic()
+        self.backends[-1].feed(b"\x01\x40" * 16000)
+        self.mic()
+
+    def bubble(self):
+        return self.window._bubble_text
+
+    # -- parser-based routing (production predicate) ---------------------- #
+
+    def test_is_action_text_uses_the_trusted_parser(self):
+        self.assertTrue(self.window._is_action_text(
+            "Create a folder named Notes in Documents"))
+        self.assertFalse(self.window._is_action_text(
+            "What are its advantages?"))
+        self.assertFalse(self.window._is_action_text("exit"))
+        # A translated command the English parser cannot classify is
+        # chat (honest limitation, documented) — never an action:
+        self.assertFalse(self.window._is_action_text(
+            "என் உலாவியைத் திற."))
+
+    # -- conversational turns through the window -------------------------- #
+
+    def test_conversational_turn_never_reaches_the_manager(self):
+        self.conversation._is_action = lambda _t: False   # chat verdict
+        self.llm.response = "Sure — dynamic typing, big ecosystem, clarity."
+        self.engine.text = "What are its advantages?"
+        self.engine.language = "en"
+        self.window._settings["spoken_responses"] = True
+        self.window._apply_settings()
+        self.start_listening()
+        pump_until(lambda: self.window._voice_phase == "off", timeout=5.0)
+        # Nothing was submitted or executed — and the reply path ran:
+        self.assertEqual(self.manager.submissions, [])
+        self.assertEqual(len(self.llm.calls), 1)
+        self.assertIn("ecosystem", self.bubble().lower())
+        # Both turns are in the session context now:
+        roles = [t.role for t in self.conversation.context.snapshot()]
+        self.assertIn("user", roles)
+        self.assertIn("assistant", roles)
+
+    def test_conversational_reply_failure_does_not_claim_sent(self):
+        self.conversation._is_action = lambda _t: False
+        self.engine.text = "Tell me about Python."
+        self.llm.error = RuntimeError("connection refused")
+        self.window._settings["spoken_responses"] = True
+        self.window._apply_settings()
+        self.start_listening()
+        pump_until(lambda: self.window._voice_phase == "off", timeout=5.0)
+        self.assertEqual(self.manager.submissions, [])
+        self.assertIn("couldn't write a reply", self.bubble())
+        self.assertNotIn("still sent", self.bubble())
+        # The failed reply never entered the context:
+        self.assertFalse(any(t.role == "assistant"
+                             for t in self.conversation.context.snapshot()))
+
+    def test_conversational_turn_without_replies_returns_to_calm(self):
+        self.conversation._is_action = lambda _t: False
+        self.engine.text = "Hello Alwin"
+        # spoken replies OFF (default): nothing drives task states, so
+        # the character must return to calm instead of hanging around.
+        self.start_listening()
+        pump_until(lambda: self.window._voice_phase == "off", timeout=5.0)
+        self.assertEqual(self.manager.submissions, [])
+        self.assertEqual(self.window.controller.state, "idle")
+        self.assertEqual(len(self.llm.calls), 0)
+
+    # -- clear control ---------------------------------------------------- #
+
+    def test_clear_context_control_empties_history_and_says_so(self):
+        self.conversation.context.add_user("old question", "en")
+        self.conversation.context.add_assistant("old answer")
+        self.window._on_clear_context()
+        self.assertTrue(self.conversation.context.empty)
+        self.assertIn("Conversation cleared", self.bubble())
+
+    def test_context_settings_apply_live(self):
+        self.window._settings["context_enabled"] = False
+        self.window._settings["context_turns"] = "4"
+        self.window._apply_settings()
+        self.assertFalse(self.conversation.context_enabled)
+        self.assertEqual(self.conversation.context.exchanges, 4)
+        self.window._settings["context_enabled"] = True
+        self.window._apply_settings()
+        self.assertTrue(self.conversation.context_enabled)
+
+    # -- stale TTS completion (Phase 5) ----------------------------------- #
+
+    def test_stale_tts_completion_cannot_clobber_a_newer_turn(self):
+        self.window._settings["spoken_responses"] = True
+        self.window._apply_settings()
+        self.start_listening()
+        pump_until(lambda: self.window._voice_phase == "speaking",
+                   timeout=5.0)
+        stale_serial = self.window._turn_serial
+        # A new turn begins while the old audio's callback is in flight:
+        self.window._turn_serial += 1
+        self.window._voice_phase = self.window.PHASE_LISTENING
+        self.window.controller.enter("listening", reason="new turn")
+        # The old engine completion arrives late (its closure carries
+        # the stale serial) — it must be dropped entirely.
+        self.voice._on_done(True, None)
+        pump_until(lambda: False, timeout=0.2)
+        self.assertEqual(self.window._voice_phase,
+                         self.window.PHASE_LISTENING)
+        self.assertEqual(self.window.controller.state, "listening")
+        self.assertNotEqual(stale_serial, self.window._turn_serial)
+
+    def test_cancel_turn_also_stops_speech_and_releases_it(self):
+        self.window._settings["spoken_responses"] = True
+        self.window._apply_settings()
+        self.start_listening()
+        pump_until(lambda: self.window._voice_phase == "speaking",
+                   timeout=5.0)
+        self.window._cancel_turn()          # e.g. mic disabled mid-speech
+        self.assertEqual(self.window.voice.stopped, 1)
+        self.assertEqual(self.window._voice_phase,
+                         self.window.PHASE_OFF)
+        self.assertEqual(self.window.controller.state, "idle")
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

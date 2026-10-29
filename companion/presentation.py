@@ -1,4 +1,4 @@
-"""Companion presentation: pure view-model for the character window (v0.10.0).
+"""Companion presentation: pure view-model for the character window (v0.11.0).
 
 Turns the character controller's snapshot, the greeting, the voice
 status and the minimal task status into small display-ready
@@ -158,6 +158,11 @@ def settings_view(settings: dict) -> dict:
         "wake_phrase": _bounded(
             settings.get("wake_phrase", "Hey Alwin"), 40
         ) or "Hey Alwin",
+        # v0.11 conversation context (in-memory, bounded).
+        "context_enabled": bool(settings.get("context_enabled", True)),
+        "context_turns": _bounded(
+            settings.get("context_turns", "8"), 2
+        ) or "8",
     }
 
 

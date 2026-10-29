@@ -99,13 +99,13 @@ VOICE_MODULE_IMPORTS = {
     "language_registry.py": {"__future__", "dataclasses", "typing"},
     "language_detection.py": {"__future__", "threading", "dataclasses",
                               "typing", "langdetect", "companion"},
-    "conversation.py": {"__future__", "dataclasses", "typing",
-                        "companion"},
+    "conversation.py": {"__future__", "collections", "dataclasses",
+                        "typing", "companion"},
     "voice_input.py": {"__future__", "threading", "time", "dataclasses",
                        "typing"},
     "speech_recognition.py": {"__future__", "os", "threading",
                               "dataclasses", "typing"},
-    "voice_output.py": {"__future__", "threading", "dataclasses",
+    "voice_output.py": {"__future__", "threading", "time", "dataclasses",
                         "typing", "companion"},
     # v0.10.0 wake word: stdlib streaming scaffolding only at module
     # level (bounded queue + worker + regex acceptance pattern).
@@ -311,12 +311,15 @@ class CompanionSourceTests(unittest.TestCase):
 
     def test_conversation_speaks_only_through_the_duck_typed_manager(self):
         # The conversation module is engine-free: it must not import
-        # taskui, ai_core or ai_runtime — manager and LLM come injected.
+        # taskui, ai_core or ai_runtime — manager, LLM and the v0.11
+        # action classifier all come injected (collections.deque is the
+        # bounded, memory-only session context).
         info = collect(COMPANION / "conversation.py")
         roots = {i.split(".")[0] for i in info.full_module_imports}
         self.assertLessEqual(
             roots,
-            {"__future__", "dataclasses", "typing", "companion"},
+            {"__future__", "collections", "dataclasses", "typing",
+             "companion"},
         )
         # The shared language instruction must actually appear (one
         # template, language as data — not per-language assistants).

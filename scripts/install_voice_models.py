@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Explicit speech-model installer for ALWIN FUSION (v0.10.0).
+"""Explicit speech-model installer for ALWIN FUSION (v0.11.0).
 
 The companion **never** downloads anything: ``companion.speech_recognition``
 loads models with ``local_files_only=True``, so a missing model is an

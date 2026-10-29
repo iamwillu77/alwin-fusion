@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Explicit wake-word model installer for ALWIN FUSION (v0.10.0).
+"""Explicit wake-word model installer for ALWIN FUSION (v0.11.0).
 
 The companion **never** downloads anything: the wake-word detector
 loads its model from a fixed local path and honestly reports an

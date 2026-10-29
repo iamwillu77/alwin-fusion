@@ -216,6 +216,68 @@ class SpeechFlowTests(unittest.TestCase):
         self.assertIn("No audio output device", error)
         self.assertIn("No audio output device", rec.voice.status)
 
+    def test_bus_wait_wakes_promptly_on_stop(self):
+        # v0.11 real-hardware bug: a single long timed_pop blocked the
+        # full ~9 s deadline after stop() destroyed the pipeline (bus
+        # never delivers EOS for a NULLed pipeline) — on_done arrived
+        # seconds late. The sliced wait must return within its slice.
+        import time as _time
+
+        from companion.voice_output import await_playback_end
+
+        class NeverBus:
+            def timed_pop_filtered(self, _ns, _types):
+                return None            # playback never finishes here
+
+        stopped = threading.Event()
+        t0 = _time.monotonic()
+        outcome, message = await_playback_end(
+            NeverBus(), total_seconds=0.4, stopped=stopped,
+            eos_or_error=object(), second_ns=1_000_000,
+        )
+        self.assertEqual(outcome, "timeout")
+        self.assertLess(_time.monotonic() - t0, 2.0)
+
+        stopped.set()                  # user interrupts
+        t0 = _time.monotonic()
+        outcome, message = await_playback_end(
+            NeverBus(), total_seconds=30.0, stopped=stopped,
+            eos_or_error=object(), second_ns=1_000_000,
+        )
+        latency = _time.monotonic() - t0
+        self.assertEqual(outcome, "stopped")
+        self.assertLess(latency, 0.6, "stop must wake within a slice")
+
+    def test_bus_wait_returns_messages_and_slices_the_deadline(self):
+        import time as _time
+
+        from companion.voice_output import await_playback_end
+
+        class CountingBus:
+            def __init__(self, deliver_after=None, message=None):
+                self.calls = 0
+                self.deliver_after = deliver_after
+                self.message = message
+
+            def timed_pop_filtered(self, _ns, _types):
+                self.calls += 1
+                if (self.deliver_after is not None
+                        and self.calls >= self.deliver_after):
+                    return self.message
+                _time.sleep(0.01)
+                return None
+
+        stopped = threading.Event()
+        fake_msg = object()
+        bus = CountingBus(deliver_after=3, message=fake_msg)
+        outcome, message = await_playback_end(
+            bus, total_seconds=5.0, stopped=stopped,
+            eos_or_error=object(), second_ns=1_000_000,
+        )
+        self.assertEqual(outcome, "message")
+        self.assertIs(message, fake_msg)
+        self.assertGreaterEqual(bus.calls, 3, "wait is sliced, not one shot")
+
     def test_a_player_that_raises_still_completes_the_turn(self):
         # Real-GUI verification found the GStreamer player raising
         # (wrong appsrc signal); the turn must still complete with an

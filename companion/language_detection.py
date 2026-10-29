@@ -1,4 +1,4 @@
-"""Language detection for recognized/typed text (v0.10.0).
+"""Language detection for recognized/typed text (v0.11.0).
 
 Combines three signals — never a fixed keyword list:
 
