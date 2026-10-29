@@ -1,4 +1,4 @@
-"""Startup greeting for the Alwin companion (v0.9.0).
+"""Startup greeting for the Alwin companion (v0.9.1).
 
 A small, **text-first** greeting engine with the rules the milestone
 requires:

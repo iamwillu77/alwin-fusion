@@ -256,6 +256,56 @@ class ReplyTests(unittest.TestCase):
                                           llm_client=llm, replies_enabled=True)
             self.assertIsNone(service.reply("hello", "en"))
 
+
+class ReplyReasonTests(unittest.TestCase):
+    """v0.9.1: every reply failure carries an honest, bounded reason."""
+
+    def service(self, *, enabled=True, llm=None):
+        return ConversationService(manager=FakeManager(), llm_client=llm,
+                                   replies_enabled=enabled)
+
+    def test_success_has_no_reason(self):
+        service = self.service(llm=FakeLLM(response="Sure — opening it."))
+        reply, reason = service.reply_with_reason("open it", "en")
+        self.assertEqual(reply, "Sure — opening it.")
+        self.assertIsNone(reason)
+
+    def test_disabled_replies_report_the_setting(self):
+        service = self.service(enabled=False, llm=FakeLLM())
+        reply, reason = service.reply_with_reason("hi", "en")
+        self.assertIsNone(reply)
+        self.assertIn("Settings", reason)
+
+    def test_missing_client_points_at_the_flag(self):
+        service = self.service(llm=None)
+        service.set_replies_enabled(True)
+        reply, reason = service.reply_with_reason("hi", "en")
+        self.assertIsNone(reply)
+        self.assertIn("--llm", reason)
+
+    def test_generation_error_is_named_not_hidden(self):
+        service = self.service(
+            llm=FakeLLM(raise_error=RuntimeError("connection refused"))
+        )
+        reply, reason = service.reply_with_reason("hi", "en")
+        self.assertIsNone(reply)
+        self.assertIn("failed", reason)
+        self.assertIn("connection refused", reason)
+
+    def test_empty_and_unusable_responses_are_distinguished(self):
+        empty = self.service(llm=FakeLLM(response="  \n "))
+        self.assertIn("empty", empty.reply_with_reason("hi", "en")[1])
+        junk = self.service(llm=FakeLLM(non_string=True))
+        self.assertIn("unusable", junk.reply_with_reason("hi", "en")[1])
+
+    def test_reasons_are_bounded(self):
+        huge = "x" * 5000
+        service = self.service(
+            llm=FakeLLM(raise_error=RuntimeError(huge))
+        )
+        _reply, reason = service.reply_with_reason("hi", "en")
+        self.assertLessEqual(len(reason), 260)
+
     def test_reply_text_is_never_submitted_to_the_manager(self):
         manager = FakeManager()
         llm = FakeLLM(response="Sure, opening it now.")

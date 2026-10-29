@@ -1,4 +1,4 @@
-"""Microphone capture for the companion (v0.9.0) — memory only, honest.
+"""Microphone capture for the companion (v0.9.1) — memory only, honest.
 
 Opens the default microphone through **GStreamer** (``autoaudiosrc`` →
 16 kHz mono S16 PCM into an ``appsink``) and buffers samples *in RAM

@@ -1,4 +1,4 @@
-"""Companion window: the GTK4 view for the Alwin character (v0.9.0).
+"""Companion window: the GTK4 view for the Alwin character (v0.9.1).
 
 A lightweight, persistent window that shows the character, a speech
 bubble, a minimal task status and a small control row.  It is a **thin
@@ -879,18 +879,26 @@ class CompanionWindow:
 
     def _reply_worker(self, text: str, language, serial: int) -> None:
         """Generate the optional reply off the GTK thread, then marshal."""
-        reply = self.conversation.reply(text, language)
-        GLib.idle_add(self._on_reply_ready, reply, language, serial)
+        reply, reason = self.conversation.reply_with_reason(text, language)
+        GLib.idle_add(self._on_reply_ready, reply, reason, language, serial)
 
-    def _on_reply_ready(self, reply, language, serial: int) -> bool:
-        """A reply (or its honest absence) arrived on the main loop."""
+    def _on_reply_ready(self, reply, reason, language, serial: int) -> bool:
+        """A reply (or its honest failure) arrived on the main loop."""
         if (self._closing or serial != self._turn_serial
                 or self._voice_phase != self.PHASE_REPLYING):
             return False  # cancelled turn: no speech, nothing claimed
         if not reply:
-            # No reply: LLM missing/failed/disabled — the task stands,
-            # we simply say nothing (never a fake acknowledgement).
+            # No reply: the local model failed, returned nothing, or is
+            # not attached.  Say so honestly (v0.9.1) instead of going
+            # quiet — the *task* was already submitted and stands; only
+            # the optional acknowledgement is missing.
             self._voice_phase = self.PHASE_OFF
+            detail = str(reason or "no reply was generated")[:300]
+            self._show_bubble(
+                f"I couldn't write a reply ({detail}). Your request "
+                "was still sent.",
+                presentation.TONE_ATTENTION,
+            )
             self._return_to_calm()
             return False
         self._show_bubble(reply, presentation.TONE_CALM)

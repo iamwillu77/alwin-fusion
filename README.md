@@ -2,7 +2,7 @@
 
 **Open-source, offline-first AI-native operating system — in progress.**
 
-Version **0.9.0** · Milestone: **Multilingual Voice Intelligence**
+Version **0.9.1** · Milestone: **End-to-End Voice Intelligence**
 
 Alwin Fusion lets you control your computer through natural-language
 commands. v0.9 gives **Alwin**, the persistent, lightweight desktop
@@ -629,7 +629,11 @@ The mic button is **push-to-talk** — one click cycles the whole turn:
 6. with **Spoken replies** enabled (Settings, off by default) and
    `--llm`, the local model drafts a short acknowledgement *in the
    detected language* on a worker thread and espeak-ng speaks it; the
-   character enters `speaking` and returns to idle on completion truth,
+   character enters `speaking` and returns to idle on completion truth.
+   If the model fails, returns nothing, or is not attached, the bubble
+   says exactly that (v0.9.1: "I couldn't write a reply (the local AI
+   model failed: …). Your request was still sent." — never a fake
+   reply, and the microphone stays usable for the next turn),
 7. click **Mic** during recognition/reply → the turn is **cancelled**:
    the in-flight result is discarded by generation counter and can never
    be delivered late; during speech it interrupts playback.
@@ -637,7 +641,10 @@ The mic button is **push-to-talk** — one click cycles the whole turn:
 Failure paths are all honest: no microphone → an explanatory bubble;
 no installed model → the exact install command; no espeak/audio device →
 the text reply still appears (nothing claims to have been spoken); no
-LLM → the task is submitted and no reply is faked. `NullVoice` (still
+LLM, an unreachable Ollama, or an empty model response → an explanatory
+bubble (v0.9.1) that names the stage and confirms the request was still
+sent — **never** a fabricated reply, and the microphone is never left
+disabled by an error. `NullVoice` (still
 available for tests/injection) never claims to have spoken.
 
 **Push-to-talk only in v0.9** — there is no wake word (the Settings

@@ -1,4 +1,4 @@
-"""Character state controller for the Alwin companion (v0.9.0).
+"""Character state controller for the Alwin companion (v0.9.1).
 
 This module owns the companion character's *current animation state*
 and the validated transition graph between states.  It is deliberately

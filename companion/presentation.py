@@ -1,4 +1,4 @@
-"""Companion presentation: pure view-model for the character window (v0.9.0).
+"""Companion presentation: pure view-model for the character window (v0.9.1).
 
 Turns the character controller's snapshot, the greeting, the voice
 status and the minimal task status into small display-ready

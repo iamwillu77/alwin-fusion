@@ -131,9 +131,15 @@ class FakeLLM:
     def __init__(self, response="நல்லது, இப்போது திறக்கிறேன்."):
         self.response = response
         self.calls = []
+        self.error = None       # raised instead of answering
+        self.block = None       # threading.Event to hold generate()
 
     def generate(self, prompt, *, system=None, **kwargs):
         self.calls.append({"prompt": prompt, "system": system})
+        if self.block is not None:
+            self.block.wait(timeout=5.0)
+        if self.error is not None:
+            raise self.error
         return self.response
 
 
@@ -250,9 +256,11 @@ class VoiceWindowTests(unittest.TestCase):
         self.window._on_mic()
 
     def start_listening(self, pcm: bytes = b"\x01\x40" * 16000):
+        before = len(self.backends)
         self.mic()                      # idle -> listening
         self.assertEqual(self.window._voice_phase, "listening")
-        self.backends[0].feed(pcm)      # one second of (non-silent) audio
+        self.backends[-1].feed(pcm)     # one second of (non-silent) audio
+        self.assertEqual(len(self.backends), before + 1)  # one new session
         self.mic()                      # listening -> recognizing
         self.assertEqual(self.window._voice_phase, "recognizing")
 
@@ -445,7 +453,9 @@ class VoiceWindowTests(unittest.TestCase):
         self.assertEqual(self.llm.calls, [])
         self.assertEqual(self.voice.spoken, [])
 
-    def test_llm_failure_means_silence_not_a_fake_acknowledgement(self):
+    def test_llm_failure_is_an_honest_bubble_not_a_fake_reply(self):
+        # v0.9.1: an unusable model response must be *explained*, not
+        # silently dropped — but never faked, and never resubmitted.
         self.llm.response = None            # duck-typed failure signal
         self.enable_spoken_replies()
         self.start_listening()
@@ -453,6 +463,87 @@ class VoiceWindowTests(unittest.TestCase):
         self.assertEqual(len(self.manager.submissions), 1)  # task stands
         self.assertEqual(self.voice.spoken, [])
         self.assertNotEqual(self.window.controller.state, "speaking")
+        self.assertIn("couldn't write a reply", self.bubble())
+        self.assertIn("still sent", self.bubble())
+
+    def test_ollama_connection_failure_is_explained_and_mic_recovers(self):
+        self.llm.error = RuntimeError("Ollama unreachable at "
+                                      "http://localhost:11434")
+        self.enable_spoken_replies()
+        self.start_listening()
+        pump_until(lambda: self.window._voice_phase == "off", timeout=5.0)
+        # Distinguished from ASR: the transcript WAS understood, the
+        # model failed, and the bubble says exactly that.
+        self.assertEqual(len(self.manager.submissions), 1)
+        self.assertIn("the local AI model failed", self.bubble())
+        self.assertIn("Ollama unreachable", self.bubble())
+        self.assertEqual(self.window._voice_phase, "off")
+        # Errors must never permanently disable the microphone: the
+        # very next click starts a fresh, working turn.
+        self.llm.error = None
+        self.mic()
+        self.assertEqual(self.window._voice_phase, "listening")
+        self.mic()   # stop & send (buffer empty -> honest silence refusal)
+        self.assertIn("didn't hear anything", self.bubble())
+
+    def test_empty_model_response_is_explained(self):
+        self.llm.response = "   "
+        self.enable_spoken_replies()
+        self.start_listening()
+        pump_until(lambda: self.window._voice_phase == "off", timeout=5.0)
+        self.assertIn("empty response", self.bubble())
+        self.assertEqual(len(self.manager.submissions), 1)
+
+    def test_spoken_replies_without_an_llm_hint_at_the_flag(self):
+        # spoken_responses on but no client attached (user forgot --llm):
+        # the bubble explains the fix instead of staying mysteriously quiet.
+        self.window.conversation.llm_client = None
+        self.enable_spoken_replies()
+        self.start_listening()
+        pump_until(lambda: self.window._voice_phase == "off", timeout=5.0)
+        self.assertIn("--llm", self.bubble())
+        self.assertEqual(len(self.manager.submissions), 1)
+        self.assertEqual(self.voice.spoken, [])
+
+    def test_late_reply_from_a_cancelled_turn_is_dropped(self):
+        self.llm.block = threading.Event()
+        self.enable_spoken_replies()
+        self.start_listening()
+        pump_until(
+            lambda: self.window._voice_phase == "replying", timeout=5.0
+        )
+        self.mic()                      # cancel while the model thinks
+        self.assertEqual(self.window._voice_phase, "off")
+        self.assertIn("cancelled", self.bubble())
+        self.llm.block.set()            # the model answers far too late
+        pump_until(lambda: False, timeout=0.4)
+        self.assertEqual(self.voice.spoken, [])      # never spoken
+        self.assertNotEqual(self.window.controller.state, "speaking")
+
+    def test_mic_recovers_after_a_recognition_failure(self):
+        self.engine.error = RuntimeError("model missing")
+        self.start_listening()
+        pump_until(lambda: self.window._voice_phase == "off", timeout=5.0)
+        self.assertIn("model missing", self.bubble())
+        self.engine.error = None        # problem fixed
+        self.mic()
+        self.assertEqual(self.window._voice_phase, "listening")
+        self.mic()                      # empty stop -> honest refusal
+        self.assertIn("didn't hear anything", self.bubble())
+
+    def test_two_consecutive_turns_work_end_to_end(self):
+        self.start_listening()
+        pump_until(lambda: self.window._voice_phase == "off", timeout=5.0)
+        self.assertEqual(len(self.manager.submissions), 1)
+        # With a real manager the task records would drive the character
+        # on (planning → …) and back to idle when the task ends; the
+        # headless FakeManager sends none, so emulate the calm return.
+        self.assertEqual(self.window.controller.state, "thinking")
+        self.window.controller.enter("idle", reason="task over")
+        self.start_listening()
+        pump_until(lambda: self.window._voice_phase == "off", timeout=5.0)
+        self.assertEqual(len(self.manager.submissions), 2)
+        self.assertEqual(self.window.controller.state, "thinking")
 
     def test_user_can_cancel_speech_with_the_mic(self):
         self.enable_spoken_replies()

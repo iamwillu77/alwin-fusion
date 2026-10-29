@@ -1,6 +1,6 @@
 # Alwin Fusion — Architecture
 
-Version: 0.9.0 — Milestone: Multilingual Voice Intelligence
+Version: 0.9.1 — Milestone: End-to-End Voice Intelligence
 
 Alwin Fusion is an open-source, offline-first AI-native operating
 system in the making. This document describes what exists today, how

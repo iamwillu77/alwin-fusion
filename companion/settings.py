@@ -1,4 +1,4 @@
-"""Companion settings: small, validated, local (v0.9.0).
+"""Companion settings: small, validated, local (v0.9.1).
 
 Persists the companion's preferences (greeting on/off, name, quiet
 hours, always-on-top, subtitles, and — v0.9 — microphone, language

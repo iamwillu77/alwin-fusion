@@ -1,4 +1,4 @@
-"""Shared conversation pipeline for typed and spoken input (v0.9.0).
+"""Shared conversation pipeline for typed and spoken input (v0.9.1).
 
 One service takes *any* user utterance — typed in the task window or
 recognized from the microphone — and drives it through exactly the
@@ -37,7 +37,7 @@ Trust and safety rules pinned by tests:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Optional, Tuple
 
 from companion.language_detection import DetectionResult, LanguageDetectionService
 from companion.language_registry import SUPPORTED_CODES, get
@@ -251,10 +251,30 @@ class ConversationService:
 
         Failure, missing LLM, or replies-disabled all return ``None``:
         the caller shows/says nothing rather than an English fallback
-        the user did not ask for.
+        the user did not ask for.  Use :meth:`reply_with_reason` when
+        the caller wants to *explain* an honest failure to the user.
         """
-        if not self.reply_available:
-            return None
+        return self.reply_with_reason(text, language)[0]
+
+    def reply_with_reason(
+        self, text: str, language: Optional[str]
+    ) -> Tuple[Optional[str], Optional[str]]:
+        """Like :meth:`reply`, plus a short honest failure reason.
+
+        Returns ``(reply, None)`` on success and ``(None, reason)`` on
+        failure, where *reason* is a bounded, user-presentable
+        explanation (``"replies are turned off in Settings"``,
+        ``"no local AI model is attached (start with --llm)"``,
+        ``"the local AI model failed: …"``,
+        ``"the local AI model returned an empty response"``).  The
+        reason is diagnostic text for the UI — never a fabricated
+        reply, and never used when a real reply exists.
+        """
+        if not self.replies_enabled:
+            return None, "replies are turned off in Settings"
+        if self.llm_client is None:
+            return None, ("no local AI model is attached "
+                          "(start Alwin with --llm)")
         spec = get(language)
         system = _system_prompt(spec)
         try:
@@ -262,16 +282,19 @@ class ConversationService:
                 prompt=text,
                 system=system,
             )
-        except Exception:  # noqa: BLE001 - honest absence, no crash
-            return None
+        except Exception as exc:  # noqa: BLE001 - honest absence, no crash
+            detail = str(exc).strip()[:160] or exc.__class__.__name__
+            return None, f"the local AI model failed: {detail}"
         if not isinstance(out, str):
-            return None
+            return None, ("the local AI model returned an unusable "
+                          "response")
         reply = " ".join(out.split())
         if not reply:
-            return None
+            return None, ("the local AI model returned an empty "
+                          "response")
         # Bound what we will ever display/speak (mirrors the speech
         # bubble limit): a runaway generation is truncated, not shown.
-        return reply[:600]
+        return reply[:600], None
 
 
 def _system_prompt(spec) -> str:

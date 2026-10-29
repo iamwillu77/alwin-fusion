@@ -1,6 +1,6 @@
 # Alwin Fusion — Security Model and Limitations
 
-Version: 0.9.0 — Milestone: Multilingual Voice Intelligence
+Version: 0.9.1 — Milestone: End-to-End Voice Intelligence
 
 This document states what the prototype defends against, how, and —
 importantly — **what it does not defend against**. Passing tests does

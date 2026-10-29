@@ -1,4 +1,4 @@
-"""Entry point for the Alwin companion (v0.9.0).
+"""Entry point for the Alwin companion (v0.9.1).
 
 Launch the companion window::
 

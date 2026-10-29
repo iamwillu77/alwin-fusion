@@ -1,4 +1,4 @@
-"""Alwin Companion — a friendly desktop character for ALWIN FUSION (v0.9.0).
+"""Alwin Companion — a friendly desktop character for ALWIN FUSION (v0.9.1).
 
 The companion is a **presentation layer on top of the existing trusted
 task experience**.  It adds a persistent, lightweight 2D character
