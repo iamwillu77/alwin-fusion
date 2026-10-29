@@ -306,6 +306,36 @@ class ReplyReasonTests(unittest.TestCase):
         _reply, reason = service.reply_with_reason("hi", "en")
         self.assertLessEqual(len(reason), 260)
 
+    def test_credentials_never_survive_into_the_reason(self):
+        # The configured Ollama URL may carry userinfo; a future client
+        # may carry a bearer token. Both must be scrubbed before the
+        # reason can reach a bubble or a log.
+        cases = [
+            ("error at http://user:secret@localhost:11434: refused",
+             ["secret", "user:"], ["***@localhost"]),
+            ("request failed: Authorization: Bearer abc123.def456",
+             ["abc123.def456"], ["[redacted]"]),
+            ("rejected: token: sk-1234567890",
+             ["sk-1234567890"], ["[redacted]"]),
+        ]
+        for raw, must_not, must_have in cases:
+            service = self.service(
+                llm=FakeLLM(raise_error=RuntimeError(raw))
+            )
+            reply, reason = service.reply_with_reason("hi", "en")
+            self.assertIsNone(reply)
+            for needle in must_not:
+                self.assertNotIn(needle, reason, raw)
+            for needle in must_have:
+                self.assertIn(needle, reason, raw)
+
+    def test_ordinary_error_text_passes_through_unmangled(self):
+        service = self.service(
+            llm=FakeLLM(raise_error=RuntimeError("connection refused"))
+        )
+        _reply, reason = service.reply_with_reason("hi", "en")
+        self.assertIn("connection refused", reason)
+
     def test_reply_text_is_never_submitted_to_the_manager(self):
         manager = FakeManager()
         llm = FakeLLM(response="Sure, opening it now.")

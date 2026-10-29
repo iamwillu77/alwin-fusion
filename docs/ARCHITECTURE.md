@@ -191,7 +191,13 @@ companion/                 v0.9 Alwin companion (presentation layer only)
                          generation with the language instruction prompt;
                          engine-free (no GTK, no LLM import at module
                          level); replies are display/speech only and are
-                         never re-submitted
+                         never re-submitted. v0.9.1 adds
+                         reply_with_reason(): every reply failure yields
+                         a bounded, user-presentable reason (settings
+                         off / --llm missing / model error / empty /
+                         unusable) with credential-looking material
+                         (URL userinfo, bearer/token labels) scrubbed by
+                         a pure-string redactor — no new imports
     voice_output.py      v0.9 local TTS: espeak-ng through ctypes (full
                          argtypes — a naive call would crash) + GStreamer
                          appsrc→alsasink playback on a worker; per-
@@ -218,6 +224,17 @@ scripts/install_voice_models.py  explicit confirm-first speech-model
                          installer (--status/--model/--yes): reports size
                          and free space, downloads via huggingface_hub —
                          the application itself never downloads anything
+scripts/fetch_fleurs_samples.py  small CC-BY-4.0 FLEURS evaluation set
+                         (~10 samples x 15 languages; rows-API + budget-
+                         capped tar-range fallback; resumable)
+scripts/evaluate_voice_languages.py  reproducible per-language A/B/C
+                         evaluation (WER/CER, detection accuracy, reply
+                         language, TTS/playback; recording fake manager —
+                         fixtures can never create real tasks)
+scripts/verify_voice_e2e.py  real-device Tests A-E (real ASR/Ollama/
+                         TTS/mic; file-fed capture labeled as such)
+scripts/verify_voice_gui.py  real-GUI end-to-end turn (temp APP_ID,
+                         sandbox state; recording manager)
 scripts/manual_smoke_apps.sh  opt-in real-launch smoke test (ALWIN_MANUAL_SMOKE=1)
 scripts/manual_smoke_automation.sh  opt-in real-AT-SPI automation smoke test
                          (ALWIN_AUTOMATION_SMOKE=1)

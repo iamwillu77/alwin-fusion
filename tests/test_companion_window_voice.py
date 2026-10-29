@@ -434,6 +434,12 @@ class VoiceWindowTests(unittest.TestCase):
         self.assertIn("Speech failed", self.bubble())
         self.assertIn("No audio output device", self.bubble())
         self.assertEqual(self.window._voice_phase, "off")
+        # A playback failure must never leave the mic disabled: the
+        # very next click starts a fresh turn.
+        self.mic()
+        self.assertEqual(self.window._voice_phase, "listening")
+        self.mic()          # empty stop -> honest silence refusal
+        self.assertIn("didn't hear anything", self.bubble())
 
     def test_unavailable_voice_engine_means_no_speech_attempt(self):
         self.voice = FakeVoice(available=False)   # engine went away
@@ -559,6 +565,10 @@ class VoiceWindowTests(unittest.TestCase):
             lambda: self.window._voice_phase == "off", timeout=5.0
         )
         self.assertEqual(self.window.controller.state, "idle")
+        # Cancellation is a supported path: the mic must work right after.
+        self.mic()
+        self.assertEqual(self.window._voice_phase, "listening")
+        self.mic()
 
     # -- settings ---------------------------------------------------------- #
 

@@ -581,6 +581,14 @@ New surface introduced by v0.6, stated honestly:
      never an execution (the bool/str-only schema pin now covers
      them). The `mute_voice` placeholder key was removed rather than
      repurposed.
+   - **Reply-failure reasons are scrubbed before display** (v0.9.1):
+     embedded exception text is bounded and stripped of URL userinfo
+     (`scheme://user:pass@`) and bearer/token/key-style secrets by a
+     pure-string redactor in `conversation.py` (no new imports; pinned
+     by tests), so a misconfigured endpoint URL cannot leak credentials
+     into a bubble or a log. Reasons are diagnostic text only — they
+     never substitute a reply, and the failure bubble states the task
+     was submitted, never that it executed.
    - **The `speaking` state adds no capability**: it is a renderer
      pose with the same structural guarantees as every other state
      (only entered on valid transitions, auto-returns after 120 s,
@@ -905,10 +913,13 @@ New surface introduced by v0.6, stated honestly:
       without it, an honest error — never an invented transcript,
     - speech requires local espeak + an audio device and is **off by
       default**; a missing engine keeps `NullVoice`'s honest contract,
-    - recognition quality is language-dependent (measured: 14/15
-      languages usable with the default model; Telugu/Malayalam/
-      Bengali weak with all current sizes, Urdu needs the forced
-      language) — transcripts are shown verbatim so errors are visible
+    - recognition quality is language-dependent (measured on FLEURS
+      human speech, 10 samples/language, default `small`, auto-decode:
+      es/en/pt/fr/ru/id/ar/zh strong, ta/hi usable-but-noisy
+      WER 0.44/0.45, te/ml/kn/ur/bn weak with WER ≥ 0.95; a
+      25-configuration probe proved no setting rescues te/ml/bn —
+      a model limitation, not configuration) — transcripts are shown
+      verbatim so errors are visible
       and correctable, and typing remains fully supported. No
       15-language end-to-end perfection is claimed,
     - the `speaking` animation is simple mouth motion (no lip-sync

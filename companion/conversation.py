@@ -268,7 +268,9 @@ class ConversationService:
         ``"the local AI model failed: …"``,
         ``"the local AI model returned an empty response"``).  The
         reason is diagnostic text for the UI — never a fabricated
-        reply, and never used when a real reply exists.
+        reply, and never used when a real reply exists.  Embedded
+        exception detail is scrubbed (credentials, bearer tokens) and
+        bounded before it can reach a bubble or a log.
         """
         if not self.replies_enabled:
             return None, "replies are turned off in Settings"
@@ -283,7 +285,8 @@ class ConversationService:
                 system=system,
             )
         except Exception as exc:  # noqa: BLE001 - honest absence, no crash
-            detail = str(exc).strip()[:160] or exc.__class__.__name__
+            detail = _redact_secrets(str(exc))[:160]
+            detail = detail.strip() or exc.__class__.__name__
             return None, f"the local AI model failed: {detail}"
         if not isinstance(out, str):
             return None, ("the local AI model returned an unusable "
@@ -295,6 +298,57 @@ class ConversationService:
         # Bound what we will ever display/speak (mirrors the speech
         # bubble limit): a runaway generation is truncated, not shown.
         return reply[:600], None
+
+
+def _redact_secrets(message: str) -> str:
+    """Scrub credential-looking material from a display-bound message.
+
+    Failure reasons embed third-party exception text; before that text
+    can reach a speech bubble or a log it is stripped of URL userinfo
+    (``scheme://user:pass@host``) and of bearer-token / key=value style
+    secrets.  Pure string scanning — no new imports (the module's
+    import allowlist is pinned by the security suite).  Case-insensitive
+    label matching is only attempted on pure-ASCII messages, where
+    ``lower()`` provably preserves indices.
+    """
+    if not message:
+        return message
+    # 1) URL userinfo, forward-scanning so multiple URLs are covered.
+    out, pos = message, 0
+    while True:
+        i = out.find("://", pos)
+        if i < 0:
+            break
+        start = i + 3
+        at = out.find("@", start)
+        slash = out.find("/", start)
+        space = out.find(" ", start)
+        stops = [x for x in (slash, space) if x >= 0]
+        limit = min(stops) if stops else len(out)
+        if at >= start and at <= limit and ":" in out[start:at]:
+            out = out[:start] + "***" + out[at:]
+            pos = start + 3
+        else:
+            pos = start
+    # 2) token-style labels (ASCII-only scan for index safety).
+    if out.isascii():
+        lowered = out.lower()
+        for label in ("bearer ", "authorization:", "api-key:",
+                      "api_key:", "apikey:", "token:", "token=",
+                      "secret:", "secret="):
+            at = lowered.find(label)
+            if at < 0:
+                continue
+            begin = at + len(label)
+            while begin < len(out) and out[begin].isspace():
+                begin += 1
+            end = begin
+            while end < len(out) and not out[end].isspace():
+                end += 1
+            if end > begin:
+                out = out[:begin] + "[redacted]" + out[end:]
+                lowered = out.lower()
+    return out
 
 
 def _system_prompt(spec) -> str:

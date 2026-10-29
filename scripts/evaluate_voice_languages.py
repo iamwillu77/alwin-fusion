@@ -165,6 +165,10 @@ def main(argv=None) -> int:
     parser.add_argument("--playback", action="store_true",
                         help="play one synthesized line per language to the "
                              "real audio device (honest sink test)")
+    parser.add_argument("--playback-first", action="store_true",
+                        help="with --playback, play only the first sample "
+                             "of each language (one real sink check per "
+                             "language instead of every sample)")
     parser.add_argument("--espeak", action="store_true",
                         help="synthetic espeak pipeline mode instead of "
                              "human samples (NOT human-speech accuracy)")
@@ -278,7 +282,12 @@ def main(argv=None) -> int:
                 row["reply_excerpt"] = reply[:120]
                 if code in LATIN_LANGS:
                     d2 = detector.detect(reply)
-                    row["reply_language_ok"] = (d2.code == code) or None
+                    if d2.uncertain:
+                        # Short reply the detector can't place: report
+                        # "unknown", never count it as a pass.
+                        row["reply_language_ok"] = None
+                    else:
+                        row["reply_language_ok"] = (d2.code == code)
                 else:
                     row["reply_language_ok"] = script_match(code, reply)
             else:
@@ -292,7 +301,11 @@ def main(argv=None) -> int:
                 speech = synth.synthesize(speak_text[:300],
                                           voice=spec_by_code[code].espeak)
                 row["tts_synthesized"] = len(speech.pcm) > 0
-                if args.playback and row["tts_synthesized"]:
+                first_of_lang = sample_id.endswith("/00") or \
+                    sample_id.endswith("/espeak")
+                if args.playback and row["tts_synthesized"] and (
+                        not args.playback_first or first_of_lang
+                ):
                     error = GStreamerPlayer(speech).play()
                     row["tts_played"] = error is None
                     if error:

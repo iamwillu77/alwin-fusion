@@ -669,17 +669,194 @@ python3 scripts/install_voice_models.py --model small   # ~484 MiB, asks first
 | `small` (default) | ~484 MiB | the balance measured below |
 | `medium` | ~1530 MiB | best overall, but see the weak-language caveat |
 
-Recognition quality was measured on **real speech** (FLEURS
-recordings) with the default `small` model, auto-detect: **14 of 15
-languages** were recognized with a usable transcript (Urdu was decoded
-as Hindi — forcing `ur` fixes it: similarity 0.96). Telugu, Malayalam
-and Bengali remain weak even with `medium` (measured word similarities
-0.11 / 0.00 / 0.07) — **no model size fixes them today**, so treat those
-three as best-effort: the transcript is shown verbatim so you can see
-exactly what was (mis)heard and correct it, and typing remains fully
-supported. This is stated here rather than hidden because a
-multilingual UI that pretends to perfect coverage would be dishonest.
-Espeak TTS voices, by contrast, were verified for **all 15 languages**.
+Recognition quality was measured on **real human speech**
+(google/fleurs, CC-BY-4.0 — 10 validation samples per language,
+reproducible via `scripts/fetch_fleurs_samples.py` +
+`scripts/evaluate_voice_languages.py`, results saved to JSON). WER =
+word error rate (space-delimited scripts); CER = character error rate
+(the meaningful metric for Chinese and the fallback for heavily
+mis-decoded output). `det%` = language-detection accuracy against the
+fixture label; `llm%` = the live Ollama (`qwen3:0.6b`) answered;
+`langOK%` = the reply matched the turn's language; TTS = voice
+available **and** synthesis succeeded (playback verified on the first
+sample of each language):
+
+| Lang | n | WER | CER | det% | llm% | langOK% | TTS |
+|---|---|---|---|---|---|---|---|
+| en | 10 | 0.11 | 0.09 | 100 | 100 | 100 | ✔ |
+| ta | 10 | 0.44 | 0.36 | 100 | 100 | 100 | ✔ |
+| hi | 10 | 0.45 | 0.37 | 90 | 90 | 89 | ✔ |
+| te | 10 | 0.95 | 0.95 | 90 | 100 | 86 | ✔ |
+| ml | 9 | 1.00 | 1.02 | 89 | 88 | 0 | ✔ |
+| kn | 10 | 1.08 | 1.05 | 90 | 86 | 83 | ✔ |
+| ur | 10 | 1.38 | 0.77 | 30 | 90 | 33 | ✔ |
+| zh | 10 | 0.92 | **0.21** | 100 | 100 | 100 | ✔ |
+| fr | 10 | 0.12 | 0.09 | 100 | 100 | 100 | ✔ |
+| ru | 10 | 0.17 | 0.11 | 100 | 100 | 100 | ✔ |
+| es | 10 | 0.05 | 0.04 | 100 | 100 | 100 | ✔ |
+| ar | 10 | 0.26 | 0.06 | 100 | 100 | 100 | ✔ |
+| bn | 10 | 1.09 | 1.45 | 30 | 80 | 25 | ✔ |
+| pt | 10 | 0.10 | 0.11 | 100 | 100 | 100 | ✔ |
+| id | 10 | 0.22 | 0.16 | 100 | 100 | 100 | ✔ |
+
+Reading this table honestly (n = 10 per language — a smoke-size
+sample, not a benchmark suite):
+
+* **Strong with the default `small` model**: es, en, pt, fr, ru, id,
+  ar (CER 0.06), zh (CER 0.21 — Chinese is scored by characters;
+  WER is meaningless there), plus ta/hi at usable-but-noisy WER 0.44/
+  0.45 with **100%/90% detection**.
+* **Genuinely weak: te, ml, kn, ur, bn** (WER ≥ 0.95 with `small`,
+  auto-decode). Urdu and Bengali detection collapses to 30% because
+  the *transcripts themselves* are mostly wrong — detection is not the
+  bottleneck; recognition is. Malayalam replies scored 0% language
+  match for the same reason: the model answers the garbage transcript
+  in the wrong language. These are honest limitations of
+  whisper-`small` on this data, not bugs in the pipeline: the
+  transcript is always shown verbatim so users see exactly what was
+  heard, and typing remains fully supported.
+* Stage failures are counted separately (8 asr-stage, 6 ollama-stage
+  out of 149) and none is hidden behind another stage's pass.
+* **Configuration-vs-model probe (Phase 7, measured)** — 25
+  configurations on human speech: for each of te/ml/bn, five setups
+  (auto-decode, forced language, `condition_on_previous_text=False`,
+  VAD filter, beam 5) with the default `small` model, plus ta/hi as
+  controls. Results: **no configuration rescues te (WER 0.95–1.10),
+  ml (1.00–1.04) or bn (1.01–1.24)** — every variant stays at
+  chance-level, with hypotheses landing in wrong scripts entirely;
+  combined with the earlier `medium`-model measurement (still weak),
+  this is a **model limitation, not a configuration bug**. Small but
+  real gains exist from forced decoding for **hi (0.45 → 0.40)** and
+  **ta (0.40 → 0.38)** — available today by turning auto-detection off
+  with a preferred language, but not worth overriding the
+  auto-detection default. **No defaults were changed** (beam 1, auto
+  decode, `small` stay). The recommended next experiment (not
+  promised, not measured here): an Indic-adapted Whisper checkpoint
+  (e.g. a large-v3 Indic fine-tune) compared against `medium` on this
+  same fixture set.
+* Espeak TTS voices are verified for **all 15 languages** (synthesis
+  + real playback per language above).
+
+Re-run everything yourself with the two commands in *Multilingual
+evaluation* below; JSON output includes every per-sample record
+(engine, reference, hypothesis, WER/CER, stage failures) for
+reproducibility.
+
+### Verifying voice on real hardware (v0.9.1)
+
+Two verification scripts separate **real-device checks** from the
+mocked unit suite (which never opens a microphone or speaker). Both
+need the voice venv (`faster-whisper`, `espeakng-loader`, `av`), the
+installed `small` model, and — for reply checks — a running local
+Ollama with a model you name via `OLLAMA_MODEL`:
+
+```bash
+# Service-level end-to-end: Tests A-E (English/Tamil/Hindi turns,
+# language switching, recovery). Real ASR + live Ollama + real
+# espeak playback + real microphone; "speech" input is real human
+# FLEURS sample files fed at the capture boundary (no human is
+# present to speak), the microphone itself is exercised for capture
+# and recovery, and the manager is a recorder so evaluation fixtures
+# NEVER become real tasks.
+OLLAMA_MODEL=qwen3:0.6b python3 scripts/verify_voice_e2e.py
+
+# GUI end-to-end: the real GTK4 window (temp APP_ID, sandbox state
+# dir), file-fed capture, real ASR -> real Ollama reply -> real
+# speaking state -> real playback -> idle. Recording manager again.
+OLLAMA_MODEL=qwen3:0.6b python3 scripts/verify_voice_gui.py
+```
+
+Every check prints `ok`/`FAIL` with the observed value; the scripts
+exit non-zero on any failure. Substitutions are labeled in their
+output — a file-fed capture is never reported as microphone success
+(the plain `mic capture` checks in Test E are the real-device mic
+evidence).
+
+### Multilingual evaluation (v0.9.1)
+
+Recognition, reply language and synthesis are evaluated **separately**
+per language — they are three different capabilities.
+
+**Fixtures** (real human speech, needed for any accuracy number):
+
+```bash
+python3 scripts/fetch_fleurs_samples.py    # ~10 samples x 15 languages
+```
+
+Downloads only small slices of **google/fleurs (CC-BY-4.0, Google
+LLC)** — datasets-server row requests (~1-3 MB per language) with a
+budget-capped `dev.tar.gz` range-stream fallback (~5-8 MB per language)
+for configs the server errors on; ~65 MB total, resumable, never a
+full dataset. Transcripts are kept verbatim as references.
+
+**Evaluation**:
+
+```bash
+OLLAMA_MODEL=qwen3:0.6b python3 scripts/evaluate_voice_languages.py \
+    --ollama --playback --playback-first --save results.json
+```
+
+* recognition: word error rate (WER) for space-delimited scripts and
+  character error rate (CER) for character-based scripts, plus the
+  engine's own language guess vs. the fixture label (detection
+  accuracy);
+* reply language: whether the live Ollama reply matched the turn's
+  language (script check for non-Latin scripts; seeded text detection
+  for Latin ones — *uncertain* detector results are reported as
+  unknown, never counted as passes);
+* TTS: per-language voice availability + real synthesis (and real
+  playback on the first sample per language with `--playback-first`);
+* every stage records its own failure reason (`asr:` / `ollama:` /
+  `tts:` / `playback:`) — a recognition failure never hides behind a
+  TTS pass, and no metric is printed without reference data.
+
+`--espeak` runs the same pipeline on synthetic speech: it is clearly
+labeled **pipeline-testing only — not human-speech accuracy**.
+
+**Automated tests vs real-device verification.** `scripts/run_tests.sh`
+(suite, all mocked) proves logic and failure handling;
+`verify_voice_e2e.py` / `verify_voice_gui.py` / `evaluate_voice_
+languages.py` prove the real engines and devices. Neither claim is
+substituted for the other in this README.
+
+### Voice configuration and troubleshooting (v0.9.1)
+
+**Configure the Ollama model.** Replies use whatever model you
+already have: set `OLLAMA_MODEL` (or `ollama_model` in the config) to a
+name from `ollama list`, then launch with the `--llm` flag
+(`python3 -m companion --llm` / `python3 -m taskui --llm`). Check
+availability with `python3 -m ai_core.cli --ai-status` or
+`curl http://localhost:11434/api/tags`. Unset/unknown models produce
+actionable errors (`OLLAMA_MODEL is not set…`, `Model 'x' is not
+installed…`) — never a silent fallback; a reply failure shows an
+honest bubble and the mic stays usable.
+
+**Install and verify voice dependencies.**
+
+```bash
+python3 scripts/install_voice_models.py --status   # ASR model, no network
+python3 -m companion --check                        # prints the real
+                                                    # engine + model probes
+```
+
+`--check` reports exactly what it found: `espeak-ng ready…` when the
+loader is installed, or an honest "not installed" note with the pip
+command when it is not.
+
+**Test the microphone.** In the GUI: press **Mic** — the level meter
+must move with sound (Settings can disable it). Headless/real:
+`scripts/verify_voice_e2e.py` Test E captures real room audio and
+asserts silence is never transcribed as words. No recording is ever
+written to disk.
+
+**Troubleshoot audio playback.** If replies show as text but never
+speak, the bubble/status says why: `espeakng-loader` missing (pip
+install), no output device (`No audio output device could be opened`),
+or GStreamer/`alsasink` unavailable. `companion --check`'s `voice
+engine` line shows the probed truth. Playback failure always returns
+the character to `idle` — a stuck `speaking` state is a bug (the
+`end-of-stream`/completion-callback regressions from v0.9.0 are pinned
+by tests).
 
 ### The animated world (v0.8)
 
@@ -1245,9 +1422,14 @@ Known limitations (details in `docs/SECURITY.md`):
     opt-in). Without them, replies stay text-only — nothing claims to
     have been spoken, and `NullVoice` reports "no speech engine".
   - **Recognition quality is language-dependent and imperfect**
-    (measured on FLEURS real speech with the default `small` model:
-    14/15 languages usable; `ur` needs the forced language; `te`/`ml`/
-    `bn` are weak with every current size). The transcript is always
+    (measured on FLEURS human speech, 10 samples per language, default
+    `small` model, auto-decode — see the evaluation table above): es/
+    en/pt/fr/ru/id/ar/zh strong, ta/hi usable-but-noisy (WER 0.44/0.45,
+    detection 100%/90%), and **te/ml/kn/ur/bn weak** (WER ≥ 0.95 — for
+    ur/bn the detection rate collapses to 30% because the transcripts
+    themselves are mostly wrong). A 25-configuration probe showed no
+    setting rescues te/ml/bn — it is a model limitation, not
+    configuration. The transcript is always
     shown verbatim so you can see and correct it; typing remains a
     fully supported path. No end-to-end "15 languages perfect speech
     round-trip" is claimed.
