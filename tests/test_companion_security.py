@@ -6,8 +6,15 @@ parse the actual **AST** of every ``companion`` module (not raw text, so
 docstrings that merely mention a banned API do not cause false alarms)
 and assert:
 
-* no module can shell out, spawn processes, evaluate code, open a
-  socket or reach for a microphone/audio device,
+* no module can shell out, spawn processes, evaluate code or open a
+  socket — at module level or lazily inside functions,
+* microphone capture and speech synthesis exist **only** in the
+  documented voice modules (``voice_input``/``voice_output``) through
+  GStreamer + espeak-ng, with an explicit per-module import allowlist;
+  recording audio to a file stays impossible package-wide (``wave`` /
+  ``audioop`` remain banned everywhere),
+* ``ctypes`` (needed to drive the local TTS library) is reachable from
+  exactly one module, with full prototypes declared there,
 * nothing imports the trusted execution engine (planner, permissions,
   executor, verifier, pipeline, integrations),
 * only the ``__main__`` launcher may import the task experience (the
@@ -18,7 +25,7 @@ and assert:
 * no specific user name is hard-coded into the greeting.
 
 This is a *static* guarantee that complements the behavioural tests in
-the other companion test modules.
+the other companion test modules (which pin the runtime behaviour)..
 """
 
 from __future__ import annotations
@@ -35,11 +42,16 @@ MODULES = sorted(p for p in COMPANION.glob("*.py"))
 #: Expected module set — a rename must be a deliberate act.
 EXPECTED_MODULES = {
     "__init__.py", "__main__.py", "adapter.py", "bedroom.py", "character.py",
-    "greeting.py", "presentation.py", "renderer.py", "renderer2d.py",
-    "scene.py", "settings.py", "states.py", "voice.py", "window.py",
+    "conversation.py", "greeting.py", "language_detection.py",
+    "language_registry.py", "presentation.py", "renderer.py", "renderer2d.py",
+    "scene.py", "settings.py", "speech_recognition.py", "states.py",
+    "voice.py", "voice_input.py", "voice_output.py", "window.py",
 }
 
-#: Dotted module names that must never be imported anywhere in companion.
+#: Dotted module names that must never be imported **at module level**
+#: anywhere in companion (the voice modules' narrow, documented
+#: exemptions from *specific* bans are enforced by the per-module
+#: allowlists below — everything else keeps every ban).
 BANNED_IMPORTS = frozenset({
     # process / code execution
     "subprocess", "commands", "multiprocessing", "pickle", "marshal",
@@ -48,7 +60,9 @@ BANNED_IMPORTS = frozenset({
     "socket", "ssl", "urllib", "http", "http.client", "requests",
     "aiohttp", "httpx", "websockets", "websocket", "flask", "fastapi",
     "django", "uvicorn", "socketserver", "xmlrpc",
-    # audio capture / synthesis (no microphone, no fake voice engine)
+    # audio capture / synthesis through ad-hoc libraries: the one
+    # supported path is GStreamer via ``gi`` (voice_input/voice_output);
+    # recording-to-file stays impossible package-wide (wave/audioop).
     "pyaudio", "sounddevice", "alsaaudio", "speech_recognition",
     "pocketsphinx", "audioop", "wave",
 })
@@ -75,6 +89,49 @@ EXECUTION_ENGINE = frozenset({
 #: (to build the manager/window it hosts — the presentation modules
 #: stay duck-typed and engine-free).
 TASK_EXPERIENCE = frozenset({"taskui"})
+
+#: Per-voice-module allowlist of *module-level* (top-of-file) imports.
+#: Each entry is the complete, deliberate set for that module; the
+#: common bans still apply on top (nothing here may shell out, reach
+#: the network, read eval, or open audio-recording libraries).
+VOICE_MODULE_IMPORTS = {
+    "language_registry.py": {"__future__", "dataclasses", "typing"},
+    "language_detection.py": {"__future__", "threading", "dataclasses",
+                              "typing", "langdetect", "companion"},
+    "conversation.py": {"__future__", "dataclasses", "typing",
+                        "companion"},
+    "voice_input.py": {"__future__", "threading", "time", "dataclasses",
+                       "typing"},
+    "speech_recognition.py": {"__future__", "os", "threading",
+                              "dataclasses", "typing"},
+    "voice_output.py": {"__future__", "threading", "dataclasses",
+                        "typing", "companion"},
+}
+
+#: The *additional* imports those modules may use **lazily** (inside a
+#: function only).  This is the complete list of every engine-adjacent
+#: dependency the voice stack may touch — anything outside these sets
+#: (and the module-level sets above) fails the test, at any depth.
+VOICE_MODULE_LAZY_IMPORTS = {
+    "language_registry.py": set(),
+    "language_detection.py": set(),
+    "conversation.py": set(),
+    "voice_input.py": {"gi"},                # GStreamer (audio device)
+    "speech_recognition.py": {"faster_whisper", "numpy",
+                              "huggingface_hub"},
+    # ctypes drives espeak-ng — allowed HERE and nowhere else, and only
+    # with explicit prototypes (a default-typed espeak_Synth segfaults).
+    "voice_output.py": {"ctypes", "espeakng_loader", "gi"},
+}
+
+#: Roots neither allowed nor lazy: the hard bans for the voice modules
+#: at ANY import depth — no network, no processes, no recording.
+VOICE_HARD_BANS = frozenset({
+    "subprocess", "socket", "ssl", "urllib", "http", "requests",
+    "aiohttp", "httpx", "pickle", "marshal", "wave", "audioop",
+    "pyaudio", "sounddevice", "alsaaudio", "pycaw", "alsaaudio",
+    "eval", "webbrowser", "paramiko", "ftplib", "smtplib",
+})
 
 
 def _dotted(node: ast.AST) -> str:
@@ -174,6 +231,89 @@ class CompanionSourceTests(unittest.TestCase):
                 with self.subTest(module=path.name, taskui=module):
                     self.assertNotIn(module, info.module_imports)
                     self.assertNotIn(module, info.full_module_imports)
+
+    # ------------------------------------------------------------------ #
+    # v0.9.0 voice stack: narrow, per-module import allowlists
+    # ------------------------------------------------------------------ #
+
+    def test_voice_modules_stay_inside_their_module_level_allowlist(self):
+        self.assertEqual(set(VOICE_MODULE_IMPORTS), {
+            p.name for p in MODULES
+            if p.name in VOICE_MODULE_IMPORTS
+        })
+        for name, allowed in VOICE_MODULE_IMPORTS.items():
+            info = collect(COMPANION / name)
+            for imported in sorted(info.module_imports):
+                root = imported.split(".")[0]
+                with self.subTest(module=name, imported=imported):
+                    self.assertIn(
+                        root, allowed,
+                        f"{name} imports {imported} at module level; its "
+                        f"allowlist is {sorted(allowed)}",
+                    )
+
+    def test_voice_modules_lazy_imports_are_exactly_the_documented_set(self):
+        for name, lazy in VOICE_MODULE_LAZY_IMPORTS.items():
+            allowed = VOICE_MODULE_IMPORTS[name] | lazy
+            info = collect(COMPANION / name)
+            for imported in sorted(info.full_module_imports):
+                root = imported.split(".")[0]
+                with self.subTest(module=name, imported=imported):
+                    self.assertIn(
+                        root, allowed,
+                        f"{name} imports {imported} (anywhere in the "
+                        f"file); allowed roots are {sorted(allowed)}",
+                    )
+
+    def test_voice_modules_obey_hard_bans_at_any_import_depth(self):
+        for name in VOICE_MODULE_LAZY_IMPORTS:
+            info = collect(COMPANION / name)
+            roots = {i.split(".")[0] for i in info.full_module_imports}
+            with self.subTest(module=name):
+                self.assertFalse(
+                    VOICE_HARD_BANS & roots,
+                    f"{name} imports hard-banned roots: "
+                    f"{sorted(VOICE_HARD_BANS & roots)}",
+                )
+
+    def test_ctypes_is_reachable_from_exactly_one_module(self):
+        # The espeak wrapper is the documented exception (there is no
+        # other way to drive a local TTS library); every other module —
+        # even lazily — must stay away from it.
+        for path in MODULES:
+            if path.name == "voice_output.py":
+                continue
+            info = collect(path)
+            roots = {i.split(".")[0] for i in info.full_module_imports}
+            with self.subTest(module=path.name):
+                self.assertNotIn("ctypes", roots)
+
+    def test_voice_modules_never_import_recording_or_network_libraries(self):
+        # wave/audioop (recording persistence) and every network client
+        # stay banned package-wide, at any import depth, in the voice
+        # modules specifically.
+        for name in VOICE_MODULE_LAZY_IMPORTS:
+            info = collect(COMPANION / name)
+            for banned in ("wave", "audioop", "socket", "urllib",
+                           "requests", "http.client", "subprocess"):
+                with self.subTest(module=name, banned=banned):
+                    self.assertNotIn(banned, info.module_imports)
+                    self.assertNotIn(banned, info.full_module_imports)
+
+    def test_conversation_speaks_only_through_the_duck_typed_manager(self):
+        # The conversation module is engine-free: it must not import
+        # taskui, ai_core or ai_runtime — manager and LLM come injected.
+        info = collect(COMPANION / "conversation.py")
+        roots = {i.split(".")[0] for i in info.full_module_imports}
+        self.assertLessEqual(
+            roots,
+            {"__future__", "dataclasses", "typing", "companion"},
+        )
+        # The shared language instruction must actually appear (one
+        # template, language as data — not per-language assistants).
+        source = (COMPANION / "conversation.py").read_text(encoding="utf-8")
+        self.assertIn("Reply in the language used in the user's latest message",
+                      source)
 
     def test_state_controller_is_pure_python(self):
         # The controller owns animation state: no I/O, no GTK, no

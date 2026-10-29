@@ -1,9 +1,16 @@
-"""Companion settings: small, validated, local (v0.8.0).
+"""Companion settings: small, validated, local (v0.9.0).
 
 Persists the companion's preferences (greeting on/off, name, quiet
-hours, mute, always-on-top, subtitles) to a tiny JSON file in the
-state directory — the same directory the audit log and task history
-use, so it inherits the owner-only layout (0600 file, 0700 dir).
+hours, always-on-top, subtitles, and — v0.9 — microphone, language
+and spoken-reply preferences) to a tiny JSON file in the state
+directory — the same directory the audit log and task history use, so
+it inherits the owner-only layout (0600 file, 0700 dir).
+
+v0.9 note: the v0.8 placeholder key ``mute_voice`` (its comment said
+"voice engine absent anyway") is replaced by ``spoken_responses`` now
+that a real local voice exists; an old settings file that still
+carries ``mute_voice`` simply loses that obsolete cosmetic key on the
+next save — nothing else changes.
 
 Design rules:
 
@@ -29,15 +36,32 @@ from typing import Dict, Optional
 
 SETTINGS_FILENAME = "companion_settings.json"
 
-#: The closed schema: key -> (type, default).
+#: The closed schema: key -> (type, default).  **bool/str only** — a
+#: tampered settings file can at worst change a cosmetic preference.
 SCHEMA: Dict[str, tuple] = {
     "greeting_enabled": (bool, True),
     "greeting_name": (str, ""),
     "quiet_hours": (str, ""),        # "HH:MM-HH:MM", empty = disabled
-    "mute_voice": (bool, True),      # voice engine absent anyway (honest)
     "always_on_top": (bool, False),  # opt-in; Wayland may ignore it
     "show_subtitles": (bool, True),  # accessible text alternative
     "reduced_motion": (bool, False),  # calmer, near-instant transitions
+
+    # ---- v0.9 voice & language (cosmetic only — never a permission) --- #
+    # Microphone capture still requires an explicit mic click; this only
+    # controls whether the push-to-talk button is offered at all.
+    "mic_enabled": (bool, True),
+    "mic_level_meter": (bool, True),   # live input-level feedback
+    # Auto-detection is ON by default; the preferred language is only a
+    # fallback for *unclear* input — it never overrides a clear result.
+    "language_auto": (bool, True),
+    "language_preferred": (str, ""),   # ISO code, "" = no preference
+    "spoken_responses": (bool, False), # spoken replies are opt-in
+    "speech_rate": (str, "1.0"),       # multiplier as text, clamped 0.5-2.0
+    "voice_id": (str, ""),             # "" = espeak voice per language
+    "asr_model": (str, "small"),       # tiny|base|small|medium (start-up)
+    # Honest placeholder: wake-word detection is NOT implemented in v0.9
+    # and the settings UI shows the switch as unavailable.
+    "wake_word_enabled": (bool, False),
 }
 
 

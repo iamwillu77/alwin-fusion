@@ -5,7 +5,7 @@ The greeting foundation must be configurable and honest:
 * the name is configurable (env/settings) and **never hard-coded**,
 * the greeting fires once per session — never again on a redraw,
 * an optional once-per-day marker prevents repeats across sessions,
-* quiet hours and a disabled/muted preference suppress it,
+* quiet hours and a disabled preference suppress it,
 * malformed configuration degrades honestly (explicit error or
   documented default), never by guessing,
 * the greeting is text: it never claims to speak or record audio.

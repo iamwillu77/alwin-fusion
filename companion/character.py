@@ -1,4 +1,4 @@
-"""Alwin's full-body 2D character drawing core (v0.8.0).
+"""Alwin's full-body 2D character drawing core (v0.9.0).
 
 This module is the *art* of the companion: an original, full-body
 cartoon boy drawn procedurally with cairo — large expressive head,
@@ -381,6 +381,24 @@ def _pose_thinking(t: float, expression: str) -> Pose:
                    "sway": 0.6 * ponder})
 
 
+def _pose_speaking(t: float, expression: str) -> Pose:
+    """v0.9 simple talking animation (documented): a friendly face
+    whose mouth opens and closes at syllable rate while the head nods
+    gently.  Pure and deterministic like every other pose."""
+    p = _base("happy", t, 3.6)
+    talk = math.sin(t * 9.0)           # syllable-rate mouth movement
+    mouth = 0.30 + 0.20 * abs(talk)    # 0.30..0.50 open while speaking
+    nod = math.sin(t * 2.4)
+    return Pose(**{**{f.name: getattr(p, f.name) for f in fields(Pose)},
+                   "eye_open": 1.06, "brow_raise": 0.26,
+                   "mouth_smile": 0.5, "mouth_open": mouth,
+                   "head_dy": 0.5 * nod,
+                   "head_tilt": 1.5 * nod,
+                   "lean": 1.5 + 0.5 * nod,
+                   "l_hand_x": 96.0, "l_hand_y": 184.0,
+                   "r_hand_x": 124.0, "r_hand_y": 184.0})
+
+
 def _pose_walking(t: float, expression: str) -> Pose:
     p = _base("determined", t, 3.2)
     phase = t * 4.6
@@ -515,6 +533,7 @@ _STATE_POSES = {
     "greeting": _pose_greeting,
     "listening": _pose_listening,
     "thinking": _pose_thinking,
+    "speaking": _pose_speaking,
     "walking": _pose_walking,
     "writing": _pose_writing,
     "coding": _pose_coding,

@@ -1,4 +1,4 @@
-"""Character state controller for the Alwin companion (v0.8.0).
+"""Character state controller for the Alwin companion (v0.9.0).
 
 This module owns the companion character's *current animation state*
 and the validated transition graph between states.  It is deliberately
@@ -45,6 +45,8 @@ STATE_GREETING = "greeting"
 STATE_IDLE = "idle"
 STATE_LISTENING = "listening"
 STATE_THINKING = "thinking"
+# v0.9: Alwin is speaking a reply aloud (voice output active).
+STATE_SPEAKING = "speaking"
 STATE_WALKING = "walking"
 STATE_WRITING = "writing"
 STATE_CODING = "coding"
@@ -63,6 +65,7 @@ ALL_STATES = (
     STATE_IDLE,
     STATE_LISTENING,
     STATE_THINKING,
+    STATE_SPEAKING,
     STATE_WALKING,
     STATE_WRITING,
     STATE_CODING,
@@ -88,12 +91,14 @@ TRANSITIONS: Dict[str, frozenset] = {
         {STATE_GREETING, STATE_IDLE, STATE_ERROR, STATE_WALKING}
     ),
     STATE_GREETING: frozenset(
-        {STATE_IDLE, STATE_LISTENING, STATE_THINKING, STATE_SLEEPING}
+        {STATE_IDLE, STATE_LISTENING, STATE_THINKING, STATE_SPEAKING,
+         STATE_SLEEPING}
     ),
     STATE_IDLE: frozenset(
         {
             STATE_LISTENING,
             STATE_THINKING,
+            STATE_SPEAKING,
             STATE_SLEEPING,
             STATE_RESTING,
             STATE_WALKING,
@@ -113,10 +118,12 @@ TRANSITIONS: Dict[str, frozenset] = {
         }
     ),
     STATE_LISTENING: frozenset(
-        {STATE_THINKING, STATE_IDLE, STATE_WAITING_FOR_APPROVAL, STATE_ERROR}
+        {STATE_THINKING, STATE_SPEAKING, STATE_IDLE,
+         STATE_WAITING_FOR_APPROVAL, STATE_ERROR}
     ),
     STATE_THINKING: frozenset(
         {
+            STATE_SPEAKING,
             STATE_WAITING_FOR_APPROVAL,
             STATE_WALKING,
             STATE_WORKING,
@@ -131,6 +138,26 @@ TRANSITIONS: Dict[str, frozenset] = {
             STATE_CELEBRATING,
         }
     ),
+    # v0.9: speaking mirrors thinking's reach (a reply can be talking
+    # while a trusted task event still arrives — approval, progress,
+    # a fast verified success — so those edges exist for the same
+    # robustness reason; speaking ends calmly or back into listening).
+    STATE_SPEAKING: frozenset(
+        {
+            STATE_IDLE,
+            STATE_LISTENING,
+            STATE_THINKING,
+            STATE_WAITING_FOR_APPROVAL,
+            STATE_WALKING,
+            STATE_WORKING,
+            STATE_WRITING,
+            STATE_CODING,
+            STATE_READING,
+            STATE_VERIFYING,
+            STATE_ERROR,
+            STATE_CELEBRATING,
+        }
+    ),
     # "walking" is a short 2D transition (moving to the work), never a
     # claim of a literal 3D walk through a room.  v0.8: the morning walk
     # from the bed also resolves into greeting on arrival.
@@ -138,7 +165,10 @@ TRANSITIONS: Dict[str, frozenset] = {
         {STATE_WORKING, STATE_WRITING, STATE_CODING, STATE_READING,
          STATE_VERIFYING, STATE_IDLE, STATE_ERROR, STATE_GREETING,
          STATE_CELEBRATING,  # robustness: fast trusted success
-         STATE_WAITING_FOR_APPROVAL}
+         STATE_WAITING_FOR_APPROVAL,
+         # v0.9: the spoken acknowledgement of a *voice* submission can
+         # arrive while Alwin is already heading to the work.
+         STATE_SPEAKING}
     ),
     STATE_WORKING: frozenset(
         {
@@ -150,6 +180,9 @@ TRANSITIONS: Dict[str, frozenset] = {
             STATE_CELEBRATING,
             STATE_IDLE,
             STATE_ERROR,
+            # v0.9: a slow local reply may finish talking after the task
+            # has already started working.
+            STATE_SPEAKING,
         }
     ),
     STATE_WRITING: frozenset(
@@ -168,6 +201,7 @@ TRANSITIONS: Dict[str, frozenset] = {
     STATE_WAITING_FOR_APPROVAL: frozenset(
         {STATE_WALKING, STATE_WORKING, STATE_WRITING, STATE_CODING,
          STATE_READING, STATE_VERIFYING, STATE_IDLE, STATE_THINKING,
+         STATE_SPEAKING,
          STATE_ERROR}
     ),
     STATE_VERIFYING: frozenset(
@@ -195,6 +229,7 @@ STATE_LABELS: Dict[str, str] = {
     STATE_IDLE: "idle",
     STATE_LISTENING: "listening",
     STATE_THINKING: "thinking",
+    STATE_SPEAKING: "speaking",
     STATE_WALKING: "heading over",
     STATE_WRITING: "writing",
     STATE_CODING: "coding",
@@ -215,6 +250,9 @@ EXPRESSIONS: Dict[str, str] = {
     STATE_IDLE: "neutral",
     STATE_LISTENING: "attentive",
     STATE_THINKING: "thoughtful",
+    # v0.9: a friendly talking face; the mouth movement itself comes
+    # from the speaking pose in character.py.
+    STATE_SPEAKING: "happy",
     STATE_WALKING: "determined",
     STATE_WRITING: "focused",
     STATE_CODING: "focused",
@@ -235,6 +273,11 @@ AUTO_RETURN_DELAYS: Dict[str, Optional[float]] = {
     STATE_ERROR: 6.0,
     STATE_GREETING: 6.0,
     STATE_WAKING_UP: 2.0,
+    # v0.9 safety net only: the voice engine's completion callback
+    # returns Alwin to idle/listening promptly; this guarantees the
+    # character can never stay "speaking" forever if that callback is
+    # lost (longest possible utterance: 600 chars at half rate < 90 s).
+    STATE_SPEAKING: 120.0,
 }
 
 #: States where the character animates continuously (the renderer may
@@ -244,9 +287,9 @@ AUTO_RETURN_DELAYS: Dict[str, Optional[float]] = {
 ANIMATED_STATES = frozenset(
     {
         STATE_IDLE, STATE_WAKING_UP, STATE_GREETING, STATE_LISTENING,
-        STATE_THINKING, STATE_WALKING, STATE_WRITING, STATE_CODING,
-        STATE_READING, STATE_WAITING_FOR_APPROVAL, STATE_WORKING,
-        STATE_VERIFYING, STATE_CELEBRATING, STATE_ERROR,
+        STATE_THINKING, STATE_SPEAKING, STATE_WALKING, STATE_WRITING,
+        STATE_CODING, STATE_READING, STATE_WAITING_FOR_APPROVAL,
+        STATE_WORKING, STATE_VERIFYING, STATE_CELEBRATING, STATE_ERROR,
     }
 )
 
@@ -460,6 +503,7 @@ __all__ = [
     "STATE_READING",
     "STATE_RESTING",
     "STATE_SLEEPING",
+    "STATE_SPEAKING",
     "STATE_THINKING",
     "STATE_VERIFYING",
     "STATE_WAITING_FOR_APPROVAL",

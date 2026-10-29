@@ -1,6 +1,6 @@
 # Alwin Fusion — Security Model and Limitations
 
-Version: 0.8.0 — Milestone: Animated World & Walking Experience
+Version: 0.9.0 — Milestone: Multilingual Voice Intelligence
 
 This document states what the prototype defends against, how, and —
 importantly — **what it does not defend against**. Passing tests does
@@ -21,7 +21,12 @@ Assumed-trusted: the Alwin Fusion code itself, the Python
 interpreter, the OS, and the human user making approval decisions.
 
 Assumed-untrusted: natural-language input (it may be accidental or
-hostile), local LLM output (models can be wrong or prompt-injected),
+hostile) — **including anything said into the microphone**: since v0.9
+a voice transcript is treated as *exactly* as untrusted as typed text
+(it flows through the same validation, permission and approval path and
+confers nothing extra; the recognition result is shown verbatim and is
+never executed), local LLM output (models can be wrong or
+prompt-injected),
 anything a concurrent process does to the filesystem, application
 manifests and desktop-entry files (their *names* are used for
 detection only, after sanitizing; their contents are never read), any
@@ -383,7 +388,7 @@ types. Its own security properties and the new surface it introduces:
 * **One task at a time.** The manager refuses a second submission
   while one is running, so there is no queue to race or confuse.
 
-### 3d. Companion presentation (v0.6/v0.7/v0.8) and its new attack surface
+### 3d. Companion presentation (v0.6/v0.7/v0.8/v0.9) and its new attack surface
 
 The Alwin companion (`companion/`) is a **presentation layer only**. It
 observes curated task records and animates a character in an animated
@@ -396,11 +401,19 @@ client. Its security properties:
   permissions/verifier/audit`, `integrations`) or the task experience
   (only the `__main__` launcher may import `taskui`, to host the
   manager/window it displays) — enforced by AST-based meta-checks over
-  every `companion` module that fail the suite for banned imports
+  every `companion` module (exactly the 20-module set, pinned) that
+  fail the suite for banned imports
   (`subprocess`, `socket`, `urllib`, `http`, `requests`, `pickle`,
-  `ctypes`, `pty`, audio-capture modules, …) or banned calls (`eval`,
+  `ctypes`, `pty`, ad-hoc audio-capture modules, …) or banned calls
+  (`eval`,
   `exec`, `compile`, `os.system`, `subprocess.*`, `socket.socket`,
-  `webbrowser.open`, …) (tested). The state controller's own imports
+  `webbrowser.open`, …) (tested). v0.9 adds a second, stricter layer
+  for the six voice modules: a **per-module import allowlist checked
+  at any depth** plus hard bans (no network library, no `wave`/
+  `audioop` — recording to file is impossible package-wide — no
+  `eval`), and `ctypes` reachable from **exactly one** module
+  (`voice_output.py`, tested); the one supported audio path is
+  GStreamer via `gi`. The state controller's own imports
   are pinned to `time`/`typing`, the adapter's to `typing` +
   `companion.*`, and — new in v0.7 — the entire character drawing core
   (`companion/character.py`) is pinned to `cairo`/`math`/`dataclasses`/
@@ -410,7 +423,9 @@ client. Its security properties:
   `math`/`dataclasses`/`typing` — no cairo, no GTK, no I/O, no task
   engine, so the world/movement logic is inert data — and the
   **bedroom artwork** (`companion/bedroom.py`) to `cairo`/`math`/
-  `typing`/`companion.scene` (tested).
+  `typing`/`companion.scene` (tested); `conversation.py` (v0.9) is
+  additionally engine-free and pinned to the duck-typed
+  `manager.submit()` path (tested).
 * **The animated world cannot act, script or be scripted.** The scene
   is driven exclusively through a **closed command allowlist** (13
   names: `wake`, `get_up`, `move_to`, `begin_writing`, `begin_coding`,
@@ -457,12 +472,22 @@ client. Its security properties:
   internals — tested), and the GTK view inserts them with `set_text`
   only: no `set_markup`, no Pango import (tested). Untrusted text
   cannot impersonate UI chrome or influence a policy decision.
-* **No network, no audio, no listening.** The companion opens no
-  socket, contacts no server and starts no web service (AST-tested
-  package-wide). It records no microphone input and opens no audio
-  device: `NullVoice` reports `available = False` and `speak()` returns
-  `False` — nothing is ever claimed to have been spoken, and no voice
-  model is installed or downloaded.
+* **No network, no recording, no unattended listening (v0.9).** The
+  companion opens no socket, contacts no server and starts no web
+  service (AST-tested package-wide; the voice modules are additionally
+  banned from importing any network library at any depth). The
+  microphone opens **only on an explicit mic click** (push-to-talk) and
+  only while the window is usable; audio lives in memory for the turn
+  and is discarded — no recording is ever written to disk (the `wave`
+  and `audioop` modules are banned package-wide, the voice modules
+  perform no file writes at all, and no cloud ASR/TTS exists to upload
+  to). Teardown and cancellation release the device and drop captured
+  PCM (tested). There is no wake word and no continuous listening —
+  the setting exists only as an honestly disabled placeholder. Speech,
+  when it happens, is claimed only after the engine reports it; a
+  missing engine keeps `NullVoice`'s honest `available = False` /
+  `speak() → False` behaviour, and nothing is ever claimed as heard,
+  recognized or spoken before it actually is (tested).
 * **The greeting assumes nothing.** It is text, fires at most once per
   session (optionally once per day), honours an explicit disable and
   quiet hours, takes its name from configuration (no hard-coded user —
@@ -506,6 +531,60 @@ New surface introduced by v0.6, stated honestly:
    `reduced_motion` preference lives in the same cosmetic-only
    settings file (closed schema) and cannot influence any trust
    decision.
+6. *The voice stack (v0.9) adds one bounded input surface and no
+   network, no file and no new trust decision.* Stated precisely:
+   - **Microphone capture** is a GStreamer pipeline that runs only
+     between an explicit mic click and stop/cancel/teardown; captured
+     PCM exists in process memory for that turn only and is dropped
+     afterwards (no file writes in the capture module — AST-tested;
+     `wave`/`audioop` banned package-wide; no cloud endpoint exists to
+     send it to). The only new dependency surface is GStreamer device
+     access itself, which the user can see (an open microphone is
+     shown as the listening state + level meter).
+   - **Recognition output is untrusted text, exactly like typing it.**
+     It is displayed verbatim (bounded, `set_text`) and reaches only
+     `TaskManager.submit()` through the shared conversation pipeline —
+     same allowlist, same permission checks, same digest-bound
+     approval. Nothing spoken can grant a permission, auto-approve a
+     plan or bypass the task window (tested: the security suite pins
+     conversation's import surface and its single submission path).
+   - **Language detection is advisory, not a policy input.** Its
+     result only selects reply language / ASR hint / TTS voice — it
+     never participates in a permission or approval decision, and an
+     uncertain result is surfaced as uncertainty instead of a claim.
+   - **Model installation is manual and outside the app.**
+     `scripts/install_voice_models.py` (user-run, confirm-first,
+     reports size/free space) is the only sanctioned path to a model;
+     inside `companion/`, every network library (socket/urllib/http/
+     requests/…) is banned at any import depth — the only permitted
+     engine-adjacent imports are `faster_whisper`/`numpy`/
+     `huggingface_hub` (lazy, for the model and its cache *path*
+     constants) and loading pins `local_files_only=True`. A missing
+     model is an honest error naming the installer, never a download.
+   - **Speech synthesis is opt-in and honest.** `spoken_responses`
+     defaults to off; the espeak/GStreamer playback runs on a worker,
+     the `speaking` state is entered only after dispatch and left on
+     the engine's completion truth; a failure is reported, never
+     masked. `ctypes` — the one memory-unsafe escape hatch in Python —
+     is importable from exactly one module (`voice_output.py`,
+     tested) and used only for espeak's documented C API with full
+     argtypes.
+   - **Replies never re-enter the pipeline.** An LLM reply is
+     display/speech text only; the sole `submit()` call carries the
+     user's own transcript (tested), so a prompt-injected reply cannot
+     become an action.
+   - The new voice settings (`mic_enabled`, `language_auto`,
+     `language_preferred`, `spoken_responses`, `speech_rate`,
+     `voice_id`, `asr_model`, `mic_level_meter`) are additional
+     cosmetic keys in the same closed schema: a tampered file can at
+     worst change voice/language preferences — never a permission,
+     never an execution (the bool/str-only schema pin now covers
+     them). The `mute_voice` placeholder key was removed rather than
+     repurposed.
+   - **The `speaking` state adds no capability**: it is a renderer
+     pose with the same structural guarantees as every other state
+     (only entered on valid transitions, auto-returns after 120 s,
+     renderer errors contained).
 
 ### 4. Verification before success
 
@@ -811,10 +890,30 @@ New surface introduced by v0.6, stated honestly:
     bedroom artwork are pinned to pure imports (cairo/math/… and
     cairo/math/typing/companion.scene) and the scene model to
     math/dataclasses/typing (tested).
-31. **The companion has no voice.** `NullVoice` honestly reports no
-    speech engine connected: nothing is spoken, recorded or listened
-    for, no microphone is opened and no voice model exists. The TTS/ASR
-    interface is a seam for a future local engine only.
+31. **Voice is real but optional, local and imperfect** (updated in
+    v0.9). The companion has push-to-talk microphone input, offline
+    speech recognition, automatic language detection over 15 languages
+    and — when the user opts in — spoken replies. Honest limits:
+    - nothing is recorded to disk and nothing is uploaded; audio lives
+      in memory for one turn (enforced by banned modules and
+      no-file-I/O meta-tests),
+    - no wake word and no continuous listening: the microphone opens
+      only on an explicit click, and the wake-word setting is an
+      honestly disabled placeholder,
+    - recognition requires a locally installed model (manual,
+      confirm-first installer; the app itself **never downloads**);
+      without it, an honest error — never an invented transcript,
+    - speech requires local espeak + an audio device and is **off by
+      default**; a missing engine keeps `NullVoice`'s honest contract,
+    - recognition quality is language-dependent (measured: 14/15
+      languages usable with the default model; Telugu/Malayalam/
+      Bengali weak with all current sizes, Urdu needs the forced
+      language) — transcripts are shown verbatim so errors are visible
+      and correctable, and typing remains fully supported. No
+      15-language end-to-end perfection is claimed,
+    - the `speaking` animation is simple mouth motion (no lip-sync
+      tracking), and an LLM reply is never fed back into the task
+      pipeline.
 32. **The companion's "walking" is movement inside a 2D room, not
     desktop locomotion**, and the companion is
     a small character window — not a desktop shell, not a wallpaper

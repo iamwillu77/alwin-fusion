@@ -1,4 +1,4 @@
-"""Companion presentation: pure view-model for the character window (v0.8.0).
+"""Companion presentation: pure view-model for the character window (v0.9.0).
 
 Turns the character controller's snapshot, the greeting, the voice
 status and the minimal task status into small display-ready
@@ -143,9 +143,16 @@ def settings_view(settings: dict) -> dict:
         "greeting_enabled": bool(settings.get("greeting_enabled", True)),
         "greeting_name": _bounded(settings.get("greeting_name", ""), 40),
         "quiet_hours": _bounded(settings.get("quiet_hours", ""), 20),
-        "mute_voice": bool(settings.get("mute_voice", True)),
         "always_on_top": bool(settings.get("always_on_top", False)),
         "show_subtitles": bool(settings.get("show_subtitles", True)),
+        # v0.9 voice & language (all cosmetic; detection never overrides
+        # a clear result, speech is opt-in).
+        "mic_enabled": bool(settings.get("mic_enabled", True)),
+        "language_auto": bool(settings.get("language_auto", True)),
+        "language_preferred": _bounded(
+            settings.get("language_preferred", ""), 8
+        ),
+        "spoken_responses": bool(settings.get("spoken_responses", False)),
     }
 
 

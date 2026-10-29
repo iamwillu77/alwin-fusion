@@ -1,16 +1,18 @@
-"""Startup greeting for the Alwin companion (v0.8.0).
+"""Startup greeting for the Alwin companion (v0.9.0).
 
 A small, **text-first** greeting engine with the rules the milestone
 requires:
 
 * the greeting fires once per session (never again on window redraws),
 * optionally once per day (a tiny local marker file, owner-only),
-* it respects a configurable enabled preference, a mute flag and
-  quiet hours (no greeting during the night),
+* it respects a configurable enabled preference and quiet hours
+  (no greeting during the night),
 * the greeting name is **configurable** (``ALWIN_COMPANION_NAME`` env
   var or the companion settings file) — no user name is hard-coded,
-* it never claims to speak: the greeting is shown as text (a speech
-  bubble); when no voice engine is connected, nothing is spoken,
+* the greeting itself is **text only**: it never claims to speak. (A
+  v0.9 spoken reply exists for *voice turns* when the user opts in to
+  ``spoken_responses`` — the startup greeting never goes through it, so
+  a quiet-hours or disabled morning stays silent),
 * it never records audio and never assumes the user is present — the
   greeting is a friendly message, not a claim that someone is at the
   machine.

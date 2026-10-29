@@ -98,7 +98,16 @@ def _run_smoke(config: Config, use_llm: bool, dry_run: bool) -> int:
         STATE_COMPLETED,
     )
 
-    manager = TaskManager(config, use_llm=use_llm)
+    llm_client = None
+    if use_llm:
+        from ai_runtime.ollama_client import OllamaClient
+
+        llm_client = OllamaClient(
+            base_url=config.ollama_base_url,
+            model=config.ollama_model,
+            timeout=config.ollama_timeout,
+        )
+    manager = TaskManager(config, use_llm=use_llm, llm_client=llm_client)
     failures: List[str] = []
 
     def expect(condition: bool, what: str) -> None:
@@ -193,7 +202,20 @@ def main(argv: Optional[List[str]] = None) -> int:
         return EXIT_FAILURE
 
     status = _status_for(config, args.llm)
-    manager = TaskManager(config, use_llm=args.llm)
+    # v0.9: ``--llm`` needs an actual client — both for the manager's
+    # proposals *and* for the companion's optional spoken replies (the
+    # manager ignores use_llm when no client is attached, which is why
+    # the flag used to be silently inert).
+    llm_client = None
+    if args.llm:
+        from ai_runtime.ollama_client import OllamaClient
+
+        llm_client = OllamaClient(
+            base_url=config.ollama_base_url,
+            model=config.ollama_model,
+            timeout=config.ollama_timeout,
+        )
+    manager = TaskManager(config, use_llm=args.llm, llm_client=llm_client)
     if args.dry_run:
         original_submit = manager.submit
 
@@ -219,12 +241,15 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     task_window = gtk_app.TaskWindow(manager, status=status)
     # The companion shares the task application's main loop: one process,
-    # one engine, no second execution path.
+    # one engine, no second execution path.  The same local LLM client
+    # (when --llm was given) powers both the manager's proposals and
+    # the companion's optional spoken replies — never a cloud service.
     companion = CompanionWindow(
         manager,
         config=config,
         status=status,
         application=task_window.app,
+        llm_client=llm_client,
         open_task_window=lambda: task_window.open(),
     )
 

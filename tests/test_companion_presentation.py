@@ -208,14 +208,21 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(
             set(settings_store.SCHEMA),
             {"greeting_enabled", "greeting_name", "quiet_hours",
-             "mute_voice", "always_on_top", "show_subtitles",
-             "reduced_motion"},
+             "always_on_top", "show_subtitles", "reduced_motion",
+             # v0.9 voice & language
+             "mic_enabled", "mic_level_meter", "language_auto",
+             "language_preferred", "spoken_responses", "speech_rate",
+             "voice_id", "asr_model", "wake_word_enabled"},
         )
-        allowed_prefixes = ("greeting", "quiet", "mute", "always",
-                            "show_subtitles", "reduced")
+        allowed_prefixes = ("greeting", "quiet", "always", "show_subtitles",
+                            "reduced", "mic", "language", "spoken",
+                            "speech", "voice", "asr", "wake")
         for key in settings_store.SCHEMA:
             self.assertTrue(key.startswith(allowed_prefixes),
                             f"{key} is not a cosmetic preference")
+            # bool/str only: no numbers, no nested objects — a tampered
+            # file can never smuggle anything structured in.
+            self.assertIn(settings_store.SCHEMA[key][0], (bool, str), key)
 
     def test_defaults(self):
         defaults = settings_store.defaults()

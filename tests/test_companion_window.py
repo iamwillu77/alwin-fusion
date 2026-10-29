@@ -74,13 +74,29 @@ class ConstructionTests(unittest.TestCase):
             self.skipTest(f"cannot construct GTK objects headless: {exc}")
 
     def test_construction_needs_no_display_and_shows_nothing(self):
-        from companion.voice import NullVoice
+        from companion.voice_output import CompanionVoice
 
         companion = self.build()
         self.assertIsNone(companion.window, "nothing is shown before open()")
         self.assertEqual(companion.controller.state, "idle")
         self.assertIs(companion.adapter.controller, companion.controller)
-        self.assertIsInstance(companion.voice, NullVoice)
+        # v0.9: the default voice engine is the real local espeak one
+        # (probed lazily — construction touches no library or device).
+        self.assertIsInstance(companion.voice, CompanionVoice)
+        # ...and an explicitly injected engine is honoured as-is.
+        from companion.voice import NullVoice
+
+        injected = self.build(voice=NullVoice())
+        self.assertIsInstance(injected.voice, NullVoice)
+
+    def test_voice_services_are_constructed_lazily_and_injectable(self):
+        companion = self.build()
+        # Services exist (the window owns a full voice stack) but have
+        # done nothing yet: no capture, no recognition, no speech.
+        self.assertFalse(companion.voice_input.listening)
+        self.assertFalse(companion.recognizer.busy)
+        self.assertFalse(getattr(companion.voice, "speaking", False))
+        self.assertEqual(companion._voice_phase, "off")
 
     def test_own_application_and_honest_defaults(self):
         companion = self.build()

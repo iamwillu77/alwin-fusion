@@ -1,6 +1,6 @@
 # Alwin Fusion — Architecture
 
-Version: 0.8.0 — Milestone: Animated World & Walking Experience
+Version: 0.9.0 — Milestone: Multilingual Voice Intelligence
 
 Alwin Fusion is an open-source, offline-first AI-native operating
 system in the making. This document describes what exists today, how
@@ -104,8 +104,8 @@ taskui/                  v0.5 task experience (UI-agnostic core + thin view)
                          --companion opens the task window together with the
                          Alwin companion, --check headless self-check,
                          --smoke scripted headless lifecycle walkthrough)
-companion/                 v0.8 Alwin companion (presentation layer only)
-    states.py            the 16-state character controller: validated
+companion/                 v0.9 Alwin companion (presentation layer only)
+    states.py            the 17-state character controller: validated
                          transition graph, calm safe fallbacks, truthful
                          target recovery, expression/label tables, auto-
                          return delays, error-isolated renderer dispatch
@@ -155,22 +155,69 @@ companion/                 v0.8 Alwin companion (presentation layer only)
     greeting.py          configurable startup greeting: name from
                          env/settings (never hard-coded), quiet hours,
                          once-per-session + optional once-per-day marker
-    settings.py          closed-schema local JSON preferences (0600),
-                         cosmetic-only — the trusted core never reads it
+    settings.py          closed-schema local JSON preferences (0600,
+                         bool/str only, cosmetic-only — the trusted core
+                         never reads it); v0.9 voice keys (mic, level
+                         meter, language auto/fallback, spoken replies,
+                         rate, voice, ASR model, wake-word placeholder)
     voice.py             VoiceEngine ABC + NullVoice (honest "no engine
-                         connected"; no audio, no microphone, no model)
+                         connected") — the injection seam for tests
+    voice_input.py       v0.9 push-to-talk capture: GStreamer
+                         autoaudiosrc → appsink (16 kHz mono S16) on a
+                         worker; start/stop/cancel/release; silence is
+                         rejected before any model runs; PCM lives in
+                         memory only (never written to disk)
+    speech_recognition.py v0.9 offline ASR: faster-whisper with
+                         local_files_only=True (the app NEVER downloads),
+                         decode on a worker thread, no-speech/short-audio
+                         rejection, forced-vs-auto language, honest
+                         model-status reporting (install via
+                         scripts/install_voice_models.py)
+    language_registry.py v0.9 the CLOSED set of 15 languages (code, name,
+                         native sample, script, RTL flag, espeak voice) —
+                         the single source of truth for detection, the
+                         settings dropdown and TTS voices
+    language_detection.py v0.9 detection service: Unicode-script profile
+                         + seeded langdetect text evidence + the ASR
+                         language hint; dominant-script guard for mixed
+                         input; uncertain results reported as uncertain
+                         (ask the user, never guess); preferred language
+                         is a fallback that never overrides clear
+                         evidence
+    conversation.py      v0.9 ONE shared pipeline for typed and voice
+                         input: bounded transcript → detection →
+                         duck-typed manager.submit() (same allowlist/
+                         permissions/approval as typing); optional reply
+                         generation with the language instruction prompt;
+                         engine-free (no GTK, no LLM import at module
+                         level); replies are display/speech only and are
+                         never re-submitted
+    voice_output.py      v0.9 local TTS: espeak-ng through ctypes (full
+                         argtypes — a naive call would crash) + GStreamer
+                         appsrc→alsasink playback on a worker; per-
+                         language voice selection, rate/voice-id
+                         overrides, generation-counter cancellation,
+                         completion truth to the caller; the ONLY module
+                         allowed to import ctypes
     window.py            thin GTK4 view: speech bubble, character area,
-                         subtitle/status, controls, settings popover;
-                         marshals worker-thread records with GLib.idle_add;
-                         hides on close; never renders markup
+                         subtitle/status, controls (push-to-talk mic +
+                         level meter), settings popover (voice/language
+                         section); marshals worker-thread records AND all
+                         voice callbacks with GLib.idle_add; hides on
+                         close; never renders markup
     __main__.py          `python3 -m companion` (--check/--smoke headless,
-                         --no-greeting)
+                         --no-greeting, --llm attaches local Ollama for
+                         optional spoken replies)
     assets/character/    per-state directories (frame.png convention) +
                          README identifying the artwork as placeholder
 tests/                   unittest suite (temporary sandboxes + in-memory
                          accessibility trees only)
 docs/                    ARCHITECTURE.md, SECURITY.md
 scripts/run_tests.sh     Test entry point
+scripts/install_voice_models.py  explicit confirm-first speech-model
+                         installer (--status/--model/--yes): reports size
+                         and free space, downloads via huggingface_hub —
+                         the application itself never downloads anything
 scripts/manual_smoke_apps.sh  opt-in real-launch smoke test (ALWIN_MANUAL_SMOKE=1)
 scripts/manual_smoke_automation.sh  opt-in real-AT-SPI automation smoke test
                          (ALWIN_AUTOMATION_SMOKE=1)
@@ -376,13 +423,18 @@ character.py     pure-cairo Pose      bedroom.py  pure-cairo room artwork
                  drawing core         mutates the scene; headless-safe)
 ```
 
-**State controller** (`states.py`) — 16 explicit states with a single
+**State controller** (`states.py`) — 17 explicit states with a single
 transition table (`TRANSITIONS`); an edge that is not in the table is
 rejected: from a calm state nothing changes, from an active state the
 controller falls back through a calm state (one hop, never inventing a
 state), and a *truthful* target such as `waiting_for_approval` or
 `celebrating` is recovered via that calm hop so a trusted result is
-never lost to a fallback. Every renderer call is wrapped: an animation
+never lost to a fallback. (v0.9 adds `speaking`: reachable from
+idle/greeting/listening/thinking and — because a spoken reply can land
+while the submitted task is already running — from walking/working/
+waiting_for_approval; it resolves to `idle` on the voice engine's
+completion callback, with the 120 s auto-return only as the safety net
+for a lost callback.) Every renderer call is wrapped: an animation
 exception is appended to `renderer_errors` (bounded) and **cannot
 propagate** — presentation bugs are structurally unable to reach the
 task engine. `force()` (used only for startup/sleep) still validates
@@ -517,18 +569,54 @@ nothing — its power is limited to "what the character is doing".
 **Companion window** (`window.py`) — a thin GTK4 view: speech bubble,
 character area (a 520×380 room by default), accessible subtitle (text
 alternative to the animation), minimal task status, and controls (open
-task window, hide, settings with
-greeting/subtitles/always-on-top/**reduced motion**, honest voice
-status). Worker-thread records are marshalled to the main loop with
+task window, **push-to-talk mic + input-level meter** (v0.9), hide,
+settings with
+greeting/subtitles/always-on-top/**reduced motion** plus the v0.9 voice
+& language section: mic, level meter, auto-detection, fallback
+language, spoken replies, rate, voice, ASR model and the disabled
+wake-word placeholder). Worker-thread records are marshalled to the
+main loop with
 `GLib.idle_add`; all dynamic text uses `set_text` (never markup).
 Closing hides the window; when hosted by the task application the task
 engine keeps running. Re-activation presents the existing window
 instead of building a duplicate, and `map`/`unmap` handlers start/stop
-the renderer's frame timer so nothing animates off-screen. Focus:
+the renderer's frame timer so nothing animates off-screen (the level
+meter timer stops the same way). Focus:
 `python3 -m taskui --companion` presents the task window last so the
 companion never steals keyboard focus. Always-on-top is off by default
 and best-effort (Wayland may ignore it). No web server, no remote
-service, no new threads beyond the manager's existing worker.
+service, no new threads beyond the manager's existing worker and the
+documented voice workers (`alwin-asr`, `alwin-reply`, `alwin-tts`).
+
+**Voice turn cycle** (`window.py`, v0.9) — one mic button drives
+push-to-talk through explicit phases (`off → listening → recognizing →
+[replying → speaking]`), guarded by a turn-generation counter:
+
+1. *listen* (only from idle/greeting/resting, never during the morning
+   sequence, only when `mic_enabled`): `VoiceInputService.start()` opens
+   the GStreamer pipeline on its own thread, the character enters
+   `listening`, the level meter ticks every 100 ms while visible,
+2. *stop & send*: capture stops; silent/cancelled audio is refused with
+   an honest bubble **before any model runs**, otherwise the state moves
+   to `thinking` and `SpeechRecognitionService.recognize_async()` decodes
+   on `alwin-asr` (forced language only when auto-detection is off),
+3. *cancel*: pressing the mic mid-turn bumps the serial, cancels input
+   and recognition, and any late worker result with a stale serial is
+   dropped — it can never be delivered,
+4. *submit*: the transcript is shown verbatim, then handed to
+   `ConversationService.submit(source="voice")` — the same
+   validate → detect → `manager.submit()` path typed input uses (same
+   allowlist, permissions, approval); uncertain detection adds an honest
+   "couldn't tell" bubble while the task still runs,
+5. *reply* (only when `spoken_responses` is on, the engine reports
+   available and an LLM client is attached): generated on `alwin-reply`,
+   shown as text, spoken on `alwin-tts`; the reply is **never
+   re-submitted**. On dispatch the character enters `speaking`; on the
+   engine's completion truth (success/failure/stop) it returns to
+   `idle`. A failed/absent engine degrades to text — nothing is claimed
+   as spoken,
+6. teardown releases the microphone, cancels recognition and speech so
+   no voice work outlives the window.
 
 The window also owns the **morning sequence** and the state→scene
 drive (v0.8): a character state maps to exactly one allowlisted scene
@@ -553,8 +641,10 @@ its own try/except — a companion or animation bug cannot affect a task.
 (`ALWIN_COMPANION_NAME` or settings; default `friend`, never a
 hard-coded user), enable toggle, quiet hours (`HH:MM-HH:MM`, wraps
 midnight), once per session plus an optional once-per-day 0600 marker;
-text-only (the bubble), no audio, no microphone, no presence
-assumption, no re-greet on redraw. `--no-greeting` disables it for one
+the greeting itself is text-only (the bubble) — it never opens the
+microphone, never speaks (even when spoken replies are enabled for
+voice turns) and makes no presence assumption, no re-greet on redraw.
+`--no-greeting` disables it for one
 run. When the greeting fires, the window plays the v0.8 **morning
 sequence**: the scene resets to a pre-dawn bedroom with Alwin asleep in
 bed (eyes closed, breathing, drifting `z`), the sunrise brightens and
@@ -569,12 +659,62 @@ near-instant placement (and makes the wake-up/sunrise/alarm static).
 Every timer id is tracked and cancelled on teardown, and the sequence
 runs at most once per window.
 
-**Voice** (`voice.py`) — a small `VoiceEngine` ABC (`speak`/`stop`/
-`status`/`available`) with `NullVoice` implementing it honestly:
-`available = False`, `speak()` returns `False`, nothing plays. A future
-local engine implements the same interface and is passed to the window;
-states, adapter, greeting and speech content do not change. No model
-install, no cloud, no fake engine.
+**Voice stack** (`companion/*.py`, v0.9) — six modules behind two
+seams, every one of them optional, injectable and honest:
+
+* **`voice.py`** — the `VoiceEngine` ABC (`speak`/`stop`/`status`/
+  `available`) with `NullVoice` implementing it honestly: `available =
+  False`, `speak()` returns `False`, nothing plays. Tests and headless
+  harnesses inject it unchanged.
+* **`voice_input.py`** — push-to-talk capture. A factory-injected
+  backend (default: GStreamer `autoaudiosrc ! audioconvert !
+  audioresample ! appsink`, 16 kHz mono S16) runs on its own thread;
+  `start()`/`stop()`/`cancel()`/`release()`/`level()` are the whole
+  surface. `stop()` on silence or `cancel()` returns/drops PCM without
+  ever invoking recognition; audio exists only in memory for the turn
+  (no file I/O in this module — enforced by AST meta-tests).
+* **`speech_recognition.py`** — offline ASR around faster-whisper:
+  models load with `local_files_only=True` (a missing model is an
+  honest error naming `scripts/install_voice_models.py`, never a
+  download); `recognize_async()` decodes on a worker (`alwin-asr`),
+  rejects digital silence/short audio *before* the model runs and
+  drops segments with `no_speech_prob ≥ 0.6`; `model_status()` reports
+  installed/not + approximate size for Settings.
+* **`language_registry.py`** — the CLOSED 15-language set (code, name,
+  native sample, script, RTL flag, espeak voice id). Detection, the
+  settings dropdown, reply-language mapping and TTS voice selection all
+  read this one table; adding a language means editing the table (and
+  its tests), never a keyword list.
+* **`language_detection.py`** — evidence-based detection: Unicode
+  script profile (with a dominant-script guard so mixed-script input
+  reports *uncertain* rather than confidently wrong) + seeded langdetect
+  text evidence + the ASR's own language guess as a hint. `auto=False`
+  uses the user's preferred language (forced decode; the hint is then
+  not counted as evidence). Results carry a confidence, and
+  `uncertain=True` means the UI must ask — detection never guesses in
+  front of the user. Without langdetect the service degrades to script
+  + hint evidence and says so.
+* **`conversation.py`** — ONE pipeline for typed and voice input:
+  bounded transcript → detection → duck-typed `manager.submit()` (the
+  same allowlist/permissions/approval path as typing — there is no
+  second intake) and optional reply generation whose system prompt
+  carries the language instruction ("Reply in the language used in the
+  user's latest message…"). Replies are display/speech only; they are
+  never re-submitted. The module imports no engine, no GTK and no LLM
+  library at module level (duck-typed; enforced by meta-tests).
+* **`voice_output.py`** — local TTS: espeak-ng via ctypes with *full*
+  argtypes/callback declarations (a naive call crashes the process),
+  per-language voice selection from the registry (a user-pinned
+  `voice_id` overrides), rate clamped to 0.5–2.0, and GStreamer
+  `appsrc → alsasink` playback on a worker (`alwin-tts`);
+  generation-counter cancellation and an `on_done(success, error)`
+  completion truth the window relies on to leave `speaking`. This is
+  the only module allowed to import `ctypes`.
+
+Language enters the system in exactly four places — reply prompt, ASR
+decode hint (auto vs forced), TTS voice, and detection configuration —
+and never in the task pipeline itself: `manager.submit()` and the
+approval flow are language-agnostic.
 
 ### 2D → 3D migration strategy
 
@@ -879,7 +1019,15 @@ note rather than silently ignored.
 | `ALWIN_COMPANION_QUIET_HOURS` | settings, else off | `HH:MM-HH:MM` no-greeting window |
 
 Companion preferences persist to `<state_dir>/companion_settings.json`
-(0600, closed schema, cosmetic-only — never read by the trusted core).
+(0600, closed schema — bool/str keys only, cosmetic-only — never read
+by the trusted core). v0.9 voice keys: `mic_enabled` (default on),
+`mic_level_meter` (on), `language_auto` (on — a preferred
+`language_preferred` only applies when detection is unclear),
+`spoken_responses` (off — opt-in), `speech_rate` (str, 0.5–2.0),
+`voice_id` (empty = per-language), `asr_model` (small; `tiny`/`base`/
+`small`/`medium`), `wake_word_enabled` (off; honest not-implemented
+placeholder). The v0.8 `mute_voice` placeholder key is gone — old files
+lose only that obsolete key on save.
 
 CLI flags: `--dry-run`, `--llm`, `--root DIR` (repeatable),
 `--ai-status`, `--show-config`, `--version`, `--help`.
@@ -901,7 +1049,14 @@ meta-test, 1 updated idle-animation pin) for a total of **767 tests**;
 v0.8 adds **42 more** (the 40-test dedicated animated-world scene
 suite plus 2 new source-purity meta-tests for `scene.py`/`bedroom.py`;
 the module-set and settings-schema pins were extended) for a total of
-**809 tests**:
+**809 tests**; v0.9 adds **167 more** for a total of **976 tests**
+(974 passed, 2 skipped on this machine): the six voice-stack suites
+(registry, detection, conversation, capture, recognition, voice output),
+the window voice-cycle suite (real `GLib.idle_add` marshalling pumped
+on the default main context, all devices/models/LLM faked), the
+STATE_SPEAKING pose/transition/asset extensions, the extended settings
+schema pins, and the extended security meta-suite (20-module set,
+per-module voice allowlists, single-`ctypes`-module exemption):
 the full
 v0.1/v0.2 set (242, preserved
 unchanged — covering supported/unsupported commands, traversal,
@@ -1057,13 +1212,14 @@ manager with mocked/sandboxed dependencies):
   and never calls `set_markup` (no Pango) — untrusted text can never
   be rendered as markup; and the package imports headless.
 
-Plus the 247 v0.6+v0.7+v0.8 companion tests (also all headless — no
+Plus the companion tests (also all headless — no
 window, no display, no animation loop; drawing is exercised on in-memory
 `cairo.ImageSurface`s and GTK objects are only imported/constructed,
-never shown):
+never shown), including the v0.9 voice suites:
 
-* character state controller (`test_companion_states.py`) — exactly 16
-  states with labels/expressions/edges, valid edges accepted, invalid
+* character state controller (`test_companion_states.py`) — exactly 17
+  states with labels/expressions/edges (including `speaking` and its
+  120 s safety-net auto-return), valid edges accepted, invalid
   edges rejected honestly (calm state stays put; active state falls
   back through exactly one calm hop), truthful targets
   (`waiting_for_approval`, `celebrating`) recovered instead of lost,
@@ -1083,10 +1239,10 @@ never shown):
   env/setting override, bounds/control-char stripping, time-of-day
   parts, quiet-hours parsing (wraps midnight, malformed raises),
   once-per-session dedup, once-per-day marker (0600, new day renews,
-  unwritable marker tolerated), disabled/muted preferences;
+  unwritable marker tolerated), disabled preferences;
 * renderer seam + artwork (`test_companion_renderer.py`) — abstract
   contract, expression degradation, a stand-in future-3D renderer
-  driving the unchanged controller, all 16 states drawing headless and
+  driving the unchanged controller, all 17 states drawing headless and
   deterministically with distinct frames, motion over time, missing/
   corrupt asset fallback, shipped per-state asset layout with no
   required image files;
@@ -1103,24 +1259,48 @@ never shown):
   (failed/needs-attention records never celebrate), zero/tiny canvas
   robustness, expression overrides — plus `test_companion_security.py`
   pinning `character.py` to cairo/math/dataclasses/typing imports only;
-* presentation/settings/voice (`test_companion_presentation.py`) —
+* presentation/settings (`test_companion_presentation.py`) —
   bounded bubbles (markup stays inert text), tone per state, accessible
   subtitle, minimal status without digests/error internals, no
-  approve/reject control, closed cosmetic-only settings schema with
-  0600 roundtrip and corrupt-file defaults, honest `NullVoice`;
-* companion window (`test_companion_window.py`) — headless import and
+  approve/reject control, closed cosmetic-only settings schema (bool/str
+  only, v0.9 voice keys, `mute_voice` → `spoken_responses` migration)
+  with 0600 roundtrip and corrupt-file defaults, bounded settings view;
+* voice stack (all mocked — no microphone, no model, no speaker, no
+  network): closed 15-language registry with RTL and espeak ids
+  (`test_language_registry.py`), detection over 15 code samples, Tanglish,
+  mixed/short/unknown input, preference fallback and stale hints
+  (`test_language_detection.py`), the shared conversation pipeline
+  (language switching, instruction prompt, verbatim submission, no
+  English fallback, engine-free) (`test_companion_conversation.py`),
+  capture lifecycle incl. cancel-discards-PCM (`test_companion_voice_
+  input.py`), ASR async/cancel/silence/no-speech/model-status honesty
+  (`test_companion_speech_recognition.py`), TTS voice/rate/generation
+  cancellation/completion truth (`test_companion_voice_output.py`);
+* companion window (`test_companion_window.py` +
+  `test_companion_window_voice.py`) — headless import and
   construction, constants (low-frequency idle check, modest frame
-  rate), light self-contained CSS, teardown ignores late records;
+  rate), light self-contained CSS, teardown ignores late records; plus
+  the full push-to-talk cycle pumped through the real GLib default main
+  context: verbatim submit, silence refused before ASR, forced vs auto
+  language, honest recognition errors, cancel drops late results,
+  uncertain → ask, busy-state refusal, spoken reply → `speaking` → idle
+  on engine truth (reply never re-submitted), LLM/voice failure =
+  silence, settings applied live, teardown releases everything;
 * observers (`test_taskui_observers.py`) — dual delivery with the
   `on_update` slot, observer exceptions cannot break a task, a truthy
   observer return approves nothing (the mutating task still waits for a
   digest-bound approval), duplicate registration collapsed, removal
   stops delivery;
 * security meta-checks (`test_companion_security.py`) — AST analysis of
-  every `companion` module: no shell/spawn/eval/network/microphone
-  imports or calls, no import of the execution engine anywhere in the
+  every one of the 20 `companion` modules: no shell/spawn/eval/network
+  imports or calls, per-module voice allowlists at any import depth,
+  `ctypes` reachable from exactly `voice_output.py`, `wave`/`audioop`
+  and every recording/network library banned package-wide, no import of
+  the execution engine anywhere in the
   package, only `__main__.py` may import `taskui`, the state controller
-  and adapter are pure, no `set_markup`/remote CSS in the window, no
+  and adapter are pure, conversation reaches only the duck-typed
+  `manager.submit()` (and carries the language instruction), no
+  `set_markup`/remote CSS in the window, no
   web-server surface, and no hard-coded user name.
 
 Four separate **opt-in** manual smoke tests exist and are never

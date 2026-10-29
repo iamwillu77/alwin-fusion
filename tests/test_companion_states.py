@@ -3,7 +3,8 @@
 The state controller owns the companion's current animation state and
 must uphold the milestone's rules:
 
-* exactly 16 explicit states with a validated transition graph,
+* exactly 17 explicit states with a validated transition graph
+  (v0.9 added ``speaking`` for voice output),
 * invalid transitions never raise and never invent a state — they use
   the documented safe fallback (a calm state),
 * a truthful outcome driven by the adapter (waiting_for_approval,
@@ -75,16 +76,16 @@ class _RecordingRenderer(NullRenderer):
 
 
 class VocabularyTests(unittest.TestCase):
-    def test_exactly_sixteen_states(self):
-        self.assertEqual(len(ALL_STATES), 16)
-        self.assertEqual(len(set(ALL_STATES)), 16, "states are unique")
+    def test_exactly_seventeen_states(self):
+        self.assertEqual(len(ALL_STATES), 17)
+        self.assertEqual(len(set(ALL_STATES)), 17, "states are unique")
 
     def test_required_state_names_present(self):
         required = {
             "sleeping", "waking_up", "greeting", "idle", "listening",
-            "thinking", "walking", "writing", "coding", "reading",
-            "waiting_for_approval", "working", "verifying", "celebrating",
-            "error", "resting",
+            "thinking", "speaking", "walking", "writing", "coding",
+            "reading", "waiting_for_approval", "working", "verifying",
+            "celebrating", "error", "resting",
         }
         self.assertEqual(set(ALL_STATES), required)
 

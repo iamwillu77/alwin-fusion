@@ -1,9 +1,11 @@
-"""Entry point for the Alwin companion (v0.8.0).
+"""Entry point for the Alwin companion (v0.9.0).
 
 Launch the companion window::
 
     python3 -m companion                 # companion character window
     python3 -m companion --no-greeting   # skip the startup greeting
+    python3 -m companion --llm           # local Ollama for optional
+                                         # spoken replies (still local)
     python3 -m taskui --companion        # task window + companion together
 
 Useful flags::
@@ -11,7 +13,8 @@ Useful flags::
     python3 -m companion --check   # headless self-check (no display):
                                    # state graph, adapter mapping, greeting,
                                    # assets, cairo rendering of all states,
-                                   # the bedroom scene model + rendering
+                                   # the bedroom scene model + rendering,
+                                   # and the v0.9 voice/language registry
     python3 -m companion --smoke   # scripted headless walkthrough of the
                                    # companion behaviour, including the
                                    # animated-world morning sequence (no
@@ -21,11 +24,18 @@ Environment: ``ALWIN_HOME``, ``ALWIN_PERMITTED_ROOTS``,
 ``ALWIN_STATE_DIR`` (same as the CLI/task UI), plus the greeting
 variables ``ALWIN_COMPANION_NAME`` and ``ALWIN_COMPANION_GREETING``.
 
-Honesty notes: no voice engine is connected (text bubbles only), no
-microphone is opened, no automatic startup service is installed, and
-the companion never plans/approves/executes anything itself.  The
-animated world is purely visual: the scene can move Alwin around his
-room, but it never executes, approves or modifies a task.
+Honesty notes (v0.9): microphone input, language-matched replies and
+optional spoken output exist, but every engine is **opt-in and probed** —
+capture needs a working microphone (push-to-talk, nothing recorded to
+disk), recognition needs ``faster-whisper`` **plus** an explicitly
+installed model (``scripts/install_voice_models.py``; nothing is ever
+downloaded silently), speech needs ``espeakng-loader`` + an audio
+device, and replies need ``--llm`` with a running local Ollama.  Any
+missing piece degrades to an honest bubble, never a fake result.  No
+automatic startup service is installed, and the companion never
+plans/approves/executes anything itself.  The animated world is purely
+visual: the scene can move Alwin around his room, but it never
+executes, approves or modifies a task.
 """
 
 from __future__ import annotations
@@ -58,6 +68,11 @@ def _build_parser() -> argparse.ArgumentParser:
                              "companion behaviour (no display)")
     parser.add_argument("--no-greeting", action="store_true",
                         help="do not show the startup greeting this run")
+    parser.add_argument("--llm", action="store_true",
+                        help="attach the local Ollama client (used for the "
+                             "manager's proposals when the task window "
+                             "opens and for the companion's optional "
+                             "spoken replies; still fully local)")
     parser.add_argument("--version", action="version",
                         version=f"alwin-companion {__version__}")
     return parser
@@ -85,8 +100,8 @@ def _run_check() -> int:
             print(f"  FAIL: {what}")
 
     print("Companion self-check (headless)")
-    expect(len(states.ALL_STATES) == 16, "16 character states defined")
-    expect(len(states.TRANSITIONS) == 16, "every state has a transition set")
+    expect(len(states.ALL_STATES) == 17, "17 character states defined")
+    expect(len(states.TRANSITIONS) == 17, "every state has a transition set")
     expect(states.is_valid_transition("idle", "listening"),
            "idle -> listening is valid")
     expect(not states.is_valid_transition("sleeping", "working"),
@@ -170,7 +185,42 @@ def _run_check() -> int:
             drawn += 1
         except Exception as exc:  # noqa: BLE001
             failures.append(f"drawing {state}: {exc}")
-    expect(drawn == 16, "all 16 states render with the vector character")
+    expect(drawn == len(states.ALL_STATES),
+           "all states render with the vector character")
+
+    # --- v0.9 voice stack (headless: no device, no model, no network) ------ #
+    from companion.language_registry import (
+        LANGUAGES, SUPPORTED_CODES, choices_for_ui, supports_rtl,
+    )
+    from companion.language_detection import detect_language
+    from companion.speech_recognition import MODEL_SIZES, model_status
+    from companion.voice_output import CompanionVoice
+
+    expect(len(LANGUAGES) == 15 and SUPPORTED_CODES == tuple(
+        s.code for s in LANGUAGES),
+        "closed registry defines exactly the 15 supported languages")
+    expect(len(choices_for_ui()) == 15, "settings dropdown covers all 15")
+    expect(supports_rtl("ur") and supports_rtl("ar")
+           and not supports_rtl("en") and not supports_rtl("zh"),
+           "right-to-left is limited to Urdu and Arabic")
+    detection = detect_language(
+        "வணக்கம், எப்படி இருக்கிறீர்கள்? என் உலாவியைத் திறக்க வேண்டும்."
+    )
+    if detection.code == "ta":
+        expect(True, "language detection works headless (Tamil sample)")
+    else:
+        # Honest degradation: without langdetect only script/hint
+        # evidence exists; the check reports it instead of failing.
+        print("  note: text detection is degraded here "
+              "(install langdetect for full detection)")
+    expect(MODEL_SIZES == ("tiny", "base", "small", "medium"),
+           "closed set of ASR model sizes")
+    status = model_status("small")
+    print(f"  note: speech model — {status['detail']}")
+    voice_probe = CompanionVoice()
+    print(f"  note: voice engine — {voice_probe.status}")
+    expect(NullVoice().speak("hello") is False,
+           "NullVoice never claims to have spoken")
 
     # v0.8 — the animated world: scene model, movement, and room render.
     from companion.scene import (
@@ -224,7 +274,7 @@ def _run_smoke() -> int:
     from companion.renderer import NullRenderer
     from companion.renderer2d import AssetStore, draw_character
     from companion.states import ALL_STATES, CharacterController, STATE_IDLE
-    from companion.voice import NullVoice
+    from companion.voice import NullVoice, voice_status
     import cairo
 
     failures: List[str] = []
@@ -420,7 +470,9 @@ def _run_smoke() -> int:
     expect(status_view["present"] is False, "no task -> honest empty status")
     voice = NullVoice()
     expect(voice.speak("hello") is False,
-           "voice placeholder never claims to have spoken")
+           "the no-engine voice never claims to have spoken")
+    expect(voice_status(voice)["available"] is False,
+           "voice absence is reported honestly")
 
     if failures:
         print(f"SMOKE FAILED ({len(failures)} check(s))")
@@ -433,8 +485,9 @@ def _run_smoke() -> int:
 # Window mode
 # --------------------------------------------------------------------------- #
 
-def _run_window(no_greeting: bool) -> int:  # pragma: no cover - needs display
+def _run_window(no_greeting: bool, use_llm: bool = False) -> int:  # pragma: no cover - needs display
     from ai_core.config import ConfigError, load_config
+    from taskui.manager import TaskManager
     from taskui.status import collect_status
 
     from companion.window import CompanionWindow, Gtk
@@ -460,23 +513,39 @@ def _run_window(no_greeting: bool) -> int:  # pragma: no cover - needs display
     status = collect_status(config.ollama_base_url, config.ollama_model)
     greeting_config = GreetingConfig(enabled=not no_greeting)
 
+    # v0.9: the task engine is built eagerly (not on first window
+    # open) so microphone *and* typed requests can be submitted right
+    # away — constructing a manager starts no task; it only makes the
+    # single trusted submission path available.  ``--llm`` attaches
+    # the local Ollama client for proposals and optional replies.
+    llm_client = None
+    if use_llm:
+        from ai_runtime.ollama_client import OllamaClient
+
+        llm_client = OllamaClient(
+            base_url=config.ollama_base_url,
+            model=config.ollama_model,
+            timeout=config.ollama_timeout,
+        )
+    manager = TaskManager(config, use_llm=use_llm, llm_client=llm_client)
+
     companion = CompanionWindow(
-        None,
+        manager,
         config=config,
         status=status,
+        llm_client=llm_client,
         greeting_config=greeting_config,
     )
 
     # "Open task window" builds the trusted task UI lazily *in this same
-    # process/loop* — one application, two windows, one engine.
+    # process/loop* — one application, two windows, one engine (the
+    # engine above is shared, never a second one).
     holder = {}
 
     def open_task_window() -> None:
         if "task" not in holder:
             from taskui.gtk_app import TaskWindow
-            from taskui.manager import TaskManager
 
-            manager = TaskManager(config)
             holder["task"] = TaskWindow(
                 manager, status=status, application=companion.app
             )
@@ -492,7 +561,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         return _run_check()
     if args.smoke:
         return _run_smoke()
-    return _run_window(no_greeting=args.no_greeting)
+    return _run_window(no_greeting=args.no_greeting, use_llm=args.llm)
 
 
 if __name__ == "__main__":

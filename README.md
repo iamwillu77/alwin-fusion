@@ -2,11 +2,26 @@
 
 **Open-source, offline-first AI-native operating system — in progress.**
 
-Version **0.8.0** · Milestone: **Animated World & Walking Experience**
+Version **0.9.0** · Milestone: **Multilingual Voice Intelligence**
 
 Alwin Fusion lets you control your computer through natural-language
-commands. v0.8 gives **Alwin**, the persistent, lightweight desktop
-companion (`companion/`), an **animated bedroom world**: he now lives in
+commands. v0.9 gives **Alwin**, the persistent, lightweight desktop
+companion (`companion/`), **multilingual voice intelligence**: he now
+listens (push-to-talk microphone, nothing recorded to disk), recognizes
+speech offline with a local Whisper model, **detects which of 15
+languages you used** (auto-detection on by default; a fallback
+preference never overrides a clear result), submits your words through
+the *same* approval-gated task pipeline typed input uses, and — if you
+opt in — replies in that language with a local voice. Every engine is
+probed and optional: no microphone, no model, no espeak or no audio
+device each degrade to an honest message, never a fake transcript or a
+silent English fallback. It builds on the unchanged trusted core (parse
+→ plan → permission → approval → execute → verify → audit) and on the
+v0.5 task experience (`taskui`); there is no second execution engine.
+Fully offline, with an optional local Ollama model that is never
+required and never auto-downloaded.
+
+v0.8 gave the same companion an **animated bedroom world**: he lives in
 an illustrated room (pastel wall, window with a sunrise, bed, bedside
 table with an alarm clock, rug, desk with a notebook, pencil and laptop,
 chair) and genuinely **moves between places** — he wakes up in bed, gets
@@ -20,14 +35,10 @@ tousled hair, blue hoodie, jointed arms/legs) drawn procedurally with
 cairo. He mirrors *real* task states truthfully, shows a configurable
 startup greeting, and stays strictly outside the trusted pipeline — the
 scene can move him around his room but can never grant a permission or
-change an outcome. It builds on the unchanged trusted core (parse → plan
-→ permission → approval → execute → verify → audit) and on the v0.5 task
-experience (`taskui`); there is no second execution engine. Fully offline,
-with an optional local Ollama model that is never required and never
-auto-downloaded.
+change an outcome.
 
 ```
-ALWIN FUSION v0.8
+ALWIN FUSION v0.9
 Local AI Core + Documents + Applications + Desktop Automation
 Task experience: python3 -m taskui · Companion: python3 -m companion
 
@@ -82,13 +93,13 @@ $ python3 -m taskui
 └──────────────────────────────────────────────────────────────┘
 ```
 
-And, next to it, the v0.8 companion:
+And, next to it, the companion:
 
 ```
 $ python3 -m taskui --companion
 ┌─────────────────────────┐
-│  Hi Friend! Good        │   ← speech bubble (text only; no voice,
-│  morning! What shall     │      no microphone, no fake speech)
+│  Hi Friend! Good        │   ← speech bubble (text; spoken aloud
+│  morning! What shall     │      only if you opt in — v0.9 voice)
 │  we do today?            │
 │          ╭─────╮         │
 │         ▕▟█▙▀▟▙▛▜        │   ← Alwin: a full-body cartoon boy
@@ -99,7 +110,7 @@ $ python3 -m taskui --companion
 │         ╱  ╰───╯  ╲      │
 │  Alwin is thinking.      │   ← accessible subtitle (text alternative)
 │  Planning…               │   ← minimal task status
-│ [Open task window][Settings][Hide]
+│ [Open task window][Mic][Settings][Hide]   ← push-to-talk (v0.9)
 └─────────────────────────┘
 ```
 
@@ -193,19 +204,20 @@ execution and verification stay where they were.
   closed schema on read, and malformed records are skipped and counted
   — never repaired or executed. It is a normal user-owned file, not
   tamper-proof.
-- **Alwin companion** (`companion/`, v0.8) — a persistent, lightweight
+- **Alwin companion** (`companion/`, v0.9) — a persistent, lightweight
   desktop character beside the task window (`python3 -m taskui
   --companion`, or `python3 -m companion` alone): a small GTK4 window
   showing an **original full-body cartoon boy** (large expressive head,
   tousled dark-brown hair, big brown eyes, a blue hoodie with an
   original ALWIN emblem, jointed arms with hands, legs and red
   sneakers) drawn procedurally with cairo — no image assets, no new
-  dependencies — in one of **16 explicit states** with validated
+  dependencies — in one of **17 explicit states** with validated
   transitions and safe fallbacks. Every state reuses one shared `Pose`
   system (`companion/character.py`), so proportions, hair and clothing
   stay identical while the pose and face animate: idle breathing and
   natural varied blinking, a greeting wave, thinking (hand to chin),
-  listening, a walking swing, distinguishable **writing** and **coding**
+  listening, **speaking** (v0.9: subtle mouth motion while a reply is
+  audible), a walking swing, distinguishable **writing** and **coding**
   poses at a desk (notebook with a scribbling pencil; laptop with
   floating code glyphs), reading, verifying with a magnifier, a wrench
   for general work, celebrating **only** from a trusted `completed` (a
@@ -217,13 +229,63 @@ execution and verification stay where they were.
   subtitles are bounded plain text; the startup greeting is a sequenced
   wake-up → wave → bubble → idle flow, configurable
   (`ALWIN_COMPANION_NAME`, enable toggle, quiet hours, once per
-  session/day — never hard-coded, never re-greeted on redraw); voice is
-  an honestly-unavailable placeholder (`NullVoice`, no audio, no mic);
-  the renderer sits behind a small interface a future 3D
+  session/day — never hard-coded, never re-greeted on redraw); the
+  renderer sits behind a small interface a future 3D
   implementation can replace unchanged. The companion observes
   read-only records and is structurally incapable of approving,
   executing or changing anything (source-level meta-checks enforce that
   no companion module imports the execution engine or can shell out).
+- **Multilingual voice** (`companion/` voice stack, v0.9) — talk to the
+  companion instead of typing, through the *same* trusted pipeline:
+  - **Push-to-talk capture** (`voice_input.py`): one **Mic** button
+    starts the microphone, a second press stops and sends; cancel at
+    any point **discards** the audio. Digital silence is refused
+    *before* any model runs. Audio lives in memory only — **no
+    recording is ever written to disk or uploaded** (pinned by source
+    meta-checks: no companion module can open a file for writing from
+    the voice path, `wave`/`audioop` are banned package-wide).
+  - **Offline speech recognition** (`speech_recognition.py`):
+    faster-whisper with a **local, explicitly installed** model
+    (`tiny`/`base`/`small`/`medium`, default `small`, loaded with
+    `local_files_only=True` — Alwin **never** downloads anything; install
+    a model with `python3 scripts/install_voice_models.py`, which asks
+    first and reports the size). Recognition runs on a worker thread,
+    never the GTK main loop, and never invents words: the transcript is
+    shown verbatim and empty/low-confidence results stay empty.
+  - **Automatic language detection** (`language_detection.py` +
+    `language_registry.py`): a **closed registry of exactly 15
+    languages** (en, ta, hi, te, ml, kn, ur, zh, fr, ru, es, ar, bn, pt,
+    id) with native-script samples and correct espeak voice per entry;
+    detection combines Unicode-script profiling with a seeded statistical
+    text detector plus the recognizer's own language guess — **no
+    keyword lists**. Auto-detection is **on by default**; your preferred
+    language is only a fallback for unclear input and never overrides a
+    clear result. Mixed-script or ambiguous input is reported as
+    *uncertain* and the companion **asks you** instead of guessing.
+    Urdu and Arabic are distinct entries with correct right-to-left
+    handling (no transcode, no substitution).
+  - **Language-matched replies** (`conversation.py`): one shared
+    conversation service drives typed *and* voice input — a single
+    pipeline (validate → detect → `manager.submit()`), never a
+    per-language assistant. The detected language is injected into the
+    reply prompt as a plain instruction ("Reply in the language used in
+    the user's latest message…"), and technical names are preserved.
+    The reply text is display/speech only — it is **never re-submitted**
+    as a task, and approval/permissions are untouched.
+  - **Optional spoken output** (`voice_output.py`): local espeak-ng
+    synthesis (ctypes, no subprocess) with a voice verified for every
+    one of the 15 languages, played through GStreamer off the GTK
+    thread; the character enters `speaking` and returns to idle on the
+    engine's completion truth (success, failure or user-cancel). Speech
+    is **opt-in** (off by default); a missing engine, voice or audio
+    device is reported honestly and never faked.
+  - **Honest degradation**: no microphone → the Mic button explains
+    itself; no model → an install hint with the exact command; no
+    espeak/audio → the text reply still shows. Nothing is ever claimed
+    as heard, recognized or spoken before it actually happened.
+  - **Wake word: not implemented** (v0.9). The settings switch exists
+    but is disabled and labelled as unavailable — it will not be
+    claimed until it is implemented and tested.
 - **Two-phase pipeline** (`preview()` + `run_previewed()`,
   `ai_core/pipeline.py`) — the additive split the desktop UI needs:
   `preview()` runs parse → plan → permission and **never executes**;
@@ -330,6 +392,32 @@ execution and verification stay where they were.
   The rest of the task experience (lifecycle, manager, presenter,
   history, status probes) is pure standard library and runs headless.
   Alwin Fusion never installs any of these.
+- Optional, for the v0.9 voice features (installed by **you**, with
+  your own approval — Alwin Fusion never installs anything and the
+  application itself never downloads a model):
+
+  ```bash
+  python3 -m pip install --user faster-whisper espeakng-loader langdetect
+  python3 scripts/install_voice_models.py --status   # report only
+  python3 scripts/install_voice_models.py            # install a model (asks first)
+  sudo apt install espeak-ng                         # optional system voice data
+  ```
+
+  | Dependency | Enables | If missing |
+  |---|---|---|
+  | `faster-whisper` (+ an explicitly installed model) | speech recognition | the mic button explains what to install; **no transcript is ever invented** |
+  | `espeakng-loader` / `espeak-ng` (15 verified voices) | spoken replies (opt-in) | replies stay text-only; status says "espeak-ng is not installed" honestly |
+  | `langdetect` (small, optional) | full statistical text detection | detection degrades to script + recognizer hint (reported honestly; mixed-script input stays "uncertain") |
+  | GStreamer with `autoaudiosrc`/`alsasink` (present on a normal GNOME desktop) | microphone capture + audio playback | clear "no audio device" errors; everything else keeps working |
+  | a working microphone | push-to-talk input | honest "microphone unavailable" bubble; typing still works |
+
+  Recognition needs a model you install explicitly with
+  `scripts/install_voice_models.py` (it reports the approximate size and
+  your free disk space before asking; `--status` never touches the
+  network). **Alwin performs no model downloads, ever** — recognition
+  loads with `local_files_only=True`. Hardware-dependent behaviour (real
+  mic, real speakers) depends on your machine; every test in the suite
+  fakes or injects these layers.
 
 ## Quick start
 
@@ -395,17 +483,25 @@ python3 -m taskui --check         # headless self-check (no window): prints
                                   # AI/automation status + history location
 python3 -m taskui --smoke         # scripted headless walkthrough of the
                                   # full lifecycle (used by the UI smoke test)
-python3 -m taskui --companion      # v0.8: task window + Alwin companion together
+python3 -m taskui --companion      # v0.9: task window + Alwin companion together
 
-# v0.8: the Alwin companion (full-body animated character window)
+# v0.9: the Alwin companion (animated character + multilingual voice)
 python3 -m companion               # companion alone (its Settings can open
                                    # the task window in the same process)
+python3 -m companion --llm         # local Ollama for optional spoken replies
 python3 -m companion --no-greeting # skip the startup greeting this run
 python3 -m companion --check       # headless self-check: state graph,
-                                   # task mapping, greeting, all 16 drawings
+                                   # task mapping, greeting, all 17 drawings,
+                                   # language registry + detection + voice probe
 python3 -m companion --smoke       # scripted headless companion walkthrough
 ALWIN_COMPANION_NAME=Ada python3 -m companion   # greeting name (never hard-coded)
 ALWIN_COMPANION_SMOKE=1 scripts/manual_smoke_companion.sh  # opt-in real-GUI smoke
+
+# v0.9 voice: install a speech model explicitly (asks first; reports
+# the size and your free space — Alwin itself never downloads anything)
+python3 scripts/install_voice_models.py --status   # what is installed
+python3 scripts/install_voice_models.py            # install 'small' (~484 MiB)
+python3 scripts/install_voice_models.py --model tiny   # or a smaller one
 
 # Use the local Ollama model to propose actions (always validated;
 # falls back to the built-in parser with a visible note)
@@ -451,7 +547,7 @@ blocks.
 > openpyxl does not calculate either. Open the workbook in a
 > spreadsheet application (LibreOffice Calc, Excel, …) to calculate.
 
-## The Alwin companion (v0.8)
+## The Alwin companion (v0.9)
 
 ### Launching it
 
@@ -459,6 +555,7 @@ blocks.
 python3 -m taskui --companion    # recommended: task window + Alwin side by side
 python3 -m companion             # Alwin alone (Settings can open the task
                                  # window later — same process, same engine)
+python3 -m companion --llm       # attach local Ollama for optional spoken replies
 python3 -m companion --check     # headless self-check (no display)
 python3 -m companion --smoke     # headless walkthrough (no display)
 ALWIN_COMPANION_SMOKE=1 scripts/manual_smoke_companion.sh   # opt-in real window
@@ -470,7 +567,7 @@ system settings. If GTK4 or a display is missing, `python3 -m
 companion` says so honestly and exits; the headless `--check`/`--smoke`
 modes still prove the companion core.
 
-### The 16 character states
+### The 17 character states
 
 | State | Entered when (trusted source) | Animation |
 |---|---|---|
@@ -478,8 +575,9 @@ modes still prove the companion core.
 | `waking_up` | companion session starts | morning stretch + yawn, eyes opening, rising sun |
 | `greeting` | startup greeting fires | raised hand waving several times + big smile |
 | `idle` | nothing to do; returns after outcomes | subtle breathing + natural varied blinking |
-| `listening` | you submit a request | attentive wide eyes, raised brows, small nod |
-| `thinking` | planning a plan | hand at the chin, gaze up, drifting thought dots |
+| `listening` | you submit a request / open the mic (v0.9) | attentive wide eyes, raised brows, small nod |
+| `thinking` | planning a plan / recognizing speech (v0.9) | hand at the chin, gaze up, drifting thought dots |
+| `speaking` | a spoken reply is audible (v0.9) | upright posture, subtle mouth motion (~9 Hz, documented) while the voice engine reports audio |
 | `walking` | plan approved — moving to work | alternating leg/arm swing with a body bob |
 | `writing` | executing a document/text action | seated at a desk, scribbling pencil over a notebook |
 | `coding` | executing a code/config file creation | seated at a desk, hands tapping a laptop, floating `< / >` glyphs |
@@ -496,6 +594,85 @@ Invalid transitions never raise: they fall back through a calm state
 that fallback). A failed, rejected or cancelled task **never** renders a
 success animation; only the verified `completed` lifecycle state reaches
 `celebrating`.
+
+The `speaking` state (v0.9) is entered only where the transition graph
+allows it and only after the voice engine has *actually* dispatched
+audio; a reply that finishes while Alwin is already walking/working on
+your task plays the audio and skips the animation rather than forcing an
+invalid state. It returns to `idle` when the engine reports completion
+(success, failure or user cancel alike); a 120 s auto-return is only the
+safety net for a lost callback. The mouth motion is deliberately simple
+(a documented sine oscillation — no lip-sync tracking) and stops with
+every other animation while the window is hidden or reduced motion is
+on.
+
+### Talking to Alwin (v0.9 voice workflow)
+
+The mic button is **push-to-talk** — one click cycles the whole turn:
+
+1. click **Mic** while Alwin is idle → the microphone opens (`listening`
+   with a live input-level meter; the level meter runs only while the
+   window is visible),
+2. speak, then click **Mic** again → capture stops; pure silence is
+   refused with an honest message *before* any model runs,
+3. recognition runs on a worker thread (the GTK main loop never blocks);
+   the transcript appears **verbatim** in the bubble,
+4. your words go through the **same** conversation pipeline typed input
+   uses — one `ConversationService`, validate → detect →
+   `manager.submit()`, the same allowlist, permissions and approval
+   gates. A transcript is untrusted text, exactly like typing it,
+5. language: auto-detection (default **on**) picks the language from the
+   transcript + the recognizer's own guess; with auto-detection off your
+   preferred language is forced into the decode instead. Detection that
+   cannot decide honestly says so and asks you — it never invents a
+   language,
+6. with **Spoken replies** enabled (Settings, off by default) and
+   `--llm`, the local model drafts a short acknowledgement *in the
+   detected language* on a worker thread and espeak-ng speaks it; the
+   character enters `speaking` and returns to idle on completion truth,
+7. click **Mic** during recognition/reply → the turn is **cancelled**:
+   the in-flight result is discarded by generation counter and can never
+   be delivered late; during speech it interrupts playback.
+
+Failure paths are all honest: no microphone → an explanatory bubble;
+no installed model → the exact install command; no espeak/audio device →
+the text reply still appears (nothing claims to have been spoken); no
+LLM → the task is submitted and no reply is faked. `NullVoice` (still
+available for tests/injection) never claims to have spoken.
+
+**Push-to-talk only in v0.9** — there is no wake word (the Settings
+switch is shown disabled and labelled "not available yet"), no
+continuous listening, and no hands-free mode; those are future work and
+are not claimed.
+
+### Speech-model and language quality (measured, honest)
+
+Models are **never** downloaded by the application. Install one
+explicitly:
+
+```bash
+python3 scripts/install_voice_models.py --status   # report, no network
+python3 scripts/install_voice_models.py --model small   # ~484 MiB, asks first
+```
+
+| Model | Approx size | Notes |
+|---|---|---|
+| `tiny` | ~75 MiB | fastest, weakest — fine for wake-free short commands |
+| `base` | ~145 MiB | quick, decent for clear speech |
+| `small` (default) | ~484 MiB | the balance measured below |
+| `medium` | ~1530 MiB | best overall, but see the weak-language caveat |
+
+Recognition quality was measured on **real speech** (FLEURS
+recordings) with the default `small` model, auto-detect: **14 of 15
+languages** were recognized with a usable transcript (Urdu was decoded
+as Hindi — forcing `ur` fixes it: similarity 0.96). Telugu, Malayalam
+and Bengali remain weak even with `medium` (measured word similarities
+0.11 / 0.00 / 0.07) — **no model size fixes them today**, so treat those
+three as best-effort: the transcript is shown verbatim so you can see
+exactly what was (mis)heard and correct it, and typing remains fully
+supported. This is stated here rather than hidden because a
+multilingual UI that pretends to perfect coverage would be dishonest.
+Espeak TTS voices, by contrast, were verified for **all 15 languages**.
 
 ### The animated world (v0.8)
 
@@ -629,11 +806,17 @@ runtime — the room and character are plain cairo.
 | `ALWIN_COMPANION_GREETING` | *(settings, else on)* | `0`/`false`/`no`/`off` disables the startup greeting |
 | `ALWIN_COMPANION_QUIET_HOURS` | *(settings, else off)* | `HH:MM-HH:MM` window in which Alwin does not greet |
 
-Companion preferences (greeting on/off, name, quiet hours, mute
-placeholder, always-on-top, subtitles, reduced motion) persist to
+Companion preferences (greeting on/off, name, quiet hours,
+always-on-top, subtitles, reduced motion, and — v0.9 — microphone on
+off, level meter, auto language detection on/off, preferred fallback
+language, spoken replies, speech rate, voice, ASR model, wake-word
+placeholder) persist to
 `$ALWIN_STATE_DIR/companion_settings.json` (mode 0600, closed schema —
-unknown keys are ignored; this file is cosmetic-only and never read by
-the trusted core).
+bool/str values only; unknown keys are ignored; this file is
+cosmetic-only, never read by the trusted core, and can never grant a
+permission or enable execution). Auto language detection defaults to
+**on** and a preferred language only applies when detection is unclear;
+spoken replies default to **off**.
 
 CLI flags: `--dry-run`, `--llm`, `--root DIR` (repeatable),
 `--ai-status`, `--show-config`, `--version`, `--help`.
@@ -653,7 +836,7 @@ All tests run in temporary directories; they never modify your real
 launch adapter's `popen`/`which`, the automation backend's AT-SPI
 session, adapter factory, clock and `/proc` root are all injected
 fakes; fake `/proc` trees are temporary directories of `<pid>/comm`
-files). The suite (767 tests) covers supported/unsupported commands,
+files). The suite (974 tests) covers supported/unsupported commands,
 traversal and symlink escapes, permission denial, approval rejection,
 directory creation, verification failure, Ollama-unavailable operation,
 absence of overwrite/delete capability, dry-run inertness,
@@ -694,28 +877,52 @@ badges, approval affordances, step rendering, verification evidence,
 bounded untrusted text), and AST-based source meta-checks (no
 subprocess/os.system/eval/exec anywhere in `taskui/`, only the manager
 imports the execution engine, the GTK view never renders markup). The
-v0.8 companion is covered the same way (247 headless tests, no window
-and no display): the 16-state controller (valid/invalid
+companion is covered the same way (headless tests, no window and no
+display): the 17-state controller (valid/invalid
 transitions, calm fallbacks, truthful-target recovery, renderer errors
 contained and recorded), the task-event adapter (every lifecycle state
 mapped, approval → `waiting_for_approval`, **failed/needs-attention/
 cancelled never reach `celebrating`**, action → writing/coding/reading
 identification, sequence step mapping, bounded curated speech, no
 manager/approve/execute surface), the greeting (name configurability,
-session and once-per-day dedup, quiet hours, disabled/muted preference,
+session and once-per-day dedup, quiet hours, disabled preference,
 0600 marker, unwritable-marker tolerance), the renderer seam (abstract
 contract, null renderer, a stand-in "future 3D" renderer driving the
-unchanged controller), the cairo artwork (all 16 states draw headless,
+unchanged controller), the cairo artwork (all 17 states draw headless,
 deterministic, visually distinct), asset fallback (missing/corrupt
 `frame.png` degrade to the vector character), the pure presentation
 view-model (bounded text, no approve/reject affordance, no digests or
 error internals exposed), manager observers (dual delivery with
 `on_update`, observer exceptions cannot break a task, a truthy observer
 return approves nothing), and AST-based meta-checks (no companion module
-can shell out/eval/socket/microphone, imports of the execution engine
+can shell out/eval/socket, imports of the execution engine
 are banned package-wide, only `__main__.py` may import `taskui`, the
 state controller is pure, the window never renders markup or remote
-resources, no user name is hard-coded). The v0.7 full-body character is
+resources, no user name is hard-coded). The v0.9 **voice stack** has its
+own dedicated suites (all deterministic; hardware, models and the LLM
+are faked or injected, no network): the closed 15-language registry
+(including RTL Urdu/Arabic and per-language espeak ids), language
+detection (15/15 code samples, Tanglish tolerance, mixed-script and
+short/ambiguous input honestly *uncertain*, preferred-language fallback
+never overriding a clear result), the shared conversation pipeline
+(language switching across turns, one instruction-driven reply prompt,
+technical names preserved, transcripts submitted verbatim, **no English
+fallback and no per-language assistant**), microphone capture (start/
+stop/cancel/release, silence rejected before any model, cancelled audio
+discarded for good), recognition (worker-thread decoding, no-speech
+rejection, forced-vs-auto language, honest failure surfaces, model-status
+reporting), voice output (per-language voice selection, generation-
+counter cancellation, completion truth on success *and* failure,
+`NullVoice` never claims speech), the window's full push-to-talk cycle
+(submit verbatim, cancel drops late results, uncertain → ask, spoken
+reply enters `speaking` and returns to idle on engine truth, settings
+apply live, teardown releases everything), settings schema (closed,
+bool/str only, `mute_voice` → `spoken_responses` migration), the
+security meta-suite (per-module import allowlists for the 20 companion
+modules, `ctypes` reachable from exactly `voice_output.py`, no recording
+persistence, transcripts reaching only `TaskManager.submit()`), and the
+STATE_SPEAKING pose/transition/asset coverage. The v0.7 full-body
+character is
 covered by its own dedicated suite (`tests/test_companion_character.py`,
 27 tests): non-empty and substantial drawing inside real image bounds at
 five widget sizes (head, hands and feet never clipped), uniform
@@ -849,7 +1056,7 @@ taskui/         lifecycle (state machine) · history (validated,
                 the pipeline + read-only observers) · presenter (pure
                 view-model) · status (honest AI/automation probes) ·
                 gtk_app (thin GTK4 view) · __main__ entry point
-companion/      states (16-state character controller) · character
+companion/      states (17-state character controller) · character
                 (full-body cartoon boy: shared Pose system, per-state
                 procedural animation — pure cairo, headless) ·
                 renderer (renderer interface + headless null renderer) ·
@@ -858,14 +1065,23 @@ companion/      states (16-state character controller) · character
                 records → character states + bounded speech) ·
                 presentation (pure view-model) · greeting (sequenced,
                 configurable startup greeting) · settings (validated
-                local JSON) · voice (TTS/ASR interface, honestly
-                absent) · window (thin GTK4 view) · __main__ entry
-                point (--check/--smoke) · assets/ (per-state art slots
-                + convention README)
+                local JSON) · voice (engine interface — NullVoice) ·
+                voice_input (push-to-talk capture, GStreamer appsink) ·
+                speech_recognition (faster-whisper, local_files_only) ·
+                language_registry (closed 15-language set) ·
+                language_detection (script profile + text + ASR hint) ·
+                conversation (shared typed/voice pipeline + replies) ·
+                voice_output (espeak-ng ctypes + GStreamer playback) ·
+                scene (renderer-independent bedroom world) · bedroom
+                (cairo room drawing) · window (thin GTK4 view) ·
+                __main__ entry point (--check/--smoke/--llm) ·
+                assets/ (per-state art slots + convention README)
 tests/          unittest suite (temporary sandboxes + in-memory
                 accessibility trees only; no display, no desktop)
 docs/           ARCHITECTURE.md · SECURITY.md
-scripts/        run_tests.sh · manual_smoke_apps.sh ·
+scripts/        run_tests.sh · install_voice_models.py (explicit,
+                confirm-first speech-model installer — the app never
+                downloads) · manual_smoke_apps.sh ·
                 manual_smoke_automation.sh · manual_smoke_ui.sh ·
                 manual_smoke_companion.sh (opt-in)
 requirements.txt  optional v0.2 document dependencies (you install them)
@@ -919,8 +1135,24 @@ bedroom (`companion/bedroom.py` — wall, floor, window with a sunrise,
 bed with a tucking blanket, bedside alarm clock, rug, desk with
 notebook/pencil/laptop, chair), so Alwin genuinely **walks** between the
 bed, the greeting spot and the desk, driven by real task events, with a
-reduced-motion option and 40 dedicated headless scene tests. The suite
-is now **809 tests**, all headless.
+reduced-motion option and 40 dedicated headless scene tests. v0.9 adds
+**multilingual voice intelligence**: push-to-talk microphone capture
+(`voice_input`, GStreamer, nothing persisted), offline recognition
+(`speech_recognition`, faster-whisper with `local_files_only` models
+installed only by `scripts/install_voice_models.py`), a closed
+15-language registry and detection service (`language_registry`,
+`language_detection` — script profiling + seeded text detection + the
+ASR language hint, uncertain → ask), one shared conversation pipeline
+for typed and voice input (`conversation` — language injected as a
+reply instruction, never per-language assistants), optional local TTS
+(`voice_output` — espeak-ng ctypes voices for all 15 languages,
+GStreamer playback), the `speaking` character state (17th state,
+documented simple mouth motion), the mic/level-meter/push-to-talk UI and
+voice & language settings (closed schema, bool/str only), the `--llm`
+wiring for optional replies (also fixing `taskui --llm`, which was
+previously inert), and the honest wake-word placeholder. The suite is
+now **974 tests**, all headless (voice hardware, models and the LLM are
+faked or injected).
 
 Known limitations (details in `docs/SECURITY.md`):
 
@@ -987,10 +1219,43 @@ Known limitations (details in `docs/SECURITY.md`):
   replaced by dropping a `frame.png` into
   `companion/assets/character/<state>/`, and the renderer interface
   keeps the door open for a future 3D or sprite-based implementation.
-- **There is no voice** — `NullVoice` reports "no speech engine
-  connected" and nothing is ever spoken, recorded or listened for; the
-  TTS/ASR interface exists only so a future local engine can be
-  connected. No voice model is installed, downloaded or implied.
+- **Voice is real but strictly optional and locally installed** (v0.9):
+  - The microphone only opens when *you* click the mic (push-to-talk);
+    there is no wake word and no continuous listening — the wake-word
+    Settings switch exists but is disabled and labelled "not available
+    yet (v0.9)" because it is not implemented.
+  - **Nothing you say is ever saved or uploaded**: audio lives in
+    memory during a turn and is discarded (no `.wav`/recording files, no
+    cloud ASR; `wave`/`audioop` are banned in the companion package and
+    the voice modules cannot import any network library).
+  - Recognition requires `faster-whisper` **and** a model you installed
+    yourself with `scripts/install_voice_models.py` (explicit, confirms
+    first, reports size + free space; the application itself performs
+    **no downloads, ever**). Without them the mic button explains
+    exactly what is missing — it never invents a transcript.
+  - Speech output requires `espeakng-loader`/`espeak-ng` **and** an
+    audio device; it is **off by default** (`spoken_responses` is
+    opt-in). Without them, replies stay text-only — nothing claims to
+    have been spoken, and `NullVoice` reports "no speech engine".
+  - **Recognition quality is language-dependent and imperfect**
+    (measured on FLEURS real speech with the default `small` model:
+    14/15 languages usable; `ur` needs the forced language; `te`/`ml`/
+    `bn` are weak with every current size). The transcript is always
+    shown verbatim so you can see and correct it; typing remains a
+    fully supported path. No end-to-end "15 languages perfect speech
+    round-trip" is claimed.
+  - Optional spoken replies need `--llm` with a running local Ollama;
+    the reply is display/speech only and is never fed back into the
+    task pipeline — your transcript is the only thing ever submitted,
+    and always through the normal approval path.
+  - The `speaking` animation is deliberately simple (documented mouth
+    oscillation, no lip-sync tracking) and like all animation it stops
+    while the window is hidden and under reduced motion.
+- **Voice dependencies were exercised on the development machine**
+  (Ubuntu 26.04.1) with a venv (`faster-whisper`, `espeakng-loader`,
+  GStreamer capture/playback) and the installed Whisper models; a clean
+  installation has **not** been tested, and hardware-dependent steps
+  (real microphone, real speaker output) depend on your machine.
 - **`walking` is a 2D waddle, not locomotion through a 3D world**, and
   the companion is a small character window — not a desktop shell, not
   a wallpaper overlay, and it does not draw over or block other
@@ -1001,8 +1266,10 @@ Known limitations (details in `docs/SECURITY.md`):
   (Ubuntu 26.04.1, GNOME/Wayland, GTK 4.22) via the opt-in smoke and
   programmatic checks; a clean installation has **not** been tested.
 - **The companion settings file is cosmetic-only and not
-  tamper-proof** — a modified file can change greeting/subtitle
-  preferences at most; the trusted core never reads it.
+  tamper-proof** — a modified file can change greeting/subtitle/voice
+  preferences at most; the trusted core never reads it. (The v0.8
+  placeholder key `mute_voice` was replaced by `spoken_responses`; an
+  old file simply loses the obsolete key on the next save.)
 - Still deliberately absent: file deletion/overwrite, shell or
   arbitrary command execution, keystroke/mouse synthesis, arbitrary
   application flags/commands, software installation, network

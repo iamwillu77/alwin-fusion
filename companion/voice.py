@@ -1,4 +1,4 @@
-"""Voice interface for the Alwin companion (v0.8.0) — a clean seam for the future.
+"""Voice interface for the Alwin companion (v0.9.0) — a clean seam for the future.
 
 This module defines a **small, replaceable interface** that a future
 local text-to-speech and speech-recognition engine can implement.

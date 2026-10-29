@@ -1,4 +1,4 @@
-"""Cairo bedroom renderer for the Alwin companion (v0.8.0).
+"""Cairo bedroom renderer for the Alwin companion (v0.9.0).
 
 Draws the illustrated bedroom that :mod:`companion.scene` describes —
 wall, floor, window with sunrise, bed, bedside table, alarm clock, desk
