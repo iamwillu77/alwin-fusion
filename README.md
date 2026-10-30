@@ -2,7 +2,7 @@
 
 **Open-source, offline-first AI-native operating system — in progress.**
 
-Version **0.13.0** · Milestone: **Desktop Intelligence & Application Control**
+Version **0.14.0** · Milestone: **Intelligent Desktop Workflows**
 
 Alwin Fusion lets you control your computer through natural-language
 commands. v0.9 gives **Alwin**, the persistent, lightweight desktop
@@ -159,6 +159,22 @@ execution and verification stay where they were.
     tiers (discover / launch / open_file / inspect / window_state /
     interact, control = interact | open_only) are derived from real
     evidence, and Nautilus-class apps are open-only for control.
+  - **intelligent desktop workflows** (v0.14): describe multi-step
+    work in one sentence (`build me a report from the csv data and
+    then open it in the text editor`) — Alwin plans it with the
+    existing plan model, runs the steps **sequentially** through the
+    same permissioned pipeline, hands validated results between steps
+    (a read file's content becomes the report's text; the generated
+    report's path becomes the editor's input), verifies every step,
+    and reports completed / failed / skipped / cancelled work
+    honestly. Capability gaps (a registered but *not installed*
+    application, a missing document library, absent accessibility
+    bindings) redirect to a clarifying question at **plan time** —
+    nothing nonexistent is ever launched and no fallback runs behind
+    your back. Failed mutations stop the plan (dependents are
+    skipped), uncertain mutations are never auto-retried, one bounded
+    replan never repeats an executed mutation, and cancellation
+    preserves completed steps truthfully without claiming rollback.
   - **multi-step tasks** (v0.4): `create a folder named Batch in
     Documents then create a file named log.txt in Documents containing
     done` — every step planned, permission-checked and verified
@@ -518,6 +534,19 @@ python3 -m taskui --llm
 # real desktop verification (launches/closes real apps on your live
 # session; all files sandboxed under /tmp):
 python3 scripts/verify_desktop_control.py
+
+# v0.14: intelligent desktop workflows — multi-step plans executed
+# sequentially through the same permissioned pipeline with typed
+# handoffs between steps (a read file's content feeds the report; the
+# report's path feeds the editor). Capability gaps redirect at plan
+# time; failed mutations stop the plan; cancellation preserves
+# completed steps; approval is bound to the exact plan digest:
+python3 -m taskui --llm
+#   then type e.g.:  build me a report from the csv data and then open
+#                    it in the text editor please
+# real end-to-end workflow verification (sandboxed files under /tmp;
+# real manager/pipeline/approval/verifier + real editor evidence):
+python3 scripts/verify_desktop_workflows.py
 
 # Show effective configuration / probe the local AI runtime
 python3 -m ai_core.cli --show-config
@@ -991,6 +1020,99 @@ exposes no `window.close` action cannot be closed (we never kill
 processes); multi-window applications close the first window
 deterministically (the total count is reported); goal-gate routing is
 English-centric like the deterministic parser.
+
+### Intelligent desktop workflows (v0.14.0)
+
+v0.14 turns the existing pieces into **reliable multi-step desktop
+workflows**: you describe practical work in natural language ("build me
+a report from the csv data and then open it in the text editor") and
+Alwin plans it, executes it step by step through the same trusted
+pipeline, verifies each step, and explains the outcome honestly. There
+is **no second execution engine and no new closed action** — a workflow
+is an orchestration over the existing 22-action allowlist, reusing the
+v0.12 `TaskPlan`/`PlanStep` model, the `TaskManager` plan controller,
+the permission checker, the digest-bound approval, the verifier and
+the audit log.
+
+**Typed step-to-step handoffs** (the v0.14 core addition): a step may
+pull ONE whitelisted field from an *earlier* step's **verified** result
+— a read file's `content` becomes a report block, a generated report's
+`path` becomes the input to `open_file`. Handoffs are:
+
+* **typed and bounded** — derivation sources must be earlier steps
+  (unknown, self and forward references are rejected at *validation*
+  time) and derived values are truncated to a bounded size; there is no
+  way to pass unrestricted objects, shell fragments or credentials,
+* **re-validated** — the substituted value goes through the same
+  closed-set action validator and the same permission check as a
+  literal (a producing step that yields an unacceptable path fails at
+  the consuming step's preview, with **zero execution**),
+* **dependency-accurate** — a derivation source is hoisted into
+  `depends_on` when the step omitted it, so the displayed plan shows
+  the real prerequisite,
+* **data, never instructions** — file contents, document text and
+  model output stay untrusted data; prompt-injection text inside a
+  read file is copied verbatim as *content* and can never become an
+  action.
+
+**Capability-aware planning** (honest gaps at plan time): the planner
+consults the real registry and the real capability snapshot. A plan
+naming a *registered but not installed* application (e.g. `okular` on a
+machine without it) is redirected to a clarifying question **before
+anything executes** — no nonexistent application is ever launched and
+no unrelated fallback runs. Missing document libraries (`openpyxl`,
+`reportlab`) and missing accessibility bindings redirect the same way.
+The model may propose; deterministic validation alone decides whether
+the plan is executable.
+
+**Execution semantics** (sequential, one step at a time, 300 s plan
+budget, one bounded replan):
+
+* every step is previewed (permission + proposal + digest) and
+  re-validated immediately before it runs,
+* a verified step's result is the only thing handed downstream,
+* a **failed mutating step stops the plan** — remaining steps are
+  marked skipped and the task lands in `needs_attention`, never
+  "completed"; a failed *read-only* step only skips its dependents,
+* **uncertain mutations are never retried automatically** (only
+  read-only steps retry, within strict limits); replanning re-proposes
+  only work whose digest was never executed — a mutation that already
+  succeeded or failed is never repeated (trusted digest filter, not a
+  prompt promise), and a recovered plan reports `needs_attention`,
+* **cancellation** stops before the next step: already-completed steps
+  are preserved truthfully (no rollback is ever claimed), later steps
+  never start, and the final status reflects the partial result,
+* **approval is bound to one exact plan digest** — refusing it
+  executes nothing, a wrong or stale digest is refused, and an
+  approval can never be reused for a different plan.
+
+**Presentation** (`task_view`): the panel now shows the objective, the
+planned steps, the current step, per-step completed/failed/skipped
+counts, the approval affordance (carrying the exact digest), the
+missing-capability redirect, the cancellation/recovery state and the
+verified outcome — derived purely from record state, with bounded,
+scrubbed text (no raw prompts, credentials, document contents or
+exception dumps). A plan is never displayed as "done" merely because
+it was accepted or dispatched.
+
+```bash
+# Real end-to-end workflow verification (sandboxed files under /tmp,
+# real manager/pipeline/approval/verifier/audit, real editor launch
+# with /proc + AT-SPI evidence; exit 0 = every claim evidence-backed):
+python3 scripts/verify_desktop_workflows.py
+
+# Latest real run on the development machine (GNOME on Wayland, real
+# AT-SPI, real gnome-text-editor): 26 EXECUTED, 1 BLOCKED, 0 FAILED —
+# real 4-step workflow (read CSV -> generate report via typed handoff
+# -> approval-gated open in the Text Editor -> status), report content
+# verified against the real input, /proc + window evidence, wrong- and
+# stale-digest approvals refused, refusal executed nothing,
+# mid-execution cancellation preserved the completed step, not-installed
+# okular honestly redirected at plan time, partial failure reported as
+# needs_attention with dependents skipped, sandbox snapshot clean.
+# The 1 BLOCKED leg: GNOME/Wayland refused the window.close cleanup of
+# the editor — reported as BLOCKED, nothing was force-killed.
+```
 
 ### Speech-model and language quality (measured, honest)
 
@@ -1639,7 +1761,7 @@ app-bridge/ desktop/ models/ os-build/   reserved for later milestones
 ## Status and known limitations
 
 Implemented: the full parse → plan → permission → approval →
-execute → verify → audit loop for all seventeen actions (including
+execute → verify → audit loop for all twenty-two actions (including
 `create_report`, `create_pdf`, `create_spreadsheet`,
 `detect_applications`, `open_file`, and the seven v0.4 automation
 actions), CLI (dry-run, single-command and interactive modes),
@@ -1704,12 +1826,20 @@ v0.12 adds the planning suites (plan schema/hoisting, capability
 discovery/cache, planning service outcomes + redaction, manager plan
 flows with real sandbox pipelines, presenter plan states, and the CRLF
 read-verification regression) → **1109 tests total (1107 passing, 2
-skipped)**.
+skipped)**; v0.13 adds the desktop-control suites (registry tiers,
+launch/status/focus/close evidence, manager plan flows with a fully
+fake desktop, credential-scrubbed window metadata) → **1195 passing, 2
+skipped (2752 subtests)**; v0.14 adds the workflow suites (derivation
+reference validation and hoisting, handoff bounds and re-validation,
+capability-aware planning redirects, Workflow A/B/C/D through the real
+sandboxed manager, digest binding, cancellation, replan no-repeat,
+honest verification failure, credential redaction, presenter progress)
+→ **1223 passing, 2 skipped (2755 subtests)**.
 
 Known limitations (details in `docs/SECURITY.md`):
 
 - **The v0.5 task window is a thin view over the existing core** — it
-  exposes only the seventeen supported actions; there is no
+  exposes only the twenty-two supported actions; there is no
   document-editing or free-form "do anything" capability, and an
   unsupported request is explained honestly with safe supported
   alternatives shown.
@@ -1723,9 +1853,11 @@ Known limitations (details in `docs/SECURITY.md`):
 - **One task at a time** — the manager runs a single worker thread and
   refuses a second submission until the current task reaches a
   terminal state (a deliberate simplicity, not a queue).
-- **Cancellation is honoured only before execution starts.** A running
-  action is never interrupted, and a cancelled task never claims
-  rollback (nothing is "undone" — nothing had run yet).
+- **Cancellation is honoured before execution starts, and — for
+  plans/workflows — at step boundaries.** A running action is never
+  interrupted, a cancelled task never claims rollback (completed
+  steps stay completed and are reported as such; remaining steps do
+  not start).
 - **Formulas are written as text and never calculated** — open a
   workbook in a spreadsheet application to compute results; Alwin
   Fusion never claims a calculated value.

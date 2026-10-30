@@ -342,10 +342,40 @@ def task_view(record: Optional[TaskRecord], *, busy: bool = False) -> dict:
         and state not in (STATE_EXECUTING, STATE_VERIFYING)
     )
 
+    # v0.14: one explicit at-a-glance progress object so the panel can
+    # show the current step and the completed/failed/skipped split
+    # without re-deriving it from the row list.  Counts come from the
+    # record's own step statuses — nothing is inferred or claimed.
+    status_counts: Dict[str, int] = {}
+    current_index = None
+    for step in record.steps:
+        status = str(step.get("status", "pending"))
+        status_counts[status] = status_counts.get(status, 0) + 1
+        if status in ("running", "awaiting_approval") and current_index is None:
+            current_index = step.get("index")
+    plan_progress = {
+        "total_steps": len(record.steps),
+        "counts": status_counts,
+        "current_index": current_index,
+        "has_plan": bool(record.plan) and bool(record.steps),
+        # True only for a genuine partial outcome: the task reached a
+        # terminal state other than "completed" while at least one
+        # step verified succeeded (earlier work is preserved).
+        "partial": (
+            bool(record.is_terminal)
+            and record.state != STATE_COMPLETED
+            and status_counts.get("succeeded", 0) > 0
+        ),
+    }
+
     return {
         "present": True,
         "task_id": record.task_id,
         "request": _bounded(record.command, MAX_REQUEST_CHARS),
+        "objective": _bounded(
+            str((record.plan or {}).get("summary", "") or record.command),
+            MAX_REQUEST_CHARS,
+        ),
         "dry_run": record.dry_run,
         "state": state,
         "state_label": record.state_label,
@@ -361,6 +391,7 @@ def task_view(record: Optional[TaskRecord], *, busy: bool = False) -> dict:
         "can_cancel": cancellable and not record.cancel_requested,
         "cancel_requested": record.cancel_requested,
         "steps": steps,
+        "plan_progress": plan_progress,
         "result_message": _bounded(str(record.result_message or ""),
                                    MAX_ERROR_CHARS),
         "verification": verification,

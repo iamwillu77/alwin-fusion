@@ -19,7 +19,10 @@ Design rules (enforced by tests):
   but hard-capped (steps, objective, model output size),
 * step inputs may carry ONE explicit derivation (``from_step`` +
   whitelisted field) resolved at execution time from a *verified*
-  step's result — bounded and re-validated like any other input,
+  step's result — bounded and re-validated like any other input;
+  since v0.14 the derivation source must be an **earlier** step
+  (unknown/self/forward references are rejected at validation) and is
+  hoisted into ``depends_on`` when the step omitted it,
 * plans are plain data: round-trippable dicts, no I/O, no threads, no
   imports of integrations — safe to unit-test headless.
 
@@ -34,7 +37,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
-from ai_core.planner import MUTATING_ACTIONS, validate_action
+from ai_core.planner import DERIVE_PREFIX, MUTATING_ACTIONS, validate_action
 
 #: Hard plan bounds (the LLM's output budget is bounded separately by
 #: the planning service; these are the trusted ceilings).
@@ -214,6 +217,45 @@ def _validate_step_order(steps: List[PlanStep]) -> None:
         seen.append(step.id)
 
 
+def _validate_and_hoist_derivations(steps: List[PlanStep]) -> None:
+    """v0.14: derivation sources must be *earlier* steps; hoist them
+    into ``depends_on``.
+
+    A derivation pulls a field from an earlier step's VERIFIED result,
+    so a source that is unknown, the step itself, or a later step can
+    never be satisfied — reject it at validation time (the brief's
+    "outputs referenced before their producing steps") instead of
+    letting it fail at execution.  When the reference is valid but the
+    step did not declare ``depends_on`` on it, the source id is hoisted
+    into ``depends_on`` (sanitising normalisation, same precedent as
+    the misplaced-key hoist): the execution gate already treated it as
+    a prerequisite, so this only makes the DISPLAYED dependency
+    accurate — it never adds an executable capability.
+    """
+    seen: List[str] = []
+    for step in steps:
+        for deriv in step.derives.values():
+            source = deriv.from_step
+            if source == step.id:
+                raise PlanValidationError(
+                    f"Step '{step.id}' derives from itself."
+                )
+            if source not in seen:
+                if any(source == s.id for s in steps):
+                    raise PlanValidationError(
+                        f"Step '{step.id}' derives from '{source}', which "
+                        "is not an earlier step (a step can only use "
+                        "results of steps that already ran)."
+                    )
+                raise PlanValidationError(
+                    f"Step '{step.id}' derives from unknown step "
+                    f"'{source}'."
+                )
+            if source not in step.depends_on:
+                step.depends_on = step.depends_on + (source,)
+        seen.append(step.id)
+
+
 def validate_plan(raw: Any) -> TaskPlan:
     """Validate untrusted (often model-produced) plan JSON → TaskPlan.
 
@@ -322,7 +364,7 @@ def validate_plan(raw: Any) -> TaskPlan:
         def _extract(value: Any) -> Any:
             if isinstance(value, dict) and "from_step" in value:
                 deriv = Derivation.parse(value)
-                key = f"__derive__:{step_id}:{len(derives)}"
+                key = f"{DERIVE_PREFIX}{step_id}:{len(derives)}"
                 derives[key] = deriv
                 return key
             if isinstance(value, dict):
@@ -351,6 +393,10 @@ def validate_plan(raw: Any) -> TaskPlan:
             derives=derives,
         ))
 
+    # Derivation references are validated (and hoisted into
+    # depends_on) BEFORE the dependency-order check so the final
+    # depends_on — including hoisted sources — is fully validated.
+    _validate_and_hoist_derivations(steps)
     _validate_step_order(steps)
     return TaskPlan(objective=objective, steps=steps)
 

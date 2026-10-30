@@ -1,6 +1,6 @@
 # Alwin Fusion — Architecture
 
-Version: 0.13.0 — Milestone: Desktop Intelligence & Application Control
+Version: 0.14.0 — Milestone: Intelligent Desktop Workflows
 
 Alwin Fusion is an open-source, offline-first AI-native operating
 system in the making. This document describes what exists today, how
@@ -36,7 +36,10 @@ ai_core/                 Trusted application core (pure Python, stdlib only)
                          closed-set actions only, dependency rules (no
                          cycles/forward/self/duplicates), derived risk,
                          bounded sizes, derivation markers with
-                         sanitising hoist of misplaced model keys
+                         sanitising hoist of misplaced model keys;
+                         v0.14: derivation sources must be EARLIER
+                         steps (unknown/self/forward rejected at
+                         validation) and are hoisted into depends_on
     capabilities.py      v0.12 capability discovery: real probes (closed
                          actions, openpyxl/reportlab, app registry,
                          AT-SPI bindings, attached LLM, honest MCP
@@ -1290,6 +1293,79 @@ remaining work; a trusted digest check drops any step that repeats an
 already-succeeded *or* already-failed mutation, and a recovered plan
 always reports `needs_attention` — never a false "completed".
 
+### Intelligent desktop workflows (v0.14)
+
+v0.14 turns the v0.12 plan machinery into **desktop workflows** —
+multi-step goals combining file operations, report generation,
+application discovery and permissioned desktop control — without a
+second execution engine and without a single new closed action: a
+workflow is an *orchestration over the existing 22-action allowlist*,
+executed by the same `TaskManager` plan controller
+(`_run_plan_steps`), the same dispatcher, permission checker,
+digest-bound approval, verifier and audit log.
+
+**Typed step-to-step handoffs** (`PlanStep.derives`, Phase 4). A step
+input may carry one explicit derivation — `{"from_step": <earlier id>,
+"field": <whitelisted field>}` — resolved at execution time from a
+*verified* earlier step's result:
+
+* `validate_plan()` (via `_validate_and_hoist_derivations`) rejects a
+  derivation whose source is unknown, the step itself, or a *later*
+  step ("outputs referenced before their producing steps"), and hoists
+  a valid source into `depends_on` when the step omitted it, so the
+  displayed dependency graph is accurate;
+* at execution, `_resolve_step_action()` substitutes the field value
+  from the producing step's verified result data — mechanically,
+  bounded to `MAX_DERIVED_CHARS` (larger text is summarized through
+  the bounded local summarizer, never passed raw) — and the
+  substituted action is **re-validated by the same closed-set
+  validator** before preview; a value the validator rejects (e.g. an
+  `open_file` path whose extension the app cannot open) fails that
+  step at preview with **zero execution**;
+* `ai_core/planner.py` owns the `DERIVE_PREFIX` placeholder constant
+  and `is_derivation_placeholder()`: the static file-extension checks
+  in `save_document`/`open_file` skip an unsubstituted placeholder
+  (the real path is unknown until the producing step runs) and the
+  suffix is then checked again on the substituted value, with the
+  per-integration `supports_file_type` narrowing still enforced by
+  the handler at execution time;
+* document/file **content stays data**: text read from a file and
+  handed downstream is untrusted payload — prompt-injection wording
+  inside a document never becomes an action, because the only channel
+  between steps is a validated field of a closed-set action.
+
+**Capability-aware planning** (Phase 2). `TaskPlanningService.
+_missing_in_plan()` now also consults `application_tiers`: a step
+naming a *registered but not installed* application is redirected to
+a clarifying question at **plan time** (nothing is launched, no
+fallback runs; ids absent from the truncated tiers snapshot are not
+judged — execution evidence still decides). Missing document
+libraries and absent automation bindings redirect the same way via
+`missing_for()`.
+
+**Execution** reuses the v0.12 controller unchanged: sequential (max
+concurrency 1), per-step preview + per-step digest token, 300 s plan
+budget, one bounded replan with the trusted digest no-repeat filter,
+failed-mutation stop (dependents skipped, `needs_attention`), and
+cancellation at step boundaries that preserves completed steps and
+never claims rollback.
+
+**Presentation.** `taskui.presenter.task_view()` gained `objective`
+(plan summary or the command, bounded) and `plan_progress`
+(`total_steps`, per-status counts, `current_index`, `has_plan`,
+`partial`) — pure derivations from record state, so the panel can show
+the current step and the completed/failed/skipped split without
+re-deriving it, and can flag a genuine partial outcome (terminal but
+not `completed`, with at least one verified success). No raw prompts,
+credentials or document contents ever reach the view.
+
+**Verification of workflows** lives in
+`scripts/verify_desktop_workflows.py` (real manager, real sandboxed
+files, real approval digests, real `/proc` + AT-SPI evidence; exit 0 =
+every claim evidence-backed) and `tests/test_desktop_workflows.py`
+(sandbox integration: real manager/pipeline/permissions/approval/
+verifier/audit with a scripted model and a fake desktop).
+
 ## Audit
 
 `ai_core/audit.py` appends one JSON object per task to
@@ -1366,7 +1442,19 @@ the sliced stop-aware bus-wait fix) — and v0.12 adds **36 more**
 planning service outcomes and credential scrubbing, manager plan
 flows with real sandbox pipelines, presenter plan-state rendering, the
 CRLF read-verification regression) — for a total of **1109 tests
-(1107 passed, 2 skipped)**. The v0.9 additions were: the six voice-stack suites
+(1107 passed, 2 skipped)**; the v0.13 suite adds **86 more** (the
+desktop-control suites: registry tiers, launch/status/focus/close
+evidence with a fully fake desktop, manager plan flows with the
+fake-desktop sandbox, credential-scrubbed window metadata) — for
+**1195 passed, 2 skipped (2752 subtests)**; the v0.14 suite adds
+**28 more** (`tests/test_desktop_workflows.py`: derivation-reference
+validation and hoisting, handoff bounds/re-validation/root
+containment, prompt-injection content stays data, capability-aware
+planning redirects, Workflow A/B/C/D through the real sandboxed
+manager, wrong-digest refusal, policy denial, mid-plan cancellation,
+replan no-repeat + budget, honest verification failure, credential
+redaction, presenter progress/partial) — for **1223 passed, 2
+skipped (2755 subtests)**. The v0.9 additions were: the six voice-stack suites
 (registry, detection, conversation, capture, recognition, voice output),
 the window voice-cycle suite (real `GLib.idle_add` marshalling pumped
 on the default main context, all devices/models/LLM faked), the

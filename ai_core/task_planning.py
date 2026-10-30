@@ -481,11 +481,27 @@ class TaskPlanningService:
         """Honest capability gaps become a clarifying redirect."""
         from ai_core.capabilities import missing_for
 
+        tiers = caps.get("application_tiers") or {}
         for step in plan.steps:
             reason = missing_for(step.action.get("action", ""), caps)
             if reason:
                 return (f"I can't do that step here: {reason} "
                         "Tell me how you'd like to proceed instead.")
+            # v0.14: a step naming a REGISTERED but NOT INSTALLED
+            # application is redirected at plan time (never launched
+            # and only failing later at execution).  validate_action
+            # already resolved the token to a registry id; tiers may be
+            # truncated, so an id absent from the snapshot is simply
+            # not judged here (execution evidence still decides).
+            app = step.action.get("application")
+            info = tiers.get(app) if isinstance(app, str) else None
+            if info is not None and not info.get("installed"):
+                return (
+                    f"'{app}' is registered but not installed on this "
+                    "machine, so that step could not run. Tell me which "
+                    "installed application you'd like to use instead "
+                    "(the available ones are listed in my report)."
+                )
         return ""
 
     # -- bounded replan (Phase 6 recovery) -------------------------------- #

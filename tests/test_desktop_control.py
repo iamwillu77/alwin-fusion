@@ -127,9 +127,22 @@ class DesktopSandbox(Sandbox):
         )
 
         from integrations import build_default_dispatcher
+        from integrations.apps.tools import ApplicationTools
+
+        # v0.14: file handoffs reach open_file in workflow tests — the
+        # application tools MUST share the fake launcher so a test can
+        # never popen a real application.
+        self.app_tools = ApplicationTools(
+            self.checker,
+            launcher=self.launcher,
+            which=self._which,
+            desktop_dirs=(),
+        )
 
         self.dispatcher = build_default_dispatcher(
-            self.checker, desktop_tools=self.controller
+            self.checker,
+            app_tools=self.app_tools,
+            desktop_tools=self.controller,
         )
 
     # -- injection points --------------------------------------------- #

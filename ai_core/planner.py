@@ -173,9 +173,21 @@ DOCUMENT_EXTENSIONS = {
     "create_spreadsheet": ".xlsx",
 }
 
-#: The only file types the v0.3 open_file action accepts (each
+#: The only file types the v0.14 open_file action accepts (each
 #: integration narrows this further with its own file_types).
 OPENABLE_FILE_EXTENSIONS = frozenset({".txt", ".pdf", ".xlsx"})
+
+#: Placeholder prefix for a step-level derivation (v0.14 handoffs).
+#: ``ai_core.task_plan`` substitutes these at execution time and
+#: RE-VALIDATES the action with the real value; declared here (not in
+#: task_plan) because task_plan imports this module — one source of
+#: truth, no circular import.
+DERIVE_PREFIX = "__derive__:"
+
+
+def is_derivation_placeholder(value: object) -> bool:
+    """Is *value* an unsubstituted derivation marker (not a literal)?"""
+    return isinstance(value, str) and value.startswith(DERIVE_PREFIX)
 
 MAX_PATH_LENGTH = 1024
 MAX_CONTENT_CHARS = 64 * 1024
@@ -390,13 +402,18 @@ def validate_action(payload: object) -> dict:
     if action == "save_document":
         application = _resolve_application(payload.get("application", ""))
         path = _validate_path(payload.get("path"))
-        suffix = Path(path).suffix.lower()
-        if suffix not in SAVEABLE_FILE_EXTENSIONS:
-            supported = ", ".join(sorted(SAVEABLE_FILE_EXTENSIONS))
-            raise PlanValidationError(
-                f"'save_document' supports only {supported} files in this "
-                f"milestone (got '{suffix or 'no extension'}')."
-            )
+        # A derived path has no extension until execution substitutes
+        # the producing step's real path; the suffix check runs again
+        # on the substituted value (see task_plan) and the handler
+        # re-checks at execution time.
+        if not is_derivation_placeholder(path):
+            suffix = Path(path).suffix.lower()
+            if suffix not in SAVEABLE_FILE_EXTENSIONS:
+                supported = ", ".join(sorted(SAVEABLE_FILE_EXTENSIONS))
+                raise PlanValidationError(
+                    f"'save_document' supports only {supported} files in this "
+                    f"milestone (got '{suffix or 'no extension'}')."
+                )
         return {"action": action, "application": application, "path": path}
 
     # ---- v0.13 desktop intelligence & application control ------------- #
@@ -479,13 +496,18 @@ def validate_action(payload: object) -> dict:
                 "'open_file' needs an 'application' integration id, e.g. "
                 "'libreoffice-calc' or 'default'."
             )
-        suffix = Path(path).suffix.lower()
-        if suffix not in OPENABLE_FILE_EXTENSIONS:
-            supported = ", ".join(sorted(OPENABLE_FILE_EXTENSIONS))
-            raise PlanValidationError(
-                f"'open_file' supports only {supported} files in this "
-                f"milestone (got '{suffix or 'no extension'}')."
-            )
+        # A derived path is unknown until execution substitutes the
+        # producing step's real path; the suffix check then runs again
+        # on the substituted value, and the open_file handler narrows
+        # further per integration (definition.supports_file_type).
+        if not is_derivation_placeholder(path):
+            suffix = Path(path).suffix.lower()
+            if suffix not in OPENABLE_FILE_EXTENSIONS:
+                supported = ", ".join(sorted(OPENABLE_FILE_EXTENSIONS))
+                raise PlanValidationError(
+                    f"'open_file' supports only {supported} files in this "
+                    f"milestone (got '{suffix or 'no extension'}')."
+                )
         return {"action": action, "path": path, "application": application}
 
     return {"action": action, "path": path}

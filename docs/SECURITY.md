@@ -1,6 +1,6 @@
 # Alwin Fusion — Security Model and Limitations
 
-Version: 0.13.0 — Milestone: Desktop Intelligence & Application Control
+Version: 0.14.0 — Milestone: Intelligent Desktop Workflows
 
 This document states what the prototype defends against, how, and —
 importantly — **what it does not defend against**. Passing tests does
@@ -316,6 +316,67 @@ never exceeds the evidence: a launch passes only with
 close only with the window's disappearance; otherwise the step is
 FAILED with an explicit UNVERIFIED message and the task lands in
 `needs_attention` — never "completed".
+
+### 2f. Intelligent desktop workflows (v0.14)
+
+**No new execution surface.** A workflow is an orchestration over the
+same 22-action allowlist: the model proposes JSON steps, the trusted
+`validate_plan()` decides executability (closed-set actions, closed
+step keys, dependency/derivation rules, bounds), and every step runs
+through the same validation → permission → digest-token approval →
+execute → verify → audit chain. There is no shell, no dynamic import,
+no `eval`, no model-authored code path, and no second execution engine.
+
+**Typed, re-validated handoffs — not object passing.** The only
+step-to-step channel is a *derivation*: one whitelisted field from an
+earlier step's **verified** result, substituted mechanically and
+bounded (`MAX_DERIVED_CHARS`; larger text goes through the bounded
+summarizer). The substituted action is re-validated by the same
+closed-set validator and re-checked by the permission stage before it
+runs, so a handoff cannot widen the allowlist, escape the permitted
+roots, or smuggle a different action: an unacceptable derived value
+fails at preview with zero execution. Derivation sources must be
+earlier steps (unknown/self/forward references are rejected at
+validation), and the source is a declared dependency.
+
+**Untrusted content stays data.** File contents, document text,
+spreadsheet cells, window titles and model output are untrusted
+payloads. A prompt-injection string inside a file that a workflow
+reads is copied verbatim as *content* into the next step — it can
+never become an action, a step, a permission claim or a digest change,
+because the pipeline only ever sees closed-set validated actions and
+the derivation channel carries data fields, not instructions.
+
+**Model-controlled escalation is impossible.** Steps cannot carry
+approval/permission/risk claims (closed step schema rejects the
+keys); risk is derived from the trusted `MUTATING_ACTIONS` set; a plan
+requiring approval halts at the gate bound to one exact digest — a
+wrong or stale digest is refused, a rejected plan executes nothing,
+and an approval can never apply to a different plan. Replanning (one
+bounded attempt) drops any step whose digest repeats an
+already-executed mutation (trusted digest filter) and a recovered plan
+always reports `needs_attention`.
+
+**No uncertain retries, no unbounded execution.** Mutating steps are
+never retried automatically (only read-only steps retry, within
+existing limits); the plan runs sequentially (concurrency 1) under a
+fixed step budget and a 300 s time budget; cancellation stops at step
+boundaries, preserves completed steps truthfully (no rollback is ever
+claimed) and never interrupts a running action.
+
+**Honest capability redirects.** A step naming a registered-but-not-
+installed application, a missing document library or absent
+accessibility bindings is redirected to a clarifying question at plan
+time (`_missing_in_plan` / `missing_for`, driven by real probes — the
+model's self-report is never trusted): nothing nonexistent is ever
+launched and no unrelated fallback executes.
+
+**Presentation and records.** The workflow view is derived purely from
+record state: bounded, credential-scrubbed step summaries, per-step
+verification check names (never raw file contents), counts and the
+exact approval digest. Prompts, model raw output, document contents
+and exception dumps never reach the UI or the history file; audit
+entries carry the same minimum evidence as single actions.
 
 ### 2b. Structured content validation (v0.2)
 
@@ -1165,6 +1226,35 @@ New surface introduced by v0.6, stated honestly:
     common patterns (`password:`, `token=`, `Bearer …`), it is not a
     general secret detector. No window *contents* are ever read, so
     secrets inside documents never reach Alwin at all.
+38. **Workflow step-to-step handoffs carry data fields only** (v0.14).
+    A derivation moves one whitelisted field (bounded, re-validated)
+    from a verified earlier step into a closed-set action. There is
+    deliberately no general object/context passing, no shared memory
+    between steps and no channel through which a document's contents
+    could alter permissions, add steps or change an approval digest.
+    A very large read is truncated (or bounded-summarized) for the
+    handoff; downstream steps never see the untruncated original.
+39. **Workflows are strictly sequential with fixed budgets** (v0.14).
+    One step at a time, a fixed step cap and a 300 s plan time
+    budget; there is no parallel execution and no long-running
+    "workflow engine". A plan exceeding either bound stops honestly
+    (remaining steps reported not-started) — it is never silently
+    extended, and replanning is one bounded attempt that cannot
+    repeat an executed mutation.
+40. **Capability judgments are probe-based and point-in-time** (v0.14).
+    "Installed", document-library and accessibility-binding
+    assessments come from the real capability snapshot at plan time;
+    an application removed or installed *after* planning is only
+    caught at execution (reported honestly as a step failure, never
+    as success). Tiers snapshots are truncated, so an id absent from
+    the snapshot is not judged at plan time — execution evidence
+    decides.
+41. **Cancellation never rolls back completed steps** (v0.14). A
+    cancelled workflow preserves every step that verifiably finished
+    (its file edits and launches remain in the world) and stops
+    before the next step; the final state reflects the partial
+    outcome. There is no undo mechanism, and none is claimed in the
+    record, the summary or the UI.
 
 ## Reporting security issues
 
