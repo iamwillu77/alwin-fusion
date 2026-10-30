@@ -1,6 +1,6 @@
 # Alwin Fusion — Architecture
 
-Version: 0.19.0 — Milestone: Reliable Application Integrations
+Version: 0.20.0 — Milestone: Intelligent Task Planning and Recovery
 
 Alwin Fusion is an open-source, offline-first AI-native operating
 system in the making. This document describes what exists today, how
@@ -39,7 +39,17 @@ ai_core/                 Trusted application core (pure Python, stdlib only)
                          sanitising hoist of misplaced model keys;
                          v0.14: derivation sources must be EARLIER
                          steps (unknown/self/forward rejected at
-                         validation) and are hoisted into depends_on
+                         validation) and are hoisted into depends_on;
+                         v0.20: IDEMPOTENCY classification table
+                         (read_only|repeatable_now|
+                         reconcile_before_retry|never_auto_repeat,
+                         unknown => never) and the pure
+                         build_resume_plan() — excludes verified
+                         completed steps (replayed, never re-run),
+                         excludes dispatched-but-unverified mutations
+                         (reconciliation list), keeps undispatched
+                         failures and not-started steps as the
+                         residual plan
     capabilities.py      v0.12 capability discovery: real probes (closed
                          actions, openpyxl/reportlab, app registry,
                          AT-SPI bindings, attached LLM, honest MCP
@@ -215,7 +225,17 @@ taskui/                  v0.5 task experience (UI-agnostic core + thin view)
                          the trusted pipeline; one worker thread per task;
                          approval gate blocks on an event the UI releases
                          via approve()/reject()/cancel(); never executes
-                         anything itself. v0.12 adds the PLAN controller
+                         anything itself. v0.20 adds resume_task(): a
+                         FAILED/needs_attention plan resumes as a NEW
+                         audited record (resume_of link) containing only
+                         the residual steps, replayed verified results,
+                         a FRESH plan-level approval digest, an
+                         execution-aware dispatched flag (known
+                         zero-effect failures stay resumable), a bounded
+                         resume budget (MAX_RESUMES=1), dependency
+                         satisfaction via replayed results, and a
+                         deterministic overwrite-clarification note.
+                         v0.12 adds the PLAN controller
                          inside that same worker: unsupported objectives
                          consult TaskPlanningService (plan -> one
                          digest-bound plan-level approval, mirroring
@@ -1524,6 +1544,42 @@ evidence-backed honesty/recovery fixes across the existing stack:
   never retried, and no rollback is ever attempted (there is no
   compensation engine and none is implied).
 
+**Planning & recovery layer (v0.20).** The plan controller gains a
+bounded continuation path without a second planner or retry engine:
+
+- *Idempotency is a closed, semantics-based table*
+  (`task_plan.IDEMPOTENCY`): every action is classified `read_only`,
+  `repeatable_now`, `reconcile_before_retry` or `never_auto_repeat`
+  from what it actually does (creations/text-entry/saves/sequences are
+  `never_auto_repeat`; unknown names default to it — conservative by
+  construction). Recovery decisions and tests are pinned to this table
+  and to `MUTATING_ACTIONS`.
+- *Resume mechanics*: a terminal-failed (or `needs_attention`) plan
+  with `task_plan` state can be resumed through
+  `TaskManager.resume_task(task_id)`. The pure
+  `build_resume_plan()` produces the residual: verified completed steps
+  are dropped (their curated `record.plan_results` are replayed so
+  derivations and dependency gates resolve against STORED EVIDENCE —
+  completed work is never re-executed), dispatched-but-unverified
+  mutations are dropped into a `reconciliation` list (uncertain
+  outcomes are never retried automatically), and everything else
+  (undispatched failures, not-started steps) stays in order. The
+  residual runs as a NEW `TaskRecord` (`resume_of` links attempts in
+  the audit) with a FRESH plan-level approval digest — the original
+  approval is refused for it — and the resume budget is
+  `MAX_RESUMES = 1` per chain.
+- *Execution-aware bookkeeping*: `step.dispatched` distinguishes
+  "failed before anything ran" (e.g. `O_EXCL` "already exists" refused
+  by the tool — known zero-effect, resumable) from "dispatched and
+  uncertain" (reconciliation required). Overwrite conflicts add a
+  deterministic bounded clarification note pointing at the reviewed
+  `replace_file_content` action — the model never decides and no
+  automatic overwrite exists.
+- *What recovery deliberately does NOT do*: no rollback or
+  compensating mutations, no generic retry framework, no parallel
+  execution, no approval reuse across attempts, no resume of
+  cancelled/completed tasks.
+
 **Digest-confirmed save.** The tools layer records the target file's
 sha256 before activating the Save control and re-reads the file after
 a bounded wait (injectable clock/sleep, default 2 s). If the digest
@@ -1846,7 +1902,16 @@ bounding, explicit partial-completion blocks (effect preserved AND
 reported, remaining steps skipped with reason), no-auto-retry,
 gate-cancellation, denied-step isolation, closed-registry pin,
 diagnostic-redaction AST pins) — for **1447 passed, 2 skipped (2895
-subtests)**. The v0.9 additions were: the six voice-stack suites
+subtests)**; the v0.20 suite adds **17 more**
+(`tests/test_planning_recovery.py`: idempotency-class pins incl.
+mutating-actions-never-read-only and unknown=>never, pure resume-plan
+exclusion rules (verified replayed, uncertain-with-reconciliation,
+undispatched resumable, empty-residual refusal), real-manager resume
+flows — completed mutation never repeated (byte + mtime evidence),
+original approval refused for the resumed plan, resume budget bound,
+cancel-during-resume, idle-manager guard, overwrite clarification
+note, needs_attention-as-resumable) — for **1464 passed, 2 skipped
+(2895 subtests)**. The v0.9 additions were: the six voice-stack suites
 (registry, detection, conversation, capture, recognition, voice output),
 the window voice-cycle suite (real `GLib.idle_add` marshalling pumped
 on the default main context, all devices/models/LLM faked), the

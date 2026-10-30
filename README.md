@@ -2,7 +2,7 @@
 
 **Open-source, offline-first AI-native operating system — in progress.**
 
-Version **0.19.0** · Milestone: **Reliable Application Integrations**
+Version **0.20.0** · Milestone: **Intelligent Task Planning and Recovery**
 
 Alwin Fusion lets you control your computer through natural-language
 commands. v0.9 gives **Alwin**, the persistent, lightweight desktop
@@ -1469,6 +1469,55 @@ of **all six** existing verification scripts (desktop control,
 desktop workflows, app interaction, document workflows, memory,
 scheduler). The v0.19 suite adds `tests/test_reliability.py` (24 tests)
 — full suite **1,447 passed, 2 skipped**.
+
+### Intelligent task planning & recovery (v0.20.0)
+
+v0.20.0 makes failed multi-step plans **safely continuable** — without
+a second planner, a retry engine, or any weakening of approval:
+
+* **Bounded resume of a failed plan.** When a plan fails after some
+  steps already completed (and were *verified*), you can resume it:
+  a **new, separately-audited task** is created whose plan contains
+  ONLY the residual steps — completed-and-verified work is never
+  re-run; its curated results are replayed so dependent steps'
+  derivations still resolve. Recovery is bounded (`MAX_RESUMES = 1`
+  per chain) and the manager must be idle.
+* **Fresh approval for every resume.** The resumed plan gets its own
+  plan-level digest — the original approval is refused for it (tested:
+  approving with the old digest changes nothing). Approval is never
+  transferred between attempts or across changed arguments.
+* **Uncertain mutations are never repeated.** A mutating step whose
+  outcome could not be verified (dispatched, then failed or
+  verification-failed) is *excluded* from the resume and listed as
+  **needs reconciliation** — a human confirms the real state first.
+  Failures the pipeline reports as never-executed (e.g. "file already
+  exists" refused before writing) stay honestly resumable.
+* **Idempotency classification, semantics-based.** Every closed action
+  carries a recovery class — `read_only` / `repeatable_now` /
+  `reconcile_before_retry` / `never_auto_repeat` — derived from what
+  the action actually does (creations, text entry, saves and whole
+  sequences are `never_auto_repeat`; unknown actions default to it).
+  The table is pinned against `MUTATING_ACTIONS` by test.
+* **Honest partial execution + clarification.** A later-step failure
+  preserves earlier verified results and reports exactly which steps
+  ran (`succeeded/failed/skipped/…`); an overwrite conflict surfaces a
+  deterministic, bounded clarification ("replace via the reviewed
+  `replace_file_content` action, or choose another name") instead of
+  guessing — the user decides, never the model.
+* **Audit separation.** Each attempt is its own audited task id; the
+  resumed record carries `resume_of` linking it to the original.
+
+Verified on the real host (`python3 scripts/verify_planning_recovery.py`):
+**18 EXECUTED, 0 FAILED** — a real 3-step plan through the approval
+gate with dependency ordering and byte-level verification; partial
+completion with a protected file left byte-identical; a resume that ran
+ONLY the remaining step (the completed file untouched by mtime) after
+refusing the original approval digest; the uncertain-mutation exclusion
+(labelled SIMULATED); honest unavailable-application failure;
+cancellation executing nothing with distinct audit ids — plus green
+re-runs of **all six** existing verification scripts. The v0.20 suite
+adds `tests/test_planning_recovery.py` (17 tests) — full suite
+**1,464 passed, 2 skipped**.
 
 ### Speech-model and language quality (measured, honest)
 

@@ -359,7 +359,9 @@ def leg5_interaction(tools, controls):
                "reported as UNVERIFIED, not success")
     # Secondary probe: the Document Properties toggle, honestly
     # labelled by whatever the tree can (or cannot) show, then
-    # toggled back (restore).
+    # toggled back (restore) and given time to SETTLE so the chain's
+    # later legs never observe a mid-flip state (AT-SPI propagates
+    # state changes with a delay on this host).
     props = ControlLocator(role="toggle button",
                            name="Document Properties")
     prop_result = adapter.activate_control(props)
@@ -369,6 +371,7 @@ def leg5_interaction(tools, controls):
                else "UNVERIFIED",
                f"state={prop_result.state}")
         adapter.activate_control(props)   # toggle back (restore)
+        settle_states(adapter, props)
     return True
 
 
@@ -463,6 +466,25 @@ def _stable_states(states):
                   if s not in ("focused", "active", "showing"))
 
 
+def settle_states(adapter, locator, attempts=6, delay=0.5):
+    """Wait until two consecutive reads agree (state propagation lag).
+
+    AT-SPI on this host delivers state changes with a delay; without
+    settling, an earlier leg's flip can arrive mid-comparison and
+    fabricate a difference the action never caused.
+    """
+    previous = None
+    for _ in range(attempts):
+        found = adapter.find_control(locator)
+        current = (_stable_states(found.data.get("control", {}).get(
+            "states")) if found.ok else None)
+        if current is not None and current == previous:
+            return current
+        previous = current
+        time.sleep(delay)
+    return previous
+
+
 def leg9_refusal(config, tools):
     print("== 9-10. approval refusal + cancellation (REAL gate) ==",
           flush=True)
@@ -482,33 +504,23 @@ def leg9_refusal(config, tools):
                     "name": "Document Properties"},
     })
     needs = preview.requires_approval
+    # Settle BEFORE the roundtrip: delayed state propagation from any
+    # earlier interaction must not masquerade as an effect of the
+    # rejection (which executes nothing).
+    before_states = settle_states(adapter, locator)
     result = pipeline.run_previewed(preview, approval=False)
-    # v0.19: bounded re-reads — a live host can churn focus/menu
-    # flags between finds; the refusal evidence must be stable, and a
-    # persistent mismatch is reported with its actual detail.
-    refused_clean = needs and result.status == "rejected"
-    detail = ""
-    if refused_clean:
-        for attempt in range(4):
-            after = adapter.find_control(locator)
-            if (after.ok
-                    and _stable_states(after.data.get("control", {})
-                                       .get("states"))
-                    == _stable_states(before.data.get("control", {})
-                                      .get("states"))):
-                detail = "semantic states identical"
-                break
-            detail = (f"before={before.data.get('control', {}).get('states')} "
-                      f"after={after.data.get('control', {}).get('states') if after.ok else after.data}")
-            time.sleep(1.0)
-        else:
-            refused_clean = False
+    after_states = settle_states(adapter, locator)
+    refused_clean = (needs and result.status == "rejected"
+                     and before_states is not None
+                     and before_states == after_states)
+    detail = (f"before={before_states} after={after_states}")
     report("9 refusal", "declined approval executes nothing (real gate)",
            "EXECUTED" if refused_clean else "FAILED",
            f"requires_approval={needs} status={result.status} {detail}")
     report("10 cancellation", "declined plan = cancelled, state "
            "unchanged", "EXECUTED" if refused_clean else "FAILED",
-           "the toggle's semantic states are identical before/after")
+           "the toggle's settled semantic states are identical "
+           "before/after")
     return refused_clean
 
 

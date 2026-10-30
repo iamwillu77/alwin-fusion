@@ -34,7 +34,7 @@ Suggested-by-brief step states are used verbatim (lowercase):
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Dict, List, Optional, Tuple
 
 from ai_core.planner import DERIVE_PREFIX, MUTATING_ACTIONS, validate_action
@@ -70,6 +70,143 @@ STEP_STATES = (
 #: Terminal-in-failure states that cause dependents to be skipped.
 FAILED_STATES = frozenset({STEP_FAILED, STEP_SKIPPED, STEP_CANCELLED,
                            STEP_VERIFICATION_FAILED})
+
+# --------------------------------------------------------------------------- #
+# v0.20: idempotency classification (semantics-based, closed, pinned)
+# --------------------------------------------------------------------------- #
+# What repeating an already-executed action means for RECOVERY
+# decisions.  Classifications are derived from the actual semantics of
+# each closed action — never from "it usually looks harmless":
+#
+# * read_only          — no state change possible; safe to repeat.
+# * repeatable_now     — repeating cannot destroy anything (the tool
+#                        layer refuses to clobber; a no-op repeat is a
+#                        harmless, honest failure).
+# * reconcile          — a mutation whose CURRENT STATE must be
+#                        checked before any retry (is the app open? the
+#                        control still there? the file already the
+#                        wanted end-state?).
+# * never_auto_repeat  — a mutation whose repetition is never safe to
+#                        do automatically (text entry, saves, created
+#                        documents, whole sequences).
+IDEM_READ_ONLY = "read_only"
+IDEM_REPEATABLE = "repeatable_now"
+IDEM_RECONCILE = "reconcile_before_retry"
+IDEM_NEVER = "never_auto_repeat"
+IDEMPOTENCY_CLASSES = (IDEM_READ_ONLY, IDEM_REPEATABLE, IDEM_RECONCILE,
+                       IDEM_NEVER)
+
+IDEMPOTENCY: Dict[str, str] = {
+    # read-only observations
+    "list_directory": IDEM_READ_ONLY,
+    "read_file": IDEM_READ_ONLY,
+    "detect_applications": IDEM_READ_ONLY,
+    "inspect_application": IDEM_READ_ONLY,
+    "find_control": IDEM_READ_ONLY,
+    "read_control": IDEM_READ_ONLY,
+    "list_controls": IDEM_READ_ONLY,
+    "application_status": IDEM_READ_ONLY,
+    "active_window": IDEM_READ_ONLY,
+    # mkdir on an existing directory is refused by the tool layer —
+    # repeating it cannot destroy anything.
+    "create_directory": IDEM_REPEATABLE,
+    # launch/open: verify the process/window state first.
+    "open_file": IDEM_RECONCILE,
+    "launch_application": IDEM_RECONCILE,
+    "focus_application": IDEM_RECONCILE,
+    "close_application": IDEM_RECONCILE,
+    "activate_control": IDEM_RECONCILE,
+    # replacement: confirm the current bytes before deciding.
+    "replace_file_content": IDEM_RECONCILE,
+    # creations overwrite nothing (O_EXCL) but repeating them is
+    # never an automatic decision — and typed text/saves/sequences
+    # must never be replayed without a human.
+    "create_text_file": IDEM_NEVER,
+    "create_report": IDEM_NEVER,
+    "create_pdf": IDEM_NEVER,
+    "create_spreadsheet": IDEM_NEVER,
+    "enter_text": IDEM_NEVER,
+    "save_document": IDEM_NEVER,
+    "task_sequence": IDEM_NEVER,
+}
+
+
+def idempotency_of(action: Dict[str, Any]) -> str:
+    """Recovery classification of a validated action (closed table).
+
+    Unknown names are conservative: ``never_auto_repeat`` — a new or
+    malformed action can never be treated as safe to repeat.
+    """
+    name = str((action or {}).get("action") or "")
+    return IDEMPOTENCY.get(name, IDEM_NEVER)
+
+
+#: Step states a resume must treat as UNCERTAIN for a dispatched
+#: mutation (executed, but the outcome is not verified): continuing
+#: automatically could repeat or corrupt the mutation.
+UNCERTAIN_MUTATION_STATES = frozenset({STEP_FAILED,
+                                       STEP_VERIFICATION_FAILED})
+
+
+def build_resume_plan(
+    original: TaskPlan,
+    *,
+    verified_results: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> Tuple[Optional[TaskPlan], List[str], List[str]]:
+    """Residual plan for a safe resume (pure; v0.20).
+
+    Returns ``(residual_plan_or_None, notes, reconciliation)``:
+
+    * steps already COMPLETED-and-verified are excluded and their
+      verified results are replayed (the caller pre-seeds them so
+      derivations from earlier steps still resolve),
+    * mutating steps with an UNCERTAIN outcome (dispatched, then failed
+      or verification-failed) are excluded and listed in
+      ``reconciliation`` — a human must confirm the real state before
+      they may run again,
+    * mutating steps that never dispatched (failed at resolution or
+      preview) and every not-started/skipped step are included,
+    * the residual keeps the original order and dependency ids; the
+      caller must request a FRESH plan-level approval for its digest.
+
+    ``None`` plan means there is nothing left to resume (honest).
+    """
+    verified_results = verified_results or {}
+    residual: List[PlanStep] = []
+    notes: List[str] = []
+    reconciliation: List[str] = []
+    skipped_done = 0
+    for step in original.steps:
+        if step.state == STEP_SUCCEEDED and step.id in verified_results:
+            skipped_done += 1
+            continue
+        if (step.mutating
+                and step.state in UNCERTAIN_MUTATION_STATES
+                and getattr(step, "dispatched", False)):
+            reconciliation.append(
+                f"{step.id} ({step.summary}) — the mutation was "
+                f"dispatched but its outcome is not verified; confirm "
+                f"the real state before running it again.")
+            continue
+        residual.append(replace(step, state=STEP_PENDING, result=None,
+                                error=None, verification=None))
+    if skipped_done:
+        notes.append(
+            f"{skipped_done} completed, verified step(s) will NOT be "
+            f"repeated.")
+    if reconciliation:
+        notes.append(
+            f"{len(reconciliation)} step(s) need reconciliation before "
+            f"they may run again (uncertain outcome — never retried "
+            f"automatically).")
+    if not residual:
+        return None, notes, reconciliation
+    if len(residual) > MAX_PLAN_STEPS:  # pragma: no cover - defensive
+        residual = residual[:MAX_PLAN_STEPS]
+        notes.append("Resume plan truncated to the step limit.")
+    return (TaskPlan(objective=original.objective, steps=residual),
+            notes, reconciliation)
+
 
 _PLAN_KEYS = {"objective", "steps"}
 _STEP_KEYS = {"id", "summary", "action", "depends_on", "expected"}
@@ -136,6 +273,10 @@ class PlanStep:
     verification: Optional[Dict[str, Any]] = None
     #: derivation resolved at execution time (None = fully static).
     derives: Dict[str, Derivation] = field(default_factory=dict)
+    #: v0.20 runtime flag: True once the step was actually dispatched
+    #: to the pipeline (distinguishes "failed before executing" from
+    #: "failed after the mutation was attempted" for recovery).
+    dispatched: bool = False
 
     @property
     def requires_approval(self) -> bool:

@@ -1,6 +1,6 @@
 # Alwin Fusion — Security Model and Limitations
 
-Version: 0.19.0 — Milestone: Reliable Application Integrations
+Version: 0.20.0 — Milestone: Intelligent Task Planning and Recovery
 
 This document states what the prototype defends against, how, and —
 importantly — **what it does not defend against**. Passing tests does
@@ -1531,6 +1531,32 @@ New surface introduced by v0.6, stated honestly:
       and nothing is retried automatically — approval digests and the
       per-step permission re-check are untouched, so recovery can
       never launder an unauthorized mutation.
+53. **Resume is a new, separately-approved attempt — not a bypass**
+    (v0.20).
+    * *No approval transfer.* `resume_task()` builds a residual plan
+      whose digest is computed fresh; the original approval digest is
+      refused for it (tested), the plan-level gate runs again, and
+      every residual step still goes through preview → permission →
+      digest-bound token → execute → verify → audit. Replayed results
+      are curated evidence from a VERIFIED earlier attempt — they feed
+      derivations only, never authorization.
+    * *Recovery cannot widen the action set.* The residual is a strict
+      subset of an already-validated plan (same closed actions, same
+      order, same bounds); `build_resume_plan` is pure and the manager
+      path re-validates every step through the existing pipeline.
+      Unknown actions are classified `never_auto_repeat`, and no new
+      retry framework exists: read-only steps keep their single
+      bounded retry, mutations never retry automatically, and
+      dispatched-but-unverified mutations are EXCLUDED from resume
+      pending human reconciliation.
+    * *Bounded and auditable.* One resume per chain
+      (`MAX_RESUMES = 1`), the manager must be idle, cancelled or
+      completed tasks cannot resume, and each attempt is its own
+      audited task id linked by `resume_of` — audit history shows
+      original and recovery attempts distinctly. Diagnostics and the
+      clarification note are fixed, bounded strings (no document
+      contents, no secrets); document text and application text remain
+      untrusted data with no path into any decision.
 
 ## Reporting security issues
 

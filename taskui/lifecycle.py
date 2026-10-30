@@ -167,6 +167,14 @@ class TaskRecord:
     error: Optional[str] = None
     notes: List[str] = field(default_factory=list)
 
+    # v0.20: curated per-step results (step_id -> bounded data + the
+    # preview digest) persisted so a RESUME can replay verified
+    # derivations without re-running completed mutations.  `resume_of`
+    # links a resumed attempt to the original task id (each attempt is
+    # its own audited record).
+    plan_results: Dict[str, Any] = field(default_factory=dict)
+    resume_of: str = ""
+
     cancel_requested: bool = False
 
     # Live pipeline objects (worker thread only; never serialized)

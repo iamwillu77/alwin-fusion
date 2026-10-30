@@ -63,6 +63,7 @@ from ai_core.task_plan import (
     STEP_SKIPPED,
     STEP_VERIFICATION_FAILED,
     TaskPlan,
+    build_resume_plan,
 )
 from ai_core.task_planning import PlanningError, TaskPlanningService
 from taskui.history import (
@@ -92,6 +93,10 @@ MAX_REPLANS = 1
 MAX_READ_RETRIES = 1
 #: Total steps across the initial plan plus bounded replans.
 MAX_TOTAL_PLAN_STEPS = 24
+#: v0.20: a failed plan may be resumed at most ONCE (a resume of a
+#: resume gets zero further resumes) — recovery is bounded, never a
+#: loop.
+MAX_RESUMES = 1
 
 #: Decision values released to a blocked approval gate.
 APPROVE = "approve"
@@ -225,6 +230,106 @@ class TaskManager:
     @staticmethod
     def _new_task_id() -> str:
         return uuid.uuid4().hex[:12]
+
+    # ------------------------------------------------------------------ #
+    # v0.20 bounded resume of a failed plan (recovery without repetition)
+    # ------------------------------------------------------------------ #
+
+    def resume_task(self, task_id: str) -> TaskRecord:
+        """Resume a FAILED plan as a NEW, separately-approved task.
+
+        Safety contract (all enforced here, none delegated to a model):
+
+        * the source record must be terminal-failed and carry a plan,
+        * completed-and-verified steps are NEVER re-run — their curated
+          results are replayed so derivations still resolve,
+        * mutating steps with an UNCERTAIN outcome (dispatched but
+          failed/unverified) are excluded and reported for
+          reconciliation — a human confirms the real state first,
+        * the resume gets a FRESH plan-level approval (the digest binds
+          the residual plan only; an old approval cannot cover it),
+        * recovery is bounded: ``MAX_RESUMES`` per chain, the manager
+          must be idle, and the residual goes through the same closed
+          validation and pipeline as any plan.
+        """
+        source = None
+        with self._lock:
+            if (self._record is not None
+                    and self._record.task_id == task_id):
+                source = self._record      # only the latest is in memory
+            if source is None:
+                raise ManagerError(
+                    "That task is not available to resume (only the most "
+                    "recent task is kept in memory).")
+            if self._record is not None and not self._record.is_terminal:
+                raise ManagerError(
+                    "A task is already running; wait for it to finish.")
+            # Partial mutation = needs_attention (the honest v0.12
+            # semantics); both terminal failure states are resumable.
+            if source.state not in (STATE_FAILED, STATE_NEEDS_ATTENTION):
+                raise ManagerError(
+                    "Only a failed task (or one needing attention after "
+                    "a partial mutation) can be resumed.")
+            if source.task_plan is None:
+                raise ManagerError(
+                    "That task has no plan to resume.")
+            if int(getattr(source, "_resumes_left", MAX_RESUMES)) <= 0:
+                raise ManagerError(
+                    "The recovery budget for this task chain is used up "
+                    "(nothing is retried automatically beyond the "
+                    "bound).")
+            residual, notes, reconciliation = build_resume_plan(
+                source.task_plan,
+                verified_results=getattr(source, "plan_results", {}),
+            )
+            if residual is None:
+                raise ManagerError(
+                    "Nothing to resume: every step already completed and "
+                    "verified."
+                    + (f" {len(reconciliation)} step(s) need "
+                       f"reconciliation before they may run again."
+                       if reconciliation else ""))
+            record = TaskRecord(
+                task_id=self._new_task_id(),
+                command=f"Resume of task {source.task_id}: "
+                        f"{source.task_plan.objective}"[:2000],
+                dry_run=source.dry_run,
+            )
+            record.resume_of = source.task_id
+            record._resumes_left = int(
+                getattr(source, "_resumes_left", MAX_RESUMES)) - 1
+            record.plan_results = {}       # fresh attempt's own results
+            record.transition(STATE_PLANNING)
+            self._record = record
+            self._approval_event.clear()
+            self._approval_decision = None
+            self._approval_digest_shown = ""
+            replayed = dict(getattr(source, "plan_results", {}))
+            record.notes.extend(notes)
+            for item in reconciliation:
+                record.notes.append("Needs reconciliation: " + item)
+            self._worker = threading.Thread(
+                target=self._run_resume,
+                args=(record, residual, replayed),
+                name=f"alwin-task-{record.task_id}",
+                daemon=True,
+            )
+            self._worker.start()
+        self._notify(record)
+        return record
+
+    def _run_resume(self, record: TaskRecord, plan: TaskPlan,
+                    replayed: Dict[str, Any]) -> None:
+        try:
+            pipeline = self._build_pipeline(record)
+        except Exception as exc:  # noqa: BLE001 - honest failure
+            self._fail(record,
+                       f"Resume could not start: {type(exc).__name__}: "
+                       f"{exc}")
+            return
+        self._run_plan(record, pipeline, plan,
+                       initial_results=replayed,
+                       resume_notes=())
 
     # ------------------------------------------------------------------ #
     # Approval / rejection / cancellation (called from the UI thread)
@@ -593,8 +698,16 @@ class TaskManager:
         return validate_action(resolved)
 
     def _run_plan(self, record: TaskRecord, pipeline: TaskPipeline,
-                  plan: TaskPlan) -> None:
-        """Execute a validated plan step by step (worker thread)."""
+                  plan: TaskPlan,
+                  initial_results: Optional[Dict[str, Any]] = None,
+                  resume_notes: tuple = ()) -> None:
+        """Execute a validated plan step by step (worker thread).
+
+        v0.20: ``initial_results`` pre-seeds VERIFIED results replayed
+        from a previous attempt (resume path) — the residual steps'
+        derivations resolve against them without re-running anything,
+        and their digests keep the no-repeat guards armed.
+        """
         service = getattr(record, "_planning", None)
         record.task_plan = plan
         record._replans_left = MAX_REPLANS
@@ -612,16 +725,21 @@ class TaskManager:
             )[:900]
             record.steps = [self._plan_step_entry(i + 1, s)
                             for i, s in enumerate(plan.steps)]
+            for note in resume_notes:
+                record.notes.append(str(note)[:300])
         self._notify(record)
 
         try:
-            self._run_plan_steps(record, pipeline, plan, service)
+            self._run_plan_steps(record, pipeline, plan, service,
+                                 initial_results=initial_results)
         except Exception as exc:  # noqa: BLE001 - the UI must see errors
             self._fail(record,
                        f"Plan execution error: {type(exc).__name__}: {exc}")
 
     def _run_plan_steps(self, record, pipeline, plan,
-                        service) -> None:
+                        service,
+                        initial_results: Optional[Dict[str, Any]] = None
+                        ) -> None:
         # ---- one plan-level approval (task_sequence precedent) --------- #
         if plan.requires_approval and not record.dry_run:
             digest = plan_digest(plan.to_dict())
@@ -653,6 +771,13 @@ class TaskManager:
 
         results: Dict[str, Dict[str, Any]] = {}
         succeeded_digests: Dict[str, str] = {}   # mutating digests done
+        # v0.20: replay VERIFIED results from a previous attempt (resume)
+        # — derivations resolve against them; their digests keep the
+        # never-repeat guards armed.
+        for step_id, entry in (initial_results or {}).items():
+            if isinstance(entry, dict) and entry.get("digest"):
+                results[step_id] = dict(entry)
+                succeeded_digests[str(entry["digest"])] = step_id
         failed_mutation_digests: set = set()
         succeeded_summaries: List[str] = []
         stop_reason: Optional[str] = None        # terminal-stop reasons
@@ -693,7 +818,16 @@ class TaskManager:
             blocked_by = None
             for dep in step.depends_on:
                 parent = plan.step_by_id(dep)
-                if parent is None or parent.state in FAILED_STATES:
+                if parent is None:
+                    # v0.20: a dependency outside the residual plan is
+                    # satisfied by a REPLAYED verified result (resume
+                    # path) — completed work is trusted through the
+                    # stored evidence, never re-run.
+                    if dep in results:
+                        continue
+                    blocked_by = dep
+                    break
+                if parent.state in FAILED_STATES:
                     blocked_by = dep
                     break
             if blocked_by is None:
@@ -776,6 +910,17 @@ class TaskManager:
                 self._plan_step_state(
                     record, step, STEP_FAILED,
                     error=str(preview.error or preview.status))
+                # v0.20: deterministic, bounded clarification for the
+                # documented overwrite conflict — the file exists and
+                # nothing was touched; the user decides, never the
+                # model and never an automatic overwrite.
+                if "already exists" in str(preview.error or ""):
+                    record.notes.append(
+                        "Needs clarification: that file already exists "
+                        "and was NOT modified. Ask whether to replace "
+                        "it (the reviewed, approval-gated "
+                        "'replace_file_content' action) or to use a "
+                        "different file name."[:300])
                 failed_step = step
                 zero_execution_failure = True
                 stop_reason = "failed-preview"
@@ -794,6 +939,7 @@ class TaskManager:
 
             # ---- execute (existing chain; plan approval already bound) #
             self._plan_step_state(record, step, STEP_RUNNING)
+            step.dispatched = True          # v0.20: outcome bookkeeping
             token = ApprovalToken(preview.plan_digest)
             attempts = 0
             while True:
@@ -822,6 +968,10 @@ class TaskManager:
                             "data": self._step_result_data(report),
                             "digest": preview.plan_digest,
                         }
+                        # v0.20: persist curated results on the record
+                        # so a resume can replay verified derivations.
+                        record.plan_results[step.id] = dict(
+                            results[step.id])
                         if step.mutating:
                             succeeded_digests[preview.plan_digest] = step.id
                         succeeded_summaries.append(step.summary)
@@ -845,6 +995,22 @@ class TaskManager:
                 failed_step = step
                 if step.mutating:
                     failed_mutation_digests.add(preview.plan_digest)
+                    # v0.20: a failure the pipeline reports as NEVER
+                    # EXECUTED (e.g. the tool refused before writing —
+                    # "already exists", permission denied) is a KNOWN
+                    # zero-effect outcome, not an uncertain mutation:
+                    # it stays resumable.
+                    execution = getattr(report, "execution", None)
+                    if execution is not None and \
+                            getattr(execution, "executed", True) is False:
+                        step.dispatched = False
+                    if "already exists" in str(report.error or ""):
+                        record.notes.append(
+                            "Needs clarification: that file already "
+                            "exists and was NOT modified. Ask whether to "
+                            "replace it (the reviewed, approval-gated "
+                            "'replace_file_content' action) or to use a "
+                            "different file name."[:300])
                 break
 
             if failed_step is not None:
