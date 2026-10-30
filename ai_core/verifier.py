@@ -34,6 +34,11 @@ STATUS_PASSED = "passed"
 STATUS_FAILED = "failed"
 STATUS_SKIPPED = "skipped"
 
+#: v0.18: an independently re-read text document larger than this is
+#: not verified byte-for-byte (defence against pathological sizes);
+#: the tool layer caps writes far below it.
+MAX_VERIFY_BYTES = 1_048_576
+
 
 @dataclass
 class VerificationResult:
@@ -191,11 +196,58 @@ class Verifier:
                 checks=checks,
             )
 
+        if name == "replace_file_content":
+            # v0.18: an atomic replace is only COMPLETED when an
+            # independent re-read proves the exact bytes landed; a
+            # vanished/mismatched file is FAILED, never "assume ok".
+            resolved = self._resolve(action, "create")
+            exists = self._add(checks, "path_exists", resolved.exists(), str(resolved))
+            is_file = False
+            not_link = False
+            if exists:
+                not_link = self._add(
+                    checks, "not_a_symlink", not resolved.is_symlink(), str(resolved)
+                )
+                is_file = self._add(checks, "is_file", resolved.is_file(), str(resolved))
+            if exists and is_file and not_link:
+                try:
+                    actual = resolved.read_bytes()
+                except OSError:
+                    actual = None
+                expected = action.get("content", "").encode("utf-8")
+                size_ok = self._add(
+                    checks, "size_within_limit",
+                    actual is not None
+                    and len(actual) <= MAX_VERIFY_BYTES,
+                    f"{len(actual) if actual is not None else 0} bytes",
+                )
+                content_ok = self._add(
+                    checks, "content_matches",
+                    actual == expected,
+                    f"{len(actual) if actual is not None else 0} bytes "
+                    "re-read",
+                )
+                ok = exists and is_file and not_link and size_ok and content_ok
+            else:
+                ok = False
+            return VerificationResult(
+                status=STATUS_PASSED if ok else STATUS_FAILED,
+                message=(
+                    "File replaced and verified against the filesystem."
+                    if ok
+                    else (
+                        f"Verification failed: {resolved} does not contain "
+                        f"the expected content (the original may be intact "
+                        f"if the write failed — inspect before retrying)."
+                    )
+                ),
+                checks=checks,
+            )
+
         if name == "read_file":
             resolved = self._resolve(action, "read")
             is_file = self._add(checks, "is_file", resolved.is_file(), str(resolved))
-            if is_file and isinstance(execution.data.get("content"), str):
-                # Read EXACTLY like the executor does (raw bytes +
+            if is_file and isinstance(execution.data.get("content"), str):                # Read EXACTLY like the executor does (raw bytes +
                 # replace): Path.read_text() would normalize CRLF to
                 # LF and make every Windows-line-ending file (any
                 # csv.writer output) falsely fail with "file changed

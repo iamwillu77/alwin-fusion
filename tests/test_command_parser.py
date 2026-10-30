@@ -194,6 +194,8 @@ class TestActionValidation(unittest.TestCase):
                 "list_directory",
                 "read_file",
                 "create_text_file",
+                # v0.18: approval-gated content replacement.
+                "replace_file_content",
                 "create_report",
                 "create_pdf",
                 "create_spreadsheet",

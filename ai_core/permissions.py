@@ -348,6 +348,10 @@ class PermissionChecker:
         if name in (
             "create_directory",
             "create_text_file",
+            # v0.18: content replacement resolves like a create (the
+            # target must be inside the permitted roots; the tools
+            # additionally refuse symlinks and missing targets).
+            "replace_file_content",
             "create_report",
             "create_pdf",
             "create_spreadsheet",

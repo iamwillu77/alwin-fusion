@@ -1,6 +1,6 @@
 # Alwin Fusion — Security Model and Limitations
 
-Version: 0.17.0 — Milestone: Intelligent Application Interaction
+Version: 0.18.0 — Milestone: Verified Document Workflows
 
 This document states what the prototype defends against, how, and —
 importantly — **what it does not defend against**. Passing tests does
@@ -1466,6 +1466,48 @@ New surface introduced by v0.6, stated honestly:
       session `toolkit-accessibility=false`, so LibreOffice exposes no
       AT-SPI at all — reported BLOCKED with that root cause; no
       setting is changed and no evidence is fabricated.
+51. **Document workflows: one reviewed overwrite primitive, digest-
+    bound authorization, honest verification** (v0.18).
+    * *The only overwrite is `replace_file_content`* — a closed-schema
+      action that requires approval like every mutation. Creation
+      (`create_text_file`) stays `O_EXCL` (never clobbers, even under
+      a check→use race); no other action in the allowlist can replace
+      file content, and the filesystem tool module remains free of
+      delete/rename/shell calls except the reviewed atomic-replace
+      pair (AST-pinned: the destructive-call scan strips exactly that
+      one method and requires the rest of the module to be clean).
+    * *Authorization binds path AND content.* The approval digest
+      covers the full normalized operation: a wrong digest, a changed
+      path, or edited content each independently reject with nothing
+      executed (tested). Document text inside a file cannot grant
+      anything — contents are data, never parsed as commands, never
+      fed to a permission decision, and cannot expand the action set.
+    * *Path defenses.* Traversal (`..`) is refused by the planner
+      schema; out-of-roots paths are denied by the PermissionChecker;
+      symlinks are dereferenced by `resolve()` so an escaping link
+      becomes an out-of-roots path and is denied — a replacement can
+      only ever land on an authorized real file inside the roots.
+      Missing targets, directories and symlinked targets are refused
+      by the tool as defence in depth.
+    * *Integrity, honestly bounded.* The write is atomic in practice
+      (same-directory `O_EXCL` temp + `os.replace`): a failed write
+      leaves the original byte-identical (verified with injected
+      ENOSPC and a simulated wrong-bytes landing). This is NOT
+      race-free — a foreign process racing the resolution→replace
+      window is detected by the verifier's independent end-of-plan
+      re-read (exists + not-a-symlink + size + exact byte match) and
+      reported FAILED/UNVERIFIED, never assumed successful, and never
+      retried automatically.
+    * *Audit without leakage.* Records carry the action with content
+      redacted to `<redacted:N chars>` plus digests and outcomes; the
+      replacement tool returns size + sha256 evidence, never the
+      content; binary (NUL-bearing) files are refused by read and
+      replace rather than decoded into garbage.
+    * *No new endpoints.* LibreOffice/UNO was evaluated and declined:
+      a UNO bridge requires an unauthenticated, locally-reachable
+      control socket, which this milestone forbids — no listener
+      exists, no desktop setting was changed, and the capability
+      stays explicitly unavailable.
 
 ## Reporting security issues
 

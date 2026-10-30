@@ -2,7 +2,7 @@
 
 **Open-source, offline-first AI-native operating system — in progress.**
 
-Version **0.17.0** · Milestone: **Intelligent Application Interaction**
+Version **0.18.0** · Milestone: **Verified Document Workflows**
 
 Alwin Fusion lets you control your computer through natural-language
 commands. v0.9 gives **Alwin**, the persistent, lightweight desktop
@@ -1360,6 +1360,68 @@ GTK4 applications expose deep layout trees, so listings are bounded
 and may truncate; application content stays untrusted and is never
 persisted; single-user local operation (AT-SPI is not access-
 controlled beyond the session).
+
+### Verified document workflows (v0.18.0)
+
+v0.18.0 adds **reliable, permission-aware document workflows** on the
+existing trusted pipeline — not a second engine, and not more GUI
+actions. The closed action set gains exactly one mutation:
+**`replace_file_content`** (explicit, approval-gated replacement of an
+existing UTF-8 text document), joining the existing `create_text_file`
+(never overwrites, `O_EXCL`), `read_file`, `list_directory`, the
+document generators, and `open_file`.
+
+**How a replacement works**: the path is resolved through the real
+PermissionChecker (traversal and out-of-roots are denied before any
+tool runs; a symlink escaping the roots is dereferenced and denied); a
+missing target is refused — replacement is *never* a silent create;
+symlinked targets and directories are refused; content is bounded
+(64 KiB planner cap, 1 MiB tool cap, null bytes rejected — binary
+files are refused, not laundered). The write goes to an `O_EXCL` temp
+file in the same directory, is fsync'd, then moved over the target
+with an atomic `os.replace` — **a failed write leaves the original
+byte-identical** (tested with an injected "no space left" failure). The
+verifier then re-reads the file independently: size within limits +
+exact byte match, or the operation is **FAILED** — a write call that
+"returned ok" is never sufficient evidence. Outcomes are labelled
+COMPLETED/FAILED/UNVERIFIED/CANCELLED/NEEDS_APPROVAL through the
+pipeline's existing status vocabulary; uncertain mutations are never
+retried automatically.
+
+**Approval and integrity**: replacement requires approval like every
+other mutation, and the approval digest binds the *whole* operation —
+path **and** content — so a modified operation can never ride an old
+approval (verified: wrong digest and changed content are both rejected
+with nothing executed). Audit records describe the operation with
+content redacted to `<redacted:N chars>` plus digests; document text
+is untrusted data end-to-end and can never grant permissions or expand
+the action set.
+
+**Applications**: GNOME Text Editor is supported for *viewing/launch*
+through the existing `open_file` + v0.17 AT-SPI adapter; content
+operations use the trusted file tools because the editor's
+accessibility interface exposes no document text (measured — typing or
+reading through AT-SPI is not claimed). LibreOffice remains
+**unavailable** on this session (`toolkit-accessibility=false`); a
+native UNO bridge was evaluated and **declined** because it requires
+an unauthenticated, locally-reachable control socket — no listener was
+opened and no settings were changed.
+
+**Known limitations (honest)**: the filesystem path is not race-free —
+another process touching the file between resolution and replace is
+*detected* by the end-of-plan re-read and reported, not prevented;
+multi-step sequences re-verify every step at the end of the plan, so
+mutating the **same file twice** in one sequence is conservatively
+reported FAILED (final state never falsely claimed as success — use
+distinct files or separate runs); binary/PDF/XLSX content is handled
+by the dedicated document tools, never by text replacement.
+
+Verification: `python3 scripts/verify_document_workflows.py` (12
+items, 14 EXECUTED + 1 BLOCKED with observed reason — real pipeline,
+digest-bound approvals, independent re-reads, plus re-runs of the
+desktop-control, desktop-workflow, memory and scheduler scripts) and
+the v0.18 suite in `tests/test_document_workflows.py` (28 tests,
+SANDBOX-labelled with MOCKED failure simulations).
 
 ### Speech-model and language quality (measured, honest)
 

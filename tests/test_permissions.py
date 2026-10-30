@@ -230,6 +230,8 @@ class TestNoDestructiveCapability(unittest.TestCase):
                 "list_directory",
                 "read_file",
                 "create_text_file",
+                # v0.18: approval-gated content replacement.
+                "replace_file_content",
                 "create_report",
                 "create_pdf",
                 "create_spreadsheet",
@@ -266,6 +268,8 @@ class TestNoDestructiveCapability(unittest.TestCase):
             {
                 "create_directory",
                 "create_text_file",
+                # v0.18: replacing an existing document is a mutation.
+                "replace_file_content",
                 "create_report",
                 "create_pdf",
                 "create_spreadsheet",
@@ -293,9 +297,28 @@ class TestNoDestructiveCapability(unittest.TestCase):
             self.assertNotIn(read_only, MUTATING_ACTIONS)
 
     def test_filesystem_tools_have_no_destructive_calls(self):
+        import ast as ast_mod
+
         import integrations.filesystem.tools as tools_mod
 
         source = pathlib.Path(tools_mod.__file__).read_text(encoding="utf-8")
+        # v0.18: the ONLY destructive-capable calls in the whole module
+        # are the reviewed atomic-replace pair (os.replace + a guarded
+        # cleanup unlink inside replace_file_content).  Strip that one
+        # method and the remainder must stay as destructive-free as it
+        # was before the milestone.
+        tree = ast_mod.parse(source)
+        replace_method = None
+        for node in ast_mod.walk(tree):
+            if isinstance(node, ast_mod.FunctionDef) \
+                    and node.name == "replace_file_content":
+                replace_method = node
+        self.assertIsNotNone(replace_method,
+                             "the reviewed replace method must exist")
+        lines = source.splitlines(keepends=True)
+        stripped = "".join(
+            lines[: replace_method.lineno - 1]
+            + lines[replace_method.end_lineno:])
         for banned in (
             "os.remove(",
             "os.unlink(",
@@ -308,7 +331,17 @@ class TestNoDestructiveCapability(unittest.TestCase):
             "subprocess",
         ):
             with self.subTest(banned=banned):
-                self.assertNotIn(banned, source)
+                self.assertNotIn(banned, stripped)
+        # Inside the reviewed method: exactly the atomic move and a
+        # guarded temp cleanup — nothing else destructive.
+        method_src = "".join(
+            lines[replace_method.lineno - 1: replace_method.end_lineno])
+        for banned in ("os.remove(", "rmtree", "shutil.", "os.rename(",
+                       "os.system(", "subprocess"):
+            with self.subTest(replace_method_banned=banned):
+                self.assertNotIn(banned, method_src)
+        self.assertIn("os.replace(", method_src)
+        self.assertIn("os.O_EXCL", method_src)
 
     def test_core_never_evals_or_shells_out(self):
         import ai_core.executor as executor_mod

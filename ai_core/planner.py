@@ -36,6 +36,9 @@ ACTION_SCHEMA: dict[str, frozenset] = {
     "list_directory": frozenset({"action", "path"}),
     "read_file": frozenset({"action", "path"}),
     "create_text_file": frozenset({"action", "path", "content"}),
+    # v0.18: explicit, approval-gated content replacement (never a
+    # silent create — the target must already exist).
+    "replace_file_content": frozenset({"action", "path", "content"}),
     "create_report": frozenset({"action", "path", "content"}),
     "create_pdf": frozenset({"action", "path", "content"}),
     "create_spreadsheet": frozenset({"action", "path", "spec"}),
@@ -87,6 +90,9 @@ MUTATING_ACTIONS = frozenset(
     {
         "create_directory",
         "create_text_file",
+        # v0.18: replacing an existing document's content is a
+        # mutation of user data — approval required, like creation.
+        "replace_file_content",
         "create_report",
         "create_pdf",
         "create_spreadsheet",
@@ -467,6 +473,27 @@ def validate_action(payload: object) -> dict:
         if not isinstance(content, str):
             raise PlanValidationError(
                 f"'create_text_file' needs string 'content', got {type(content).__name__}."
+            )
+        if len(content) > MAX_CONTENT_CHARS:
+            raise PlanValidationError(
+                f"Content is too long (limit {MAX_CONTENT_CHARS} characters)."
+            )
+        return {"action": action, "path": path, "content": content}
+
+    if action == "replace_file_content":
+        # v0.18: same bounded-text rules as create_text_file, plus a
+        # null-byte refusal — replacement targets are TEXT documents;
+        # binary files are rejected rather than laundered.
+        content = payload.get("content")
+        if not isinstance(content, str):
+            raise PlanValidationError(
+                f"'replace_file_content' needs string 'content', got "
+                f"{type(content).__name__}."
+            )
+        if "\x00" in content:
+            raise PlanValidationError(
+                "'replace_file_content' content contains a null byte — "
+                "only UTF-8 text documents are supported."
             )
         if len(content) > MAX_CONTENT_CHARS:
             raise PlanValidationError(

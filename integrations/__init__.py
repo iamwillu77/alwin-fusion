@@ -152,6 +152,18 @@ def build_default_dispatcher(
         requires_approval=True,
     )
     dispatcher.register(
+        "replace_file_content",
+        handlers["replace_file_content"],
+        description=(
+            "Replace an existing UTF-8 text document's content "
+            "(explicit approval required; atomic temp-file replace — "
+            "the original is preserved when the write fails; the target "
+            "must already exist and never be a symlink)."
+        ),
+        mutates=True,
+        requires_approval=True,
+    )
+    dispatcher.register(
         "create_report",
         doc_handlers["create_report"],
         description="Create a formatted plain-text report (never overwrites).",

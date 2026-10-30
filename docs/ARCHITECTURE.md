@@ -1,6 +1,6 @@
 # Alwin Fusion — Architecture
 
-Version: 0.17.0 — Milestone: Intelligent Application Interaction
+Version: 0.18.0 — Milestone: Verified Document Workflows
 
 Alwin Fusion is an open-source, offline-first AI-native operating
 system in the making. This document describes what exists today, how
@@ -127,7 +127,13 @@ ai_runtime/              Local AI runtime integration
     ollama_client.py     stdlib-only Ollama HTTP client (never pulls models)
 integrations/            Pluggable action handlers (the extension point)
     __init__.py          ActionDispatcher + build_default_dispatcher()
-    filesystem/tools.py  list/read/create-only filesystem tools
+    filesystem/tools.py  list/read/create-only filesystem tools;
+                         v0.18: replace_file_content (the ONE reviewed
+                         overwrite primitive: approval-gated, atomic
+                         O_EXCL-temp + os.replace, original preserved
+                         on failure, symlink/missing/dir refused) and
+                         read_file now refuses binary (NUL) files
+                         instead of laundering them as text
     documents/           v0.2 document generation
         deps.py          lazy optional-dependency loading + clear errors
         report.py        deterministic plain-text rendering (stdlib)
@@ -1437,6 +1443,44 @@ setting `org.gnome.desktop.interface toolkit-accessibility=false`
 and the verification script reports that root cause verbatim instead
 of claiming LibreOffice evidence.
 
+**Verified document workflows (v0.18).** One new closed mutation —
+`replace_file_content {action, path, content}` — is the ONLY overwrite
+primitive in the system, and it reuses every existing layer:
+
+- *Planner*: closed schema, content bounded (64 KiB) with a null-byte
+  refusal (binary is rejected, never laundered); classified in
+  `MUTATING_ACTIONS`, so it always requires approval. The permissions
+  mapping (the deliberate planner duplicate) routes it to operation
+  `create` — containment inside the permitted roots.
+- *Tool*: refuses missing targets (replace is never a silent create),
+  symlinks and directories; writes the full content to an `O_EXCL`
+  temp file in the SAME directory, fsyncs it, then `os.replace`s it
+  over the target — a crash or write error can never leave partial
+  content, and the original stays byte-identical (verified with an
+  injected ENOSPC). Evidence returned: byte count + sha256, never the
+  content. This is NOT race-free: a foreign process racing the window
+  is detected by the verifier's re-read and reported, not prevented.
+- *Verifier*: an independent re-read must show the file exists, is a
+  regular non-symlink file, is within the size limit, and matches the
+  approved content byte-for-byte — otherwise the operation is FAILED,
+  no matter what the write call returned. Uncertain mutations are
+  never retried automatically.
+- *Audit*: the action's content rides the record as
+  `<redacted:N chars>` (existing redaction) plus the digest; nothing
+  document-related is logged in the clear.
+- *Sequences*: the v0.14 runner re-verifies every step at the END of
+  the plan, so a multi-step workflow that mutates the SAME file twice
+  is conservatively reported FAILED once the final state no longer
+  matches the earlier step — never a false success (use distinct
+  files, or separate runs). This behaviour is pinned by test and
+  documented, not "fixed" — the end-of-plan check is the honesty
+  guarantee.
+- *Applications*: content operations are file-tool operations; GNOME
+  Text Editor remains a viewer (its AT-SPI exposes no document text),
+  and LibreOffice stays unavailable on this host (a UNO socket bridge
+  was evaluated and declined: it requires an unauthenticated local
+  control endpoint, which the milestone forbids).
+
 **Digest-confirmed save.** The tools layer records the target file's
 sha256 before activating the Save control and re-reads the file after
 a bounded wait (injectable clock/sleep, default 2 s). If the digest
@@ -1738,7 +1782,18 @@ outcomes, unsupported read), uncertain-mutation single-attempt pins,
 planner/permission pins for the new read-only action, a control named
 "Approve all actions" authorizing nothing, AST trust isolation, no
 synthetic-input surface, registry contract pins) — for **1395
-passed, 2 skipped (2889 subtests)**. The v0.9 additions were: the six voice-stack suites
+passed, 2 skipped (2889 subtests)**; the v0.18 suite adds **28 more**
+(`tests/test_document_workflows.py`: create/read/replace roundtrip
+with digest-bound approvals, empty content, missing target refused as
+non-create, oversized/binary rejection, duplicate-create protection,
+injected write failure preserving the original byte-for-byte with no
+temp litter, traversal/out-of-roots denial, two-layer symlink
+handling, unauthorized overwrite refused at the gate, stale and
+tampered approvals rejected, injection-in-content inert, audit content
+redaction, mismatched-landing simulated as FAILED, single-attempt
+no-retry pin, partial-sequence semantics, same-file double mutation
+conservatively FAILED, closed-schema pins) — for **1423 passed, 2
+skipped (2895 subtests)**. The v0.9 additions were: the six voice-stack suites
 (registry, detection, conversation, capture, recognition, voice output),
 the window voice-cycle suite (real `GLib.idle_add` marshalling pumped
 on the default main context, all devices/models/LLM faked), the
