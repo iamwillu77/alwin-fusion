@@ -43,10 +43,10 @@ MODULES = sorted(p for p in COMPANION.glob("*.py"))
 EXPECTED_MODULES = {
     "__init__.py", "__main__.py", "adapter.py", "bedroom.py", "character.py",
     "conversation.py", "greeting.py", "language_detection.py",
-    "language_registry.py", "presentation.py", "renderer.py", "renderer2d.py",
-    "scene.py", "settings.py", "speech_recognition.py", "states.py",
-    "voice.py", "voice_input.py", "voice_output.py", "wake_word.py",
-    "window.py",
+    "language_registry.py", "memory.py", "presentation.py", "renderer.py",
+    "renderer2d.py", "scene.py", "settings.py", "speech_recognition.py",
+    "states.py", "voice.py", "voice_input.py", "voice_output.py",
+    "wake_word.py", "window.py",
 }
 
 #: Dotted module names that must never be imported **at module level**
@@ -101,6 +101,12 @@ VOICE_MODULE_IMPORTS = {
                               "typing", "langdetect", "companion"},
     "conversation.py": {"__future__", "collections", "dataclasses",
                         "typing", "companion"},
+    # v0.15 persistent memory: stdlib SQLite only — sqlite3/os/time/
+    # uuid/re for the store, dataclasses/pathlib/typing for the typed
+    # model.  Nothing here may ever reach the engine (enforced above),
+    # the network, or a process.
+    "memory.py": {"__future__", "dataclasses", "os", "pathlib", "re",
+                  "sqlite3", "time", "typing", "uuid"},
     "voice_input.py": {"__future__", "threading", "time", "dataclasses",
                        "typing"},
     "speech_recognition.py": {"__future__", "os", "threading",
@@ -121,6 +127,7 @@ VOICE_MODULE_LAZY_IMPORTS = {
     "language_registry.py": set(),
     "language_detection.py": set(),
     "conversation.py": set(),
+    "memory.py": set(),
     "voice_input.py": {"gi"},                # GStreamer (audio device)
     "speech_recognition.py": {"faster_whisper", "numpy",
                               "huggingface_hub"},

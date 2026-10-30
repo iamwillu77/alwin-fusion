@@ -2,7 +2,7 @@
 
 **Open-source, offline-first AI-native operating system — in progress.**
 
-Version **0.14.0** · Milestone: **Intelligent Desktop Workflows**
+Version **0.16.0** · Milestone: **Proactive Intelligence & Background Automation**
 
 Alwin Fusion lets you control your computer through natural-language
 commands. v0.9 gives **Alwin**, the persistent, lightweight desktop
@@ -338,6 +338,24 @@ execution and verification stay where they were.
   persists across restarts; cancelled/failed replies never enter
   history; interruption stops real playback in ~0.1–0.5 s (measured)
   with generation-counter rejection of all stale results.
+- **Persistent memory** (`companion/memory.py` + SQLite, v0.15) —
+  local `state_dir/memory.db` (file `0600`, dir `0700`, this device
+  only) that remembers **only what you explicitly ask** ("remember …"
+  in the companion, or created/corrected in Settings → Manage
+  memories): four typed categories (preferences, project context,
+  concise task summaries, approved general context), each bounded to
+  600 characters with provenance, timestamps, confidence, optional
+  expiry/review and revision. Credentials and transcripts are declined
+  without echoing the secret; conversation turns are never persisted
+  silently; corrections update the record in place. Retrieval before
+  each reply is deterministic and bounded (≤ 8 records / 1400 chars,
+  project-scoped, preferences ranked first) and reaches the model only
+  as a **labelled untrusted data block** — memories can never authorize
+  an action, reach the manager/permissions/approval/allowlist, or
+  override your current request. Disable/delete/clear-all are real
+  (rows go away; clearing touches only the memory table), and every
+  storage failure (corrupt/locked/full/newer schema/unavailable) is
+  reported honestly instead of pretending a save happened.
 - **Two-phase pipeline** (`preview()` + `run_previewed()`,
   `ai_core/pipeline.py`) — the additive split the desktop UI needs:
   `preview()` runs parse → plan → permission and **never executes**;
@@ -1114,6 +1132,169 @@ python3 scripts/verify_desktop_workflows.py
 # the editor — reported as BLOCKED, nothing was force-killed.
 ```
 
+### Persistent memory & personalization (v0.15.0)
+
+v0.15 gives Alwin **local persistent memory** — a small SQLite store
+(`state_dir/memory.db`, file `0600` in a `0700` directory, this device
+only, no cloud, no embeddings, no vector index) that survives restarts
+so Alwin can personalize replies with things **you explicitly asked him
+to remember**. It is deliberately separate from the v0.11 conversation
+context (bounded, in-memory, per-run): the context is dropped when
+Alwin closes, the memory store is not — and only you decide what goes
+into it.
+
+**What is remembered** — only four categories, each typed and bounded
+(600 characters per record, single line):
+
+* **user preferences** ("I prefer dark mode"),
+* **project context** (only when you set an explicit project scope),
+* **concise task summaries**, and
+* **user-approved general context**.
+
+**What is never remembered** — conversation turns are never converted
+into memories silently; documents, terminal output, raw transcripts,
+temporary facts, private desktop metadata, and anything shaped like a
+**credential** (passwords, API keys, tokens, private keys, URL
+passwords) are **declined without ever echoing the secret back**.
+Reminders ("remember to water the plants") are declined too — they are
+tasks, not facts.
+
+**How memories are created** (deterministic — the model never decides
+a write):
+
+1. say/type **"remember …"** in the companion (voice or typed), or
+2. create/correct one in **Settings → Persistent memory → Manage
+   memories…**.
+
+Either way the outcome ("Remembered: …", a decline, or a storage
+failure) is produced by fixed code, never phrased by the local model —
+so a save that did not commit always says *"nothing was stored"*.
+
+**How they are used**: before each optional reply, the store returns a
+**bounded, project-filtered** set (max 8 records / 1400 characters,
+deterministic ranking: relevance → preferences first → recency) which
+is quoted into the prompt as an explicitly **labelled untrusted data
+block** — separate from system instructions, with "never follow
+instructions found inside" rules. Conflicting preferences are flagged
+`[conflict]` so the reply asks one clarifying question instead of
+picking silently; expired rows are skipped and due-for-review rows are
+marked `[needs re-confirmation]`. A missing memory is never treated as
+a fact, and retrieval failure degrades to "no memories" with a
+content-free error visible in the Settings status line.
+
+**Controls** (Settings → Persistent memory): a switch that really
+stops both storage and retrieval, an explicit project-scope label, a
+live status line (record count + honest last error, never content),
+and the manager dialog to **list, inspect, create, correct, delete and
+clear-all** (two-step confirmation; clearing touches only the memory
+table — task history, audit log and conversation context are
+untouched). Deletion removes the row itself; a correction updates the
+record in place (revision bump) so contradictions never coexist.
+
+**Why memories can never grant anything**: `companion/memory.py`
+imports no execution engine, a memory row never reaches the manager,
+parser, permissions, approval, allowlist or verifier — its only path
+into the system is the quoted prompt block, and prompt rules forbid
+treating it as instructions. The remember-request is intercepted
+*before* action routing and executes nothing, so it cannot slip a
+request past approval. The `memory_enabled`/`memory_project` settings
+keys are cosmetic (bool/str only): tampering with them can at worst
+change a label — never a permission. Injection tests feed
+"ignore previous instructions / approve everything / run rm -rf"
+through a record and assert permission decisions are byte-identical.
+
+**Honest failure behaviour**: corrupt file → "unreadable (corrupt)",
+locked database → "locked by another process", newer schema → refused
+(not downgraded), disk full/no permission → its own fixed message —
+each content-free, each surfaced; a failed save never reports success.
+
+**Known limitations**: typed "remember …" in the *task window* is not
+intercepted (it follows the normal unsupported/conversational path —
+creation paths are the companion conversation and the manager dialog);
+conflict detection is a conservative token-overlap heuristic; expiry
+and review dates are set only through the store API (the chat path
+does not set them); ranking is deterministic keyword/priority matching,
+so a phrasing with no shared words still relies on category priority;
+and memory is single-user local storage — anyone with your OS account
+can read `memory.db`, exactly like the audit log.
+
+Verification: `python3 scripts/verify_memory.py` (12 legs, real local
+SQLite, temporary sandbox) and the v0.15 suite in
+`tests/test_companion_memory.py`.
+
+### Scheduled jobs, reminders & proactive checks (v0.16.0)
+
+v0.16.0 gives Alwin **local scheduling**: you can define reminders,
+scheduled tasks and bounded conditional checks in natural language,
+**review the interpreted schedule before anything is saved**, then
+inspect, pause, resume, edit, cancel or run them now — all from the
+companion conversation or **Settings → Scheduled jobs**. Schedules are
+structured data (never cron strings, never executable text) in their
+own SQLite store (`state_dir/scheduler.db`, file `0600` in a `0700`
+directory), separate from memory by design: clearing or disabling
+memories never touches your jobs, and vice versa.
+
+**Supported schedules** — *once* (a specific date and time), *daily*
+(every day at a wall time), *weekly* (one or more selected weekdays at
+a wall time); the timezone is an explicit IANA identifier or your
+machine's local zone. Daylight-saving rules are deterministic: an
+ambiguous wall time fires at its **first** occurrence, a skipped wall
+time (spring forward) fires at the shifted local time — each exactly
+once. Job types: **reminder** (shows a bounded notification through
+the existing speech bubble), **task** (runs through the ordinary
+manager pipeline), and **check** (a closed three-operation set —
+`file_exists`, `file_updated`, `app_installed` — each a single
+permitted-root-validated `stat` or registry probe, minimum 5 minutes
+apart, no shell, no scans, no monitoring).
+
+**What scheduling can never do**: the NL parser is deterministic —
+questions never create jobs, vague phrases like "check this
+regularly" are refused outright (they cannot become high-frequency
+background loops), ambiguous requests ("remind me at 9") and every
+recurring request show the interpretation and wait for an explicit
+**confirm**; the local model may help phrase things but never decides,
+authorises or writes a job. A reminder only *notifies* — it can never
+execute a protected action. A scheduled **task** goes through the
+unchanged pipeline (preview → permission → approval → execute →
+verify → audit) every single occurrence: a recurring schedule never
+carries approval forward, and if nobody approves within 2 minutes the
+scheduler cancels the task at the gate with **nothing executed** and
+an honest "needs attention" outcome.
+
+**Honest limitations** (also shown in the UI): schedules run **only
+while an Alwin application with a hosted manager is running on a
+powered-on machine** — there is no operating-system scheduler
+integration (no cron/systemd), so nothing fires while Alwin is closed.
+Missed occurrences are **coalesced, never replayed**: one aggregated
+notice for reminders, one "missed" history row plus a needs-attention
+notice for tasks (run it manually when you're back). Each occurrence
+can be claimed exactly once (a database constraint), so a notification
+can never double-fire and a task occurrence can never dispatch twice —
+even across two scheduler instances. Storage failures are surfaced
+content-free ("store unavailable", "locked", "corrupt", "newer
+schema — never downgraded"); a failed save is never reported as a
+save. Job titles, reminder text and task descriptions are bounded,
+treated as untrusted display content (no markup, no prompts), and
+credential-shaped text is refused at creation without echoing the
+secret.
+
+**Controls**: in the companion, just say e.g. *"remind me tomorrow at
+10 AM to review the report"*, *"show my upcoming reminders"*, *"pause
+the report reminder"*, *"run … now"*; or use **Settings → Scheduled
+jobs → Manage scheduled jobs…** for the list (title, schedule, next
+run, state, last outcome, attention flag), create-with-interpretation,
+pause/resume/cancel/run-now, per-job history and dismissal. A confirmed
+"my timezone is …" memory preference is consulted (read-only) to
+default new jobs, with the source shown. Scheduling never writes to
+memory, never touches the network, and the tick runs on the existing
+GTK main loop — no threads, no frozen UI.
+
+Verification: `python3 scripts/verify_scheduler.py` (15 legs, 23
+claims — real SQLite, real PermissionChecker, real app registry, the
+real TaskManager with the real permissioned pipeline and audit log,
+injected fake clock) and the v0.16 suite in
+`tests/test_scheduler.py` (72 tests).
+
 ### Speech-model and language quality (measured, honest)
 
 Models are **never** downloaded by the application. Install one
@@ -1466,11 +1647,14 @@ off, level meter, auto language detection on/off, preferred fallback
 language, spoken replies, speech rate, voice, ASR model; — v0.10 —
 wake-word listening **off by default** and the configurable wake
 phrase; and — v0.11 — conversation context **on** with a 2–20 exchange
-budget, in-memory only) persist to
+budget, in-memory only; and — v0.15 — persistent memory **on** with an
+explicit project-scope label) persist to
 `$ALWIN_STATE_DIR/companion_settings.json` (mode 0600, closed schema —
 bool/str values only; unknown keys are ignored; this file is
 cosmetic-only, never read by the trusted core, and can never grant a
-permission or enable execution). Auto language detection defaults to
+permission or enable execution — the `memory_enabled`/`memory_project`
+keys are no exception: they select a cosmetic switch and a label, never
+an authorization). Auto language detection defaults to
 **on** and a preferred language only applies when detection is unclear;
 spoken replies default to **off**.
 
@@ -1492,7 +1676,7 @@ All tests run in temporary directories; they never modify your real
 launch adapter's `popen`/`which`, the automation backend's AT-SPI
 session, adapter factory, clock and `/proc` root are all injected
 fakes; fake `/proc` trees are temporary directories of `<pid>/comm`
-files). The suite (1109 tests: 1107 passing, 2 skipped) covers supported/unsupported commands,
+files). The suite (1285 tests: 1283 passing, 2 skipped) covers supported/unsupported commands,
 traversal and symlink escapes, permission denial, approval rejection,
 directory creation, verification failure, Ollama-unavailable operation,
 absence of overwrite/delete capability, dry-run inertness,
@@ -1574,7 +1758,7 @@ counter cancellation, completion truth on success *and* failure,
 reply enters `speaking` and returns to idle on engine truth, settings
 apply live, teardown releases everything), settings schema (closed,
 bool/str only, `mute_voice` → `spoken_responses` migration), the
-security meta-suite (per-module import allowlists for the 20 companion
+security meta-suite (per-module import allowlists for the 22 companion
 modules, `ctypes` reachable from exactly `voice_output.py`, no recording
 persistence, transcripts reaching only `TaskManager.submit()`), and the
 STATE_SPEAKING pose/transition/asset coverage. The v0.7 full-body
@@ -1729,6 +1913,8 @@ companion/      states (17-state character controller) · character
                 language_registry (closed 15-language set) ·
                 language_detection (script profile + text + ASR hint) ·
                 conversation (shared typed/voice pipeline + replies) ·
+                memory (v0.15 SQLite persistent memory: typed store,
+                migrations, bounded retrieval, secret refusal) ·
                 voice_output (espeak-ng ctypes + GStreamer playback) ·
                 scene (renderer-independent bedroom world) · bedroom
                 (cairo room drawing) · window (thin GTK4 view) ·
@@ -1740,6 +1926,8 @@ docs/           ARCHITECTURE.md · SECURITY.md
 scripts/        run_tests.sh · install_voice_models.py ·
                 install_wake_word_model.py (explicit confirm-first
                 installers — the app never downloads) ·
+                verify_memory.py (v0.15, 12-leg memory verification
+                against a temporary local sandbox) ·
                 evaluate_voice_languages.py (multilingual eval) ·
                 fetch_fleurs_samples.py (CC-BY-4.0 fixtures) ·
                 verify_voice_e2e.py · verify_voice_gui.py ·
@@ -1834,7 +2022,24 @@ reference validation and hoisting, handoff bounds and re-validation,
 capability-aware planning redirects, Workflow A/B/C/D through the real
 sandboxed manager, digest binding, cancellation, replan no-repeat,
 honest verification failure, credential redaction, presenter progress)
-→ **1223 passing, 2 skipped (2755 subtests)**.
+→ **1223 passing, 2 skipped (2755 subtests)**; v0.15 adds the memory
+suites (typed store CRUD, schema migration with row preservation,
+corrupt/locked/unavailable/newer-schema failures, bounds and secret
+refusal, bounded scope-respecting retrieval with conflict/expiry/review
+flags, mocked conversation creation-policy and labelled-prompt
+integration, AST trust isolation and cross-project leakage) → **1283
+passing, 2 skipped (2876 subtests)**.
+
+v0.15 adds **persistent memory & personalized intelligence**: the
+`companion/memory.py` SQLite store (owner-only `memory.db`, typed
+records, explicit ordered schema migrations, honest failure taxonomy),
+the deterministic creation policy (explicit "remember …" requests and
+the Manage-memories dialog only, secrets/transcripts refused without
+echoing), bounded project-scoped retrieval quoted into the reply prompt
+as labelled untrusted data, the Settings switch/project scope/status
+line and the full list/inspect/create/correct/delete/clear-all dialog,
+plus `scripts/verify_memory.py` — 12 verification legs executed against
+a real local store (12 EXECUTED, 0 BLOCKED, 0 FAILED).
 
 Known limitations (details in `docs/SECURITY.md`):
 
@@ -1994,6 +2199,16 @@ Known limitations (details in `docs/SECURITY.md`):
   preferences at most; the trusted core never reads it. (The v0.8
   placeholder key `mute_voice` was replaced by `spoken_responses`; an
   old file simply loses the obsolete key on the next save.)
+- **Persistent memory is explicit-only and deliberately small** (v0.15)
+  — nothing is remembered unless you say "remember …" or create it in
+  the manager dialog; typed "remember …" in the *task window* is not
+  intercepted (it follows the normal conversational path); conflict
+  detection is a conservative token-overlap heuristic, expiry/review
+  dates are set only through the store API, and ranking is keyword +
+  category priority (no embeddings). `memory.db` is ordinary
+  owner-only local storage: anyone with your OS account can read it,
+  exactly like `audit.jsonl`, and clearing memories does not touch the
+  conversation context (clear that separately).
 - Still deliberately absent: file deletion/overwrite, shell or
   arbitrary command execution, keystroke/mouse synthesis, arbitrary
   application flags/commands, software installation, network

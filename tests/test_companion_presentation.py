@@ -216,11 +216,17 @@ class SettingsTests(unittest.TestCase):
              # v0.10 wake word
              "wake_phrase",
              # v0.11 conversation context
-             "context_enabled", "context_turns"},
+             "context_enabled", "context_turns",
+             # v0.15 persistent memory (cosmetic switch + explicit
+             # scope label — a tampered file can at worst point
+             # retrieval at the wrong label; it can never grant a
+             # permission or enable execution, see SECURITY.md)
+             "memory_enabled", "memory_project"},
         )
         allowed_prefixes = ("greeting", "quiet", "always", "show_subtitles",
                             "reduced", "mic", "language", "spoken",
-                            "speech", "voice", "asr", "wake", "context")
+                            "speech", "voice", "asr", "wake", "context",
+                            "memory")
         for key in settings_store.SCHEMA:
             self.assertTrue(key.startswith(allowed_prefixes),
                             f"{key} is not a cosmetic preference")

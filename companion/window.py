@@ -55,6 +55,7 @@ v0.9 voice workflow (push-to-talk — one mic button cycles the turn):
 
 from __future__ import annotations
 
+import re
 import sys
 import threading
 import time
@@ -73,9 +74,22 @@ from companion import settings as settings_store
 from companion import presentation
 from companion.adapter import TaskEventAdapter
 from ai_core.command_parser import EXIT, UNSUPPORTED, parse_command
+# v0.16 scheduling: allowed for the window (the engine bans cover only
+# pipeline/executor/planner/permissions/verifier/audit + integrations).
+from ai_core import schedule as schedule_model
+from ai_core import schedule_parse as schedule_parser
+from ai_core.jobstore import JobStore, JobStoreError
+from ai_core.scheduler import DEFAULT_TICK_SECONDS, Scheduler
 from companion.conversation import ConversationService
 from companion.greeting import GreetingConfig, GreetingController
 from companion.language_registry import LANGUAGES, choices_for_ui
+from companion.memory import (
+    CATEGORIES,
+    MAX_CONTENT_CHARS,
+    MemoryRejected,
+    MemoryStore,
+    MemoryStoreError,
+)
 from companion.renderer import NullRenderer
 from companion.scene import SceneController
 from companion.speech_recognition import MODEL_SIZES, SpeechRecognitionService
@@ -225,6 +239,20 @@ class CompanionWindow:
         # services), and nothing here opens a device, loads a model or
         # touches espeak — those happen on first *use*, off this thread.
         self.voice = voice if voice is not None else CompanionVoice()
+        # ---- v0.15 persistent memory (local, explicit, honest) ----------- #
+        # Opens/migrates state_dir/memory.db, or stays None with the
+        # status line explaining why — startup never crashes on it and a
+        # remember-request then fails honestly instead of pretending.
+        self.memory = None
+        if config is not None:
+            try:
+                self.memory = MemoryStore.open_for(
+                    config.state_dir,
+                    enabled=bool(self._settings.get("memory_enabled",
+                                                    True)),
+                )
+            except MemoryStoreError:
+                self.memory = None   # shown by the Settings status line
         self.conversation = conversation or ConversationService(
             manager=manager,
             llm_client=llm_client,
@@ -235,6 +263,44 @@ class CompanionWindow:
             # The conversation module stays engine-free (injected).
             is_action=self._is_action_text,
         )
+        # Attach the store to whatever conversation service we host
+        # (injected test doubles are honoured via getattr).
+        _mem_setter = getattr(self.conversation, "set_memory_store", None)
+        if callable(_mem_setter) and self.memory is not None:
+            try:
+                _mem_setter(
+                    self.memory,
+                    str(self._settings.get("memory_project", "") or ""),
+                )
+            except Exception:  # noqa: BLE001 - memory must not break UI
+                pass
+        # ---- v0.16 scheduler (local, bounded, GTK-loop driven) ----------- #
+        # Own SQLite store (state_dir/scheduler.db), no threads: the tick
+        # runs on the GLib main loop every DEFAULT_TICK_SECONDS.  Failure
+        # to open degrades honestly — scheduling is simply unavailable
+        # and the Settings status line says so.
+        self.scheduler: Optional[Scheduler] = None
+        self._schedule_tick_id: Optional[int] = None
+        self._schedule_tzid, self._schedule_tz_source = \
+            self._preferred_timezone()
+        if config is not None:
+            try:
+                job_store = JobStore.open_for(config.state_dir)
+            except JobStoreError:
+                job_store = None
+            if job_store is not None:
+                self.scheduler = Scheduler(
+                    job_store,
+                    manager=manager,
+                    notifier=self._on_schedule_event,
+                    config=config,
+                )
+        sch_setter = getattr(self.conversation, "set_scheduler", None)
+        if callable(sch_setter) and self.scheduler is not None:
+            try:
+                sch_setter(self.scheduler, self._parse_schedule_text)
+            except Exception:  # noqa: BLE001 - scheduling must not break
+                pass
         self.voice_input = voice_input or VoiceInputService()
         requested_model = str(self._settings.get("asr_model", "small"))
         model_size = (requested_model if requested_model in MODEL_SIZES
@@ -324,6 +390,7 @@ class CompanionWindow:
         self._status_label = None
         self._subtitle_label = None
         self._popover = None
+        self._memory_status_label = None
         self._task_btn = None
         self._mic_btn = None
         self._level_bar = None
@@ -481,6 +548,7 @@ class CompanionWindow:
         self._refresh_status()
         self._show_bubble("", presentation.TONE_CALM)
         self._start_idle_check()
+        self._start_scheduler_tick()
         self._maybe_greet()
 
     # ------------------------------------------------------------------ #
@@ -862,6 +930,18 @@ class CompanionWindow:
         except Exception:  # noqa: BLE001 - cosmetic settings only
             pass
         try:
+            # v0.15: the memory switch is REAL — off stops both writes
+            # and retrieval immediately (the store enforces it; nothing
+            # keeps persisting in the background), and the project
+            # scope applies to the next save and every retrieval.
+            self.conversation.configure_memory(
+                enabled=bool(self._settings.get("memory_enabled", True)),
+                project=str(self._settings.get("memory_project", "")
+                            or ""),
+            )
+        except Exception:  # noqa: BLE001 - cosmetic settings only
+            pass
+        try:
             rate = float(self._settings.get("speech_rate", "1.0"))
         except (TypeError, ValueError):
             rate = 1.0
@@ -1039,6 +1119,18 @@ class CompanionWindow:
             self._voice_phase = self.PHASE_OFF
             self._show_bubble(turn.error or "The request could not be "
                               "sent.", presentation.TONE_NEGATIVE)
+            self._return_to_calm()
+            return
+
+        if turn.notice:
+            # v0.15 memory turn: the DETERMINISTIC outcome (saved /
+            # declined / storage failure) is shown as-is — no LLM
+            # reply, no claim that a save happened when it did not.
+            tone = (presentation.TONE_ATTENTION
+                    if turn.notice_tone == "attention"
+                    else presentation.TONE_CALM)
+            self._show_bubble(turn.notice[:300], tone)
+            self._voice_phase = self.PHASE_OFF
             self._return_to_calm()
             return
 
@@ -1452,6 +1544,9 @@ class CompanionWindow:
             pass
 
     def _on_settings(self, *_args) -> None:  # pragma: no cover - display
+        # v0.15: the memory status line is refreshed on every open so it
+        # never shows a stale count or a stale failure.
+        self._refresh_memory_status()
         if self._popover is not None:
             self._popover.popup()
 
@@ -1655,6 +1750,95 @@ class CompanionWindow:
         ctx_note.set_wrap(True)
         box.append(ctx_note)
 
+        # ---- v0.15 persistent memory (explicit requests only) ------------ #
+        # Separate from the in-memory context above: THIS one is on disk
+        # (state_dir/memory.db), survives restarts, and only ever holds
+        # things the user explicitly asked to remember.
+        heading_mem = _label("Persistent memory", "settings-heading")
+        box.append(heading_mem)
+        _switch("memory_enabled", "Remember what I ask for", default=True)
+
+        # Explicit project scope — a short label the user types.  "" means
+        # no project; retrieval only ever sees global rows plus this label,
+        # so other projects' memories stay invisible (never guessed).
+        project_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL,
+                              spacing=8)
+        project_row.add_css_class("settings-row")
+        project_row.append(_label("Project scope"))
+        project_entry = Gtk.Entry()
+        project_entry.set_max_length(60)
+        project_entry.set_text(
+            str(self._settings.get("memory_project", "") or ""))
+        project_entry.set_placeholder_text("none")
+        project_entry.set_halign(Gtk.Align.END)
+        project_entry.set_hexpand(True)
+        project_entry.set_width_chars(14)
+
+        def _project_activate(entry_widget):
+            value = (entry_widget.get_text() or "").strip()[:60]
+            entry_widget.set_text(value)
+            self._settings["memory_project"] = value
+            self._apply_settings()
+
+        project_entry.connect("activate", _project_activate)
+        project_row.append(project_entry)
+        box.append(project_row)
+
+        manage_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL,
+                             spacing=8)
+        manage_row.add_css_class("settings-row")
+        manage_row.append(_label("Stored memories"))
+        manage_btn = Gtk.Button(label="Manage memories…")
+        manage_btn.add_css_class("control-btn")
+        manage_btn.connect("clicked", self._on_manage_memory)
+        manage_row.append(manage_btn)
+        box.append(manage_row)
+
+        mem_status = _label(self._memory_status_line(), "subtitle-label")
+        mem_status.set_wrap(True)
+        self._memory_status_label = mem_status
+        box.append(mem_status)
+
+        mem_note = _label(
+            "Persistent memory keeps only what you explicitly ask me to "
+            "remember — it is never filled in automatically from our "
+            "conversation, documents or tasks, and secrets are refused. "
+            "Stored memories are quoted to the local model as data, never "
+            "as instructions, permissions or approvals.",
+            "subtitle-label",
+        )
+        mem_note.set_wrap(True)
+        box.append(mem_note)
+
+        # ---- v0.16 scheduled jobs (same section pattern as memory) ------- #
+        heading_jobs = _label("Scheduled jobs", "settings-heading")
+        box.append(heading_jobs)
+
+        jobs_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL,
+                           spacing=6)
+        manage_jobs_btn = Gtk.Button(label="Manage scheduled jobs…")
+        manage_jobs_btn.add_css_class("control-btn")
+        manage_jobs_btn.connect("clicked", self._on_manage_jobs)
+        jobs_row.append(manage_jobs_btn)
+        box.append(jobs_row)
+
+        self._jobs_status_label = _label(self._jobs_status_line(),
+                                         "subtitle-label")
+        self._jobs_status_label.set_wrap(True)
+        box.append(self._jobs_status_label)
+
+        jobs_note = _label(
+            "Scheduled jobs run only while Alwin is open on this "
+            "machine — there is no operating-system scheduler "
+            "integration. Missed occurrences are coalesced (never "
+            "replayed automatically), each occurrence can fire only "
+            "once, and scheduled tasks always go through the normal "
+            "preview, permission and approval rules.",
+            "subtitle-label",
+        )
+        jobs_note.set_wrap(True)
+        box.append(jobs_note)
+
         # Honest status lines: speech model, voice engine, privacy.
         try:
             model_detail = str(self.recognizer.status().get("detail", ""))
@@ -1708,6 +1892,635 @@ class CompanionWindow:
             f"Conversation cleared ({dropped} earlier turns dropped).",
             presentation.TONE_CALM,
         )
+
+    # ------------------------------------------------------------------ #
+    # v0.15 persistent memory: honest status + management controls
+    # ------------------------------------------------------------------ #
+
+    def _memory_status_line(self) -> str:
+        """Bounded, content-free status of the persistent store.
+
+        Never includes memory content — only counts, the file name and
+        the kind-level last error (diagnostics without exposure).
+        """
+        if self.memory is None:
+            return ("Persistent memory storage is unavailable — nothing "
+                    "can be saved right now.")
+        if not bool(self._settings.get("memory_enabled", True)):
+            return ("Persistent memory is off — nothing is saved and no "
+                    "memories are used.")
+        try:
+            info = self.memory.status()
+            detail = str(info.get("detail", "") or "").strip()
+            if info.get("error"):
+                return f"Persistent memory problem: {detail}"
+            return detail or "Persistent memory is on (this device only)."
+        except Exception:  # noqa: BLE001 - status must never crash
+            return "Persistent memory status is unavailable."
+
+    def _refresh_memory_status(self) -> None:
+        label = self._memory_status_label
+        if label is None:
+            return
+        try:
+            label.set_text(self._memory_status_line())
+        except Exception:  # noqa: BLE001 - cosmetic only
+            pass
+
+    # ------------------------------------------------------------------ #
+    # v0.16 scheduler: tick on the GLib loop, honest events, dialog
+    # ------------------------------------------------------------------ #
+
+    def _start_scheduler_tick(self) -> None:
+        """Drive the scheduler from the main loop (no threads)."""
+        if self.scheduler is None or self._schedule_tick_id is not None:
+            return
+        self._schedule_tick_id = GLib.timeout_add_seconds(
+            DEFAULT_TICK_SECONDS, self._scheduler_tick)
+
+    def _scheduler_tick(self) -> bool:
+        if self._closing or self.scheduler is None:
+            self._schedule_tick_id = None
+            return GLib.SOURCE_REMOVE
+        try:
+            report = self.scheduler.tick()
+        except Exception:  # noqa: BLE001 - the loop must survive; the
+            pass               # honest error stays on scheduler.last_error
+        else:
+            if getattr(report, "errors", None):
+                self._refresh_jobs_status()
+        return GLib.SOURCE_CONTINUE
+
+    def _on_schedule_event(self, event) -> None:
+        """Notifier sink — bubble notifications, marshalled to the loop.
+
+        Event text is untrusted display content (user-authored reminder
+        text): bounded, single-line, never markup, never a prompt.
+        """
+        kind = str((event or {}).get("kind") or "")
+        title = " ".join(str((event or {}).get("title") or "").split())
+        body = " ".join(str((event or {}).get("text") or "").split())
+        tone = {
+            "reminder": presentation.TONE_ATTENTION,
+            "missed": presentation.TONE_ATTENTION,
+            "attention": presentation.TONE_ATTENTION,
+            "approval_needed": presentation.TONE_ATTENTION,
+            "check": presentation.TONE_CALM,
+        }.get(kind, presentation.TONE_CALM)
+        if kind == "outcome":
+            tone = (presentation.TONE_POSITIVE if "completed" in body
+                    else presentation.TONE_ATTENTION)
+        text = f"{title}: {body}" if title else body
+        text = text[:240]
+        GLib.idle_add(self._show_bubble, text, tone)
+        GLib.idle_add(self._refresh_jobs_status)
+
+    def _refresh_jobs_status(self) -> None:
+        label = self._jobs_status_label
+        if label is None:
+            return
+        try:
+            label.set_text(self._jobs_status_line()[:300])
+        except Exception:  # noqa: BLE001 - cosmetic only
+            pass
+
+    def _jobs_status_line(self) -> str:
+        if self.scheduler is None:
+            return ("Scheduled jobs are unavailable (scheduler storage "
+                    "could not be opened).")
+        line = self.scheduler.status_line()
+        error = self.scheduler.last_error
+        if error:
+            line += f" · {error}"
+        return line
+
+    def _parse_schedule_text(self, text: str):
+        """Deterministic scheduling parser bound to clock + timezone."""
+        now = (self.scheduler.now() if self.scheduler is not None
+               else int(time.time()))
+        return schedule_parser.parse(text, now=now,
+                                     tzid=self._schedule_tzid)
+
+    def _preferred_timezone(self):
+        """Phase 8: read-only timezone preference from explicit memory.
+
+        Only consulted when memory is on; a match is a validated IANA
+        identifier inside a stored memory — never inferred, never
+        written back, and the source is surfaced in the UI.
+        """
+        fallback = ("", "machine local time")
+        if self.memory is None or not bool(
+                self._settings.get("memory_enabled", True)):
+            return fallback
+        try:
+            result = self.memory.retrieve("timezone", limit=3,
+                                          touch=False)
+        except Exception:  # noqa: BLE001 - preference lookup never fails
+            return fallback
+        for record in getattr(result, "records", ()):
+            match = re.search(
+                r"\b([A-Z][A-Za-z0-9_+-]+/[A-Za-z0-9_+.-]+)\b",
+                str(getattr(record, "content", "")))
+            if match is None:
+                continue
+            try:
+                schedule_model.validate_tzid(match.group(1))
+            except schedule_model.ScheduleError:
+                continue
+            return (match.group(1), "from your saved memory preference")
+        return fallback
+
+    def _on_manage_jobs(self, *_args) -> None:  # pragma: no cover - GTK
+        """Scheduled-jobs manager (list / create / inspect / control).
+
+        Creation goes through the typed parser: an interpretation is
+        shown BEFORE anything is stored, and Save is an explicit,
+        separate click — the same "interpret first" contract as the
+        conversation flow.
+        """
+        if self.scheduler is None:
+            self._show_bubble(
+                "I can't manage scheduled jobs — scheduler storage is "
+                "unavailable.", presentation.TONE_ATTENTION)
+            return
+
+        dialog = Gtk.Window(title="Scheduled jobs",
+                            transient_for=self.window, modal=True)
+        dialog.set_default_size(640, 520)
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        outer.set_margin_top(10)
+        outer.set_margin_bottom(10)
+        outer.set_margin_start(12)
+        outer.set_margin_end(12)
+        dialog.set_child(outer)
+
+        intro = _label(
+            "Jobs run only while Alwin is open. Missed occurrences are "
+            "coalesced, never replayed; scheduled tasks always use the "
+            "normal permission and approval pipeline. "
+            f"Timezone: {self._schedule_tzid or 'machine local'} "
+            f"({self._schedule_tz_source}).", "subtitle-label")
+        intro.set_wrap(True)
+        outer.append(intro)
+
+        status_label = _label(self._jobs_status_line(), "subtitle-label")
+        status_label.set_wrap(True)
+        outer.append(status_label)
+
+        def _set_status(text: str) -> None:
+            try:
+                status_label.set_text(str(text)[:300])
+            except Exception:  # noqa: BLE001 - cosmetic only
+                pass
+
+        # ---- create row: parse -> interpretation -> explicit save -------- #
+        add_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        add_entry = Gtk.Entry()
+        add_entry.set_max_length(300)
+        add_entry.set_placeholder_text(
+            "e.g. Remind me tomorrow at 10 AM to review the report…")
+        add_entry.set_hexpand(True)
+        add_row.append(add_entry)
+        interpret_btn = Gtk.Button(label="Interpret")
+        add_row.append(interpret_btn)
+        save_btn = Gtk.Button(label="Save")
+        save_btn.set_sensitive(False)
+        add_row.append(save_btn)
+        outer.append(add_row)
+
+        interp_label = _label("", "subtitle-label")
+        interp_label.set_wrap(True)
+        outer.append(interp_label)
+
+        pending = {"intent": None}
+
+        def _interpret(*_a) -> None:
+            intent = self._parse_schedule_text(add_entry.get_text())
+            if not getattr(intent, "creates", False):
+                pending["intent"] = None
+                save_btn.set_sensitive(False)
+                interp_label.set_text(
+                    str(getattr(intent, "reason", "") or
+                        "I couldn't read a schedule from that.")[:300])
+                return
+            pending["intent"] = intent
+            save_btn.set_sensitive(True)
+            interp_label.set_text(
+                (str(getattr(intent, "interpretation", "") or
+                     "Understood.") + f" (Timezone: "
+                 f"{self._schedule_tzid or 'machine local'} — "
+                 f"{self._schedule_tz_source}.)")[:400])
+
+        def _save(*_a) -> None:
+            intent = pending["intent"]
+            if intent is None:
+                return
+            try:
+                job = self.scheduler.create_from_intent(
+                    intent,
+                    project=str(self._settings.get("memory_project", "")
+                                or ""))
+            except Exception as exc:  # noqa: BLE001 - honest failure
+                _set_status(f"Nothing was saved: {exc}")
+                return
+            pending["intent"] = None
+            save_btn.set_sensitive(False)
+            interp_label.set_text(
+                f"Saved: {self.scheduler.describe(job)}")
+            _refresh()
+
+        interpret_btn.connect("clicked", _interpret)
+        add_entry.connect("activate", _interpret)
+        save_btn.connect("clicked", _save)
+
+        # ---- list + controls ---------------------------------------------- #
+        listbox = Gtk.ListBox()
+        listbox.set_selection_mode(Gtk.SelectionMode.SINGLE)
+        scroll = Gtk.ScrolledWindow()
+        scroll.set_child(listbox)
+        scroll.set_vexpand(True)
+        scroll.set_min_content_height(180)
+        outer.append(scroll)
+
+        detail = _label("Select a job to inspect it.", "subtitle-label")
+        detail.set_wrap(True)
+        outer.append(detail)
+
+        selected = {"job_id": ""}
+
+        def _refresh(*_a) -> None:
+            while (child := listbox.get_row_at_index(0)) is not None:
+                listbox.remove(child)
+            try:
+                jobs = self.scheduler.store.list_jobs()
+            except JobStoreError as exc:
+                _set_status(str(exc))
+                return
+            for job in jobs[-30:]:
+                row = Gtk.ListBoxRow()
+                row.set_job_id = job.job_id  # attribute store (GTK-safe)
+                label = _label(
+                    f"{job.title} — "
+                    f"{self.scheduler.describe_schedule(job.schedule)} "
+                    f"[{job.state}]", "subtitle-label")
+                label.set_xalign(0.0)
+                row.set_child(label)
+                listbox.append(row)
+            _set_status(self._jobs_status_line())
+
+        def _on_selected(*_a) -> None:
+            row = listbox.get_selected_row()
+            if row is None:
+                return
+            selected["job_id"] = str(getattr(row, "set_job_id", ""))
+            job = self.scheduler.store.get(selected["job_id"])
+            if job is None:
+                return
+            history = self.scheduler.store.history(job.job_id, limit=5)
+            lines = [self.scheduler.describe(job)]
+            for entry in history:
+                stamp = time.strftime(
+                    "%Y-%m-%d %H:%M", time.localtime(
+                        int(entry.get("occurrence", 0))))
+                lines.append(f"  {stamp} · {entry.get('status', '')} · "
+                             f"{str(entry.get('outcome', ''))[:80]}")
+            detail.set_text("\n".join(lines)[:900])
+
+        listbox.connect("row-selected", _on_selected)
+
+        def _control(action) -> None:
+            job_id = selected["job_id"]
+            if not job_id:
+                _set_status("Select a job first.")
+                return
+            try:
+                if action == "pause":
+                    self.scheduler.pause(job_id)
+                    text = "Paused."
+                elif action == "resume":
+                    self.scheduler.resume(job_id)
+                    text = "Resumed."
+                elif action == "cancel":
+                    self.scheduler.cancel_job(job_id)
+                    text = "Cancelled — it will never run again."
+                elif action == "run":
+                    outcome = self.scheduler.run_now(job_id)
+                    text = f"Run started: {outcome.get('outcome', '')}."
+                elif action == "dismiss":
+                    job = self.scheduler.store.get(job_id)
+                    history = self.scheduler.store.history(job_id, limit=1)
+                    if job is not None and history:
+                        self.scheduler.store.dismiss(
+                            job_id, int(history[0]["occurrence"]))
+                    text = "Dismissed the latest occurrence."
+                else:
+                    text = "Unknown action."
+            except Exception as exc:  # noqa: BLE001 - honest failure
+                text = str(exc)
+            _set_status(text)
+            _refresh()
+
+        controls = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL,
+                           spacing=6)
+        for label_text, action in (("Pause", "pause"), ("Resume", "resume"),
+                                   ("Run now", "run"),
+                                   ("Dismiss last", "dismiss"),
+                                   ("Cancel job", "cancel")):
+            btn = Gtk.Button(label=label_text)
+            btn.connect("clicked", _control, action)
+            controls.append(btn)
+        outer.append(controls)
+
+        close_btn = Gtk.Button(label="Close")
+        close_btn.connect("clicked", lambda *_: dialog.close())
+        outer.append(close_btn)
+
+        _refresh()
+        dialog.present()
+
+    def _on_manage_memory(self, *_args) -> None:  # pragma: no cover
+        """Memory manager window (list / inspect / create / correct /
+        delete / clear-all).
+
+        Deletion removes the row itself; clearing takes a deliberate
+        two-step confirmation and touches ONLY the memory table; every
+        failure is shown as it happened (never a fake success), and a
+        declined memory never echoes the refused content back.
+        """
+        if self.memory is None:
+            self._show_bubble(
+                "I can't manage memories — persistent storage is "
+                "unavailable.", presentation.TONE_ATTENTION,
+            )
+            return
+
+        dialog = Gtk.Window(title="Persistent memory",
+                            transient_for=self.window, modal=True)
+        dialog.set_default_size(560, 470)
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        outer.set_margin_top(10)
+        outer.set_margin_bottom(10)
+        outer.set_margin_start(12)
+        outer.set_margin_end(12)
+        dialog.set_child(outer)
+
+        intro = _label(
+            "Only memories you explicitly asked me to keep are stored "
+            "here (memory.db on this device). They are quoted to the "
+            "local model as data — never as instructions, permissions "
+            "or approvals.", "subtitle-label",
+        )
+        intro.set_wrap(True)
+        outer.append(intro)
+
+        status_label = _label(self._memory_status_line(), "subtitle-label")
+        status_label.set_wrap(True)
+        outer.append(status_label)
+
+        def _set_status(text: str) -> None:
+            try:
+                status_label.set_text(str(text)[:300])
+            except Exception:  # noqa: BLE001 - cosmetic only
+                pass
+
+        # ---- create row (explicit only) --------------------------------- #
+        add_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        category_drop = Gtk.DropDown.new(Gtk.StringList.new(
+            ["Preference", "Project context", "Task summary",
+             "General context"]))
+        add_row.append(category_drop)
+        add_entry = Gtk.Entry()
+        add_entry.set_max_length(MAX_CONTENT_CHARS)
+        add_entry.set_placeholder_text("New memory — type it explicitly…")
+        add_entry.set_hexpand(True)
+        add_row.append(add_entry)
+        add_btn = Gtk.Button(label="Add")
+        add_row.append(add_btn)
+        outer.append(add_row)
+
+        # ---- list + inspect --------------------------------------------- #
+        listbox = Gtk.ListBox()
+        listbox.set_selection_mode(Gtk.SelectionMode.SINGLE)
+        scroll = Gtk.ScrolledWindow()
+        scroll.set_child(listbox)
+        scroll.set_vexpand(True)
+        scroll.set_min_content_height(160)
+        outer.append(scroll)
+
+        inspect = _label("Select a memory to inspect it.", "subtitle-label")
+        inspect.set_wrap(True)
+        outer.append(inspect)
+
+        # ---- correct row (visible only with a selection) ---------------- #
+        edit_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL,
+                           spacing=6)
+        edit_entry = Gtk.Entry()
+        edit_entry.set_max_length(MAX_CONTENT_CHARS)
+        edit_entry.set_placeholder_text("Selected memory's text")
+        edit_entry.set_hexpand(True)
+        edit_row.append(edit_entry)
+        correct_btn = Gtk.Button(label="Save correction")
+        edit_row.append(correct_btn)
+        delete_btn = Gtk.Button(label="Delete")
+        edit_row.append(delete_btn)
+        edit_row.set_visible(False)
+        outer.append(edit_row)
+
+        state = {"selected": None, "clear_arm": False}
+        records = []
+
+        def _disarm_clear() -> None:
+            state["clear_arm"] = False
+
+        # ---- bottom row -------------------------------------------------- #
+        bottom = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        clear_btn = Gtk.Button(label="Clear all…")
+        bottom.append(clear_btn)
+        close_btn = Gtk.Button(label="Close")
+        close_btn.set_halign(Gtk.Align.END)
+        close_btn.set_hexpand(True)
+        bottom.append(close_btn)
+        outer.append(bottom)
+
+        def _fmt(timestamp) -> str:
+            if timestamp is None:
+                return "—"
+            try:
+                return time.strftime("%Y-%m-%d %H:%M",
+                                     time.localtime(int(timestamp)))
+            except (ValueError, OSError, OverflowError):
+                return "—"
+
+        def _refresh_list(*_args) -> None:
+            child = listbox.get_first_child()
+            while child is not None:
+                nxt = child.get_next_sibling()
+                listbox.remove(child)
+                child = nxt
+            records.clear()
+            state["selected"] = None
+            edit_row.set_visible(False)
+            inspect.set_text("Select a memory to inspect it.")
+            try:
+                records.extend(self.memory.list())
+            except MemoryStoreError as exc:
+                _set_status(f"Could not list memories — {exc}")
+                return
+            if not records:
+                return
+            for record in records:
+                row = Gtk.ListBoxRow()
+                scope = record.project or "global"
+                preview = record.content[:80] + (
+                    "…" if len(record.content) > 80 else "")
+                row.set_child(_label(
+                    f"{record.category} · {scope} · "
+                    f"{_fmt(record.updated_at)} — {preview}"))
+                listbox.append(row)
+            self._refresh_memory_status()
+
+        def _on_select(_lb, row) -> None:
+            _disarm_clear()
+            if row is None:
+                state["selected"] = None
+                edit_row.set_visible(False)
+                inspect.set_text("Select a memory to inspect it.")
+                return
+            index = row.get_index()
+            if not 0 <= index < len(records):
+                return
+            record = records[index]
+            state["selected"] = record
+            meta = (f"{record.category} · scope "
+                    f"{record.project or 'global'} · confidence "
+                    f"{record.confidence:.2f} · revision "
+                    f"{record.revision} · created "
+                    f"{_fmt(record.created_at)} · updated "
+                    f"{_fmt(record.updated_at)} · last used "
+                    f"{_fmt(record.last_used_at)}")
+            if record.expires_at is not None:
+                meta += f" · expires {_fmt(record.expires_at)}"
+            if record.review_at is not None:
+                meta += f" · review by {_fmt(record.review_at)}"
+            inspect.set_text(f"{meta}\n{record.content}")
+            edit_entry.set_text(record.content)
+            edit_row.set_visible(True)
+
+        def _add(*_args) -> None:
+            _disarm_clear()
+            text = add_entry.get_text() or ""
+            index = min(int(category_drop.get_selected()),
+                        len(CATEGORIES) - 1)
+            scope = str(self._settings.get("memory_project", "") or "")
+            try:
+                record = self.memory.create(
+                    text, category=CATEGORIES[index],
+                    provenance="ui_create", project=scope,
+                )
+            except MemoryRejected as exc:
+                _set_status(str(exc))          # fixed reason, no content
+                return
+            except MemoryStoreError as exc:
+                _set_status(f"Could not save — {exc}. Nothing was "
+                            f"stored.")
+                return
+            except Exception:  # noqa: BLE001 - honest, never fake
+                _set_status("Could not save (unexpected storage error) "
+                            "— nothing was stored.")
+                return
+            add_entry.set_text("")
+            scope_note = f" for {record.project}" if record.project else ""
+            _set_status(f"Saved{scope_note}: {record.content[:160]}")
+            _refresh_list()
+
+        def _correct(*_args) -> None:
+            _disarm_clear()
+            record = state["selected"]
+            if record is None:
+                _set_status("Select a memory to correct first.")
+                return
+            try:
+                updated = self.memory.correct(record.id,
+                                               edit_entry.get_text())
+            except MemoryRejected as exc:
+                _set_status(str(exc))
+                return
+            except MemoryStoreError as exc:
+                _set_status(f"Could not correct — {exc}. The stored "
+                            f"memory is unchanged.")
+                return
+            except Exception:  # noqa: BLE001 - honest, never fake
+                _set_status("Could not correct (unexpected storage "
+                            "error) — the stored memory is unchanged.")
+                return
+            _set_status(f"Corrected in place (revision {updated.revision}).")
+            _refresh_list()
+
+        def _delete(*_args) -> None:
+            _disarm_clear()
+            record = state["selected"]
+            if record is None:
+                _set_status("Select a memory to delete first.")
+                return
+            try:
+                removed = self.memory.delete(record.id)
+            except MemoryStoreError as exc:
+                _set_status(f"Could not delete — {exc}")
+                return
+            except Exception:  # noqa: BLE001 - honest, never fake
+                _set_status("Could not delete (unexpected storage error).")
+                return
+            _set_status("Deleted — the record is gone from the store."
+                        if removed else
+                        "That memory was already gone.")
+            _refresh_list()
+
+        def _clear_all(*_args) -> None:
+            if not state["clear_arm"]:
+                try:
+                    total = self.memory.count()
+                except MemoryStoreError as exc:
+                    _set_status(f"Could not read the store — {exc}")
+                    return
+                if total == 0:
+                    _set_status("There are no stored memories to clear.")
+                    return
+                state["clear_arm"] = True
+                clear_btn.set_label(f"Confirm: erase all {total}")
+                _set_status(
+                    f"{total} memor{'y' if total == 1 else 'ies'} would "
+                    "be erased. Press the button again to confirm — only "
+                    "the memory store is touched (conversation context, "
+                    "task history and audit logs are not).",
+                )
+                return
+            state["clear_arm"] = False
+            clear_btn.set_label("Clear all…")
+            try:
+                removed = self.memory.clear()
+            except MemoryStoreError as exc:
+                _set_status(f"Could not clear — {exc}")
+                return
+            except Exception:  # noqa: BLE001 - honest, never fake
+                _set_status("Could not clear (unexpected storage error).")
+                return
+            _set_status(f"Cleared {removed} memories — nothing else on "
+                        f"disk was touched.")
+            _refresh_list()
+
+        def _close(*_args) -> None:
+            dialog.close()
+
+        add_btn.connect("clicked", _add)
+        add_entry.connect("activate", _add)
+        correct_btn.connect("clicked", _correct)
+        delete_btn.connect("clicked", _delete)
+        clear_btn.connect("clicked", _clear_all)
+        close_btn.connect("clicked", _close)
+        listbox.connect("row-selected", _on_select)
+
+        _refresh_list()
+        dialog.present()
 
     def _set_voice_choice(self, chosen_label: str, labels) -> None:
         """Dropdown handler: '' (first entry) means automatic."""
@@ -1825,6 +2638,21 @@ class CompanionWindow:
         if self._greet_id is not None:
             GLib.source_remove(self._greet_id)
             self._greet_id = None
+        # v0.16: stop the scheduler tick first (no store writes can
+        # race teardown), then release the scheduler and its store.
+        if self._schedule_tick_id is not None:
+            GLib.source_remove(self._schedule_tick_id)
+            self._schedule_tick_id = None
+        if self.scheduler is not None:
+            try:
+                self.scheduler.close()
+            except Exception:  # noqa: BLE001 - teardown never raises
+                pass
+            try:
+                self.scheduler.store.close()
+            except Exception:  # noqa: BLE001 - teardown never raises
+                pass
+            self.scheduler = None
         if self.manager is not None:
             try:
                 self.manager.remove_observer(self._on_record_from_worker)
@@ -1838,6 +2666,13 @@ class CompanionWindow:
             self.renderer.detach()
         except Exception:  # noqa: BLE001
             pass
+        # v0.15: release the persistent memory handle (every write is
+        # already committed per statement; this only closes the file).
+        if self.memory is not None:
+            try:
+                self.memory.close()
+            except Exception:  # noqa: BLE001 - teardown never raises
+                pass
 
 
 def run_companion(manager=None, *, config=None, status=None,

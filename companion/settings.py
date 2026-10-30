@@ -68,6 +68,16 @@ SCHEMA: Dict[str, tuple] = {
     # on by default, bounded by a recent-exchange budget.
     "context_enabled": (bool, True),
     "context_turns": (str, "8"),       # exchanges, clamped 2..20
+
+    # ---- v0.15 persistent memory (explicit requests only) -------------- #
+    # Disabling stops BOTH writes and retrieval (tested) — it is not a
+    # permission, just the user's privacy switch for the local store.
+    "memory_enabled": (bool, True),
+    # Explicit, user-chosen project scope ("" = no project selected).
+    # Retrieval never guesses an association; other projects' rows stay
+    # invisible.  A tampered file can at worst change this cosmetic
+    # scope — never a permission (see SECURITY.md).
+    "memory_project": (str, ""),
 }
 
 

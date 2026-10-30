@@ -483,6 +483,191 @@ def _run_smoke() -> int:
     expect(not scene.command("move_to", position="moon", now=7.0),
            "scene: bad position refused")
 
+    # --- v0.15 persistent memory: local, explicit, honest ------------------ #
+    from companion.memory import (
+        MemoryRejected, MemoryStore, MemoryStoreError,
+        parse_remember_request,
+    )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        mem_root = Path(tmp)
+        mem_store = MemoryStore.open_for(mem_root)
+        mem_mode = oct((mem_root / "memory.db").stat().st_mode & 0o777)
+        expect(mem_mode == "0o600", f"memory db is owner-only ({mem_mode})")
+        mem_request = parse_remember_request(
+            "remember that I prefer dark mode")
+        expect(mem_request is not None and mem_request.kind == "fact",
+               "explicit remember-request recognized deterministically")
+        mem_record = mem_store.create(mem_request.body,
+                                      category="preference",
+                                      provenance="explicit_request")
+        expect(mem_store.count() == 1, "explicit memory persisted locally")
+        mem_rejected = False
+        try:
+            mem_store.create("password = hunter2secret")
+        except MemoryRejected:
+            mem_rejected = True
+        expect(mem_rejected and mem_store.count() == 1,
+               "credential-shaped memory declined without storing it")
+        mem_hits = mem_store.retrieve("dark mode", project="")
+        expect(any(m.id == mem_record.id for m in mem_hits.records),
+               "stored memory retrievable (bounded, scope-filtered)")
+        mem_store.close()
+        mem_reopen = MemoryStore.open_for(mem_root)   # simulated restart
+        expect(mem_reopen.count() == 1,
+               "memory survives a restart (same local file)")
+        mem_fixed = mem_reopen.correct(mem_record.id,
+                                       "I prefer light mode")
+        expect(mem_fixed.revision == 2
+               and mem_fixed.content == "I prefer light mode",
+               "correction updates the record in place (revision bump)")
+        mem_other = mem_reopen.retrieve("light", project="other-project")
+        expect(all(m.project in ("", "other-project")
+                   for m in mem_other.records),
+               "project scope keeps other projects' memories out")
+        mem_reopen.set_enabled(False)
+        mem_blocked = False
+        try:
+            mem_reopen.create("should never land")
+        except MemoryStoreError:
+            mem_blocked = True
+        expect(mem_blocked, "disabled memory refuses writes honestly")
+        expect(mem_reopen.retrieve("light").disabled,
+               "disabled memory performs no retrieval")
+        mem_reopen.set_enabled(True)
+        expect(mem_reopen.delete(mem_record.id)
+               and mem_reopen.get(mem_record.id) is None,
+               "delete removes the row itself")
+        expect(mem_reopen.clear() >= 0 and mem_reopen.count() == 0,
+               "clear-all empties only the memory table")
+        mem_reopen.close()
+
+    # --- v0.16 scheduler (SANDBOX: real SQLite in a temp dir, fake clock,
+    #     mock manager — no engine, no network, no waiting) ----------------- #
+    if True:
+        import shutil
+        import time as _time
+        from ai_core import jobstore as _js
+        from ai_core import schedule as _sched
+        from ai_core import schedule_parse as _sp
+        from ai_core.scheduler import Scheduler as _Scheduler
+
+        class _Clock:
+            def __init__(self, value):
+                self.value = value
+
+            def __call__(self):
+                return self.value
+
+        class _MockManager:
+            """Duck-typed TaskManager double (MOCKED — records calls)."""
+
+            def __init__(self):
+                self.observers = []
+                self.submitted = []
+                self.cancelled = 0
+
+            def add_observer(self, callback):
+                self.observers.append(callback)
+
+            @property
+            def busy(self):
+                return False
+
+            def submit(self, command):
+                self.submitted.append(command)
+                record = type("R", (), {
+                    "task_id": f"task_{len(self.submitted)}",
+                    "state": "planning", "approval": ""})()
+                return record
+
+            def cancel(self):
+                self.cancelled += 1
+                return True
+
+        sched_root = Path(tempfile.mkdtemp(prefix="alwin-sched-smoke-"))
+        try:
+            _now = int(_time.time())
+            _clock = _Clock(_now)
+            _events = []
+            _store = _js.JobStore.open_for(sched_root)
+            _manager = _MockManager()
+            _scheduler = _Scheduler(_store, manager=_manager,
+                                    notifier=_events.append, clock=_clock)
+            _daily = _sched.make_schedule("daily", hour=9, minute=30,
+                                          tzid="Europe/Berlin")
+            _job = _scheduler.create(_sched.make_job(
+                "Smoke reminder", "Check the smoke report.",
+                job_type="reminder", schedule=_daily, now=_now))
+            expect(_job.next_occurrence is not None
+                   and _job.next_occurrence > _now,
+                   "daily reminder gets its next occurrence")
+            expect(_store.claim(_job.job_id, _job.next_occurrence)
+                   is True
+                   and _store.claim(_job.job_id, _job.next_occurrence)
+                   is False,
+                   "an occurrence can be claimed exactly once")
+            _clock.value = _job.next_occurrence + 10
+            _report = _scheduler.tick()
+            expect(_report.reminders == 1
+                   and [e["kind"] for e in _events] == ["reminder"],
+                   "due reminder fires exactly one notification")
+            _scheduler.tick()
+            expect(_report.reminders == 1,
+                   "re-ticking the fired occurrence does not re-notify")
+            _clock.value += 3 * 24 * 3600     # app "closed" for 3 days
+            _report = _scheduler.tick()
+            expect(_report.missed == 1
+                   and "missed" in _events[-1]["kind"],
+                   "missed occurrences coalesce (never a backlog)")
+            _task_job = _scheduler.create(_sched.make_job(
+                "Smoke task", "Write the smoke summary.",
+                job_type="task",
+                schedule=_sched.make_schedule("once",
+                                              at_utc=_clock.value + 60,
+                                              now=_clock.value,
+                                              tzid=""),
+                now=_clock.value))
+            _clock.value = _task_job.next_occurrence + 1
+            _scheduler.tick()
+            expect(_manager.submitted == ["Write the smoke summary."]
+                   and list(_scheduler.inflight) == [_task_job.job_id],
+                   "scheduled task dispatches through the manager")
+            _scheduler.pause(_job.job_id)
+            expect(_store.get(_job.job_id).state == "paused"
+                   and _store.get(_job.job_id).next_occurrence is None,
+                   "pause clears the pending occurrence")
+            _scheduler.resume(_job.job_id)
+            expect(_store.get(_job.job_id).next_occurrence is not None,
+                   "resume recomputes the next occurrence")
+            _scheduler.cancel_job(_task_job.job_id)
+            expect(_store.get(_task_job.job_id).state == "cancelled",
+                   "cancel is persisted")
+            _intent = _sp.parse("Remind me tomorrow at 10 AM to test "
+                                "the parser", now=_clock.value, tzid="")
+            expect(_intent.intent == "create_reminder"
+                   and not _intent.needs_confirmation,
+                   "unambiguous reminder parses deterministically")
+            _q = _sp.parse("What reminders do I have?",
+                           now=_clock.value, tzid="")
+            expect(_q.intent == "question" and not _q.creates,
+                   "scheduling questions never create jobs")
+            _vague = _sp.parse("check this regularly",
+                               now=_clock.value, tzid="")
+            expect(not _vague.creates,
+                   "vague frequency phrases never become a job")
+            _scheduler.close()
+            _store.close()
+            _reopen = _js.JobStore.open_for(sched_root)  # restart
+            expect(_reopen.get(_job.job_id) is not None,
+                   "jobs survive a scheduler restart")
+            expect((_reopen.get(_job.job_id).title
+                    == "Smoke reminder"),
+                   "reopened job carries its data")
+            _reopen.close()
+        finally:
+            shutil.rmtree(sched_root, ignore_errors=True)
+
     # --- presentation honesty ------------------------------------------------ #
     expect(len(presentation.bubble_view("idle", "y" * 999)["text"])
            <= presentation.MAX_BUBBLE_CHARS, "bubble text is bounded")
