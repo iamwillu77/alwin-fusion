@@ -1,6 +1,6 @@
 # Alwin Fusion — Architecture
 
-Version: 0.18.0 — Milestone: Verified Document Workflows
+Version: 0.19.0 — Milestone: Reliable Application Integrations
 
 Alwin Fusion is an open-source, offline-first AI-native operating
 system in the making. This document describes what exists today, how
@@ -44,7 +44,14 @@ ai_core/                 Trusted application core (pure Python, stdlib only)
                          actions, openpyxl/reportlab, app registry,
                          AT-SPI bindings, attached LLM, honest MCP
                          status = descriptors only, 0 executable) with
-                         a TTL cache + invalidate()
+                         a TTL cache + invalidate(); v0.19:
+                         application_tiers no longer claims
+                         interact/window_state without install+evidence,
+                         and application_readiness() returns structured
+                         facets (installed/running/a11y each
+                         available|unavailable|blocked|unknown; probe
+                         exceptions => unknown, running-but-bus-absent
+                         => blocked) with injectable bounded probes
     task_planning.py     v0.12 planning service: one bounded json_mode
                          generation proposes plan|clarify|decline via
                          the EXISTING Ollama client; validated + capability
@@ -180,7 +187,11 @@ integrations/            Pluggable action handlers (the extension point)
         tools.py         the automation handlers re-checking permissions
                          (v0.17 adds the bounded read-only list_controls)
         sequence.py      TaskSequenceRunner (stop-on-failure, per-step
-                         records; optional step_observer for live progress)
+                         records; optional step_observer for live progress;
+                         v0.19: failed plans carry an explicit `partial`
+                         block — completed/total/failed_step/changed/
+                         category/next_action — and state in words when
+                         earlier steps DID change state)
         mcp.py           future-MCP tool descriptors only (no server/
                          transport, therefore NO MCP-executable tool
                          exists — including any Blender integration;
@@ -1481,6 +1492,38 @@ primitive in the system, and it reuses every existing layer:
   was evaluated and declined: it requires an unauthenticated local
   control endpoint, which the milestone forbids).
 
+**Reliability layer (v0.19).** No new actions or engines — three
+evidence-backed honesty/recovery fixes across the existing stack:
+
+- *Capability honesty.* `application_tiers()` no longer derives
+  `interact`/`window_state` from bindings + registry flags alone (the
+  pre-v0.19 code skipped the install check entirely), and
+  `DesktopController.status()` no longer appends `interact` merely
+  because the bus is reachable. One facet computation now drives both
+  the legacy `a11y` field and a structured `readiness` block
+  (`installed` / `running` / `a11y`, each **available / unavailable /
+  blocked / unknown**): a probe that raises is `unknown` (transient —
+  never permanent unavailability), and a *running* app whose reviewed
+  bus identity never appears is `blocked` — the measured LibreOffice
+  situation on the reference host. `ai_core` performs no I/O itself:
+  the probes (`which`, `/proc`, bus listing) are injectable callables.
+- *Structured adapter failures.* A closed failure taxonomy
+  (`FAILURE_CATEGORIES`: unsupported / app_missing / bus_error /
+  window_gone / stale_target / ambiguous / refused / unknown) plus a
+  whitelisting `failure_data()` helper is used by every adapter and
+  the unavailable stand-in — failures carry a branchable `category`
+  with only whitelisted, bounded keys; application text never enters
+  diagnostics, and diagnostics never influence a permission decision.
+  A dead bus is `bus_error`; the application simply not being there is
+  `app_missing`.
+- *Partial-workflow honesty.* A failed `task_sequence` now returns an
+  explicit `partial` block (completed/total/failed_step/changed/
+  category/next_action, fixed strings only) and its error states
+  whether earlier steps DID change state — completed results stand,
+  remaining steps are SKIPPED with a reason, uncertain mutations are
+  never retried, and no rollback is ever attempted (there is no
+  compensation engine and none is implied).
+
 **Digest-confirmed save.** The tools layer records the target file's
 sha256 before activating the Save control and re-reads the file after
 a bounded wait (injectable clock/sleep, default 2 s). If the digest
@@ -1793,7 +1836,17 @@ tampered approvals rejected, injection-in-content inert, audit content
 redaction, mismatched-landing simulated as FAILED, single-attempt
 no-retry pin, partial-sequence semantics, same-file double mutation
 conservatively FAILED, closed-schema pins) — for **1423 passed, 2
-skipped (2895 subtests)**. The v0.9 additions were: the six voice-stack suites
+skipped (2895 subtests)**; the v0.19 suite adds **24 more**
+(`tests/test_reliability.py`: tier honesty — uninstalled never
+yields interact, readiness facets incl. running-but-bus-absent =>
+blocked, transient probe failure => unknown, detection failure =>
+unknown install, bindings-absent => unavailable, adapter failure
+categories across all three adapters, failure_data whitelisting and
+bounding, explicit partial-completion blocks (effect preserved AND
+reported, remaining steps skipped with reason), no-auto-retry,
+gate-cancellation, denied-step isolation, closed-registry pin,
+diagnostic-redaction AST pins) — for **1447 passed, 2 skipped (2895
+subtests)**. The v0.9 additions were: the six voice-stack suites
 (registry, detection, conversation, capture, recognition, voice output),
 the window voice-cycle suite (real `GLib.idle_add` marshalling pumped
 on the default main context, all devices/models/LLM faked), the

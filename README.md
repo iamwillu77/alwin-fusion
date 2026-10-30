@@ -2,7 +2,7 @@
 
 **Open-source, offline-first AI-native operating system — in progress.**
 
-Version **0.18.0** · Milestone: **Verified Document Workflows**
+Version **0.19.0** · Milestone: **Reliable Application Integrations**
 
 Alwin Fusion lets you control your computer through natural-language
 commands. v0.9 gives **Alwin**, the persistent, lightweight desktop
@@ -1422,6 +1422,53 @@ digest-bound approvals, independent re-reads, plus re-runs of the
 desktop-control, desktop-workflow, memory and scheduler scripts) and
 the v0.18 suite in `tests/test_document_workflows.py` (28 tests,
 SANDBOX-labelled with MOCKED failure simulations).
+
+### Reliable application integrations (v0.19.0)
+
+v0.19.0 makes the existing integrations **more honest and more
+recoverable** — no new actions, no new engine. Three concrete
+overstatements/flaws found in the audit were fixed:
+
+* **Capability tiers no longer over-claim.** Previously `interact` and
+  `window_state` were derived from "bindings present + registry flag"
+  alone — with no install check, and in `application_status` even when
+  the app's accessibility interface was provably absent. Now `interact`
+  requires **observable evidence** (installed + the app's windows
+  actually on the bus), and every status report carries structured
+  readiness facets: `installed` / `running` / `a11y`, each one of
+  **available / unavailable / blocked / unknown** — a transient probe
+  failure is `unknown`, never permanent unavailability, and a *running*
+  app whose bus identity never appears is `blocked` (exactly the
+  reference host's LibreOffice).
+* **Adapter failures are consistent and structured.** Every adapter
+  failure now carries a closed failure `category`
+  (`unsupported | app_missing | bus_error | window_gone | stale_target |
+  ambiguous | refused | unknown`) alongside the bounded message —
+  recovery logic and reports branch on the kind of failure instead of
+  parsing strings, and categories are fixed strings that can never
+  carry application text or influence a permission decision.
+* **Partial workflows say exactly what happened.** A failed
+  multi-step plan now reports an explicit `partial` block
+  (`completed/total/failed_step/changed/category/next_action`) and its
+  error states in words whether earlier steps **did change state** —
+  a failed workflow never claims "no effects" when earlier steps
+  already landed, completed results stand, remaining steps are
+  SKIPPED with a reason, and nothing is ever retried automatically.
+
+Verified on the real host (`python3 scripts/verify_reliability.py`):
+**23 EXECUTED, 0 FAILED** — real discovery, honest facets (LibreOffice
+reported `unknown`/no-`interact` while not running; the blocked-facet
+path is pinned by tests against the measured reference-host
+situation), a real GNOME Text Editor interaction (29-control bounded
+listing), a real 4-step pipeline workflow with independent byte-level
+verification, honest unavailable-application handling, a real
+disappearing-window leg (close → window gone → action refused with a
+structured category), real partial-completion evidence, denial and
+cancellation leaving the filesystem byte-identical — plus green re-runs
+of **all six** existing verification scripts (desktop control,
+desktop workflows, app interaction, document workflows, memory,
+scheduler). The v0.19 suite adds `tests/test_reliability.py` (24 tests)
+— full suite **1,447 passed, 2 skipped**.
 
 ### Speech-model and language quality (measured, honest)
 

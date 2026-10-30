@@ -932,7 +932,11 @@ class Verifier:
                 data.get("application") == action.get("application")
                 and isinstance(data.get("installed"), bool)
                 and data.get("running") in (True, False, None)
-                and data.get("a11y") in ("available", "unavailable"),
+                # v0.19: the four honest facets — a transient probe
+                # failure is "unknown", a running app missing from the
+                # bus is "blocked", never a forced available/unavailable.
+                and data.get("a11y") in ("available", "unavailable",
+                                         "blocked", "unknown"),
                 f"installed={data.get('installed')} running={data.get('running')} "
                 f"a11y={data.get('a11y')}",
             )

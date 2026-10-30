@@ -66,6 +66,7 @@ from integrations.automation.base import (
     ControlInfo,
     ControlLocator,
     StaleStateError,
+    failure_data,
     safe_app_text,
 )
 
@@ -195,6 +196,11 @@ class GnomeTextEditorAdapter(AutomationAdapter):
 
     @staticmethod
     def _unavailable(capability: str, exc: Exception) -> ActionResult:
+        # v0.19: distinguish the failure kind — a dead bus/app call is
+        # 'bus_error'; the application simply not being there (the
+        # revalidation refusal) is 'app_missing'.
+        category = ("bus_error" if isinstance(exc, BackendError)
+                    else "app_missing")
         return ActionResult(
             ok=False,
             state=FAILED_UNKNOWN,
@@ -204,7 +210,8 @@ class GnomeTextEditorAdapter(AutomationAdapter):
                 f"Automation capability '{capability}' could not run: "
                 f"{exc} (state unknown)"
             ),
-            data={"unsupported": capability, "reason": str(exc)},
+            data=failure_data(capability, category,
+                              reason=str(exc)),
         )
 
     # ------------------------------------------------------------------ #
@@ -269,6 +276,7 @@ class GnomeTextEditorAdapter(AutomationAdapter):
                     "No accessible interface for this application was "
                     "found (state unknown)."
                 ),
+                data={"category": "app_missing"},
             )
         start = root
         if locator is not None:
@@ -282,7 +290,8 @@ class GnomeTextEditorAdapter(AutomationAdapter):
                     capability=CAP_LIST,
                     message="",
                     error=ambiguity_error(locator, len(matches)),
-                    data={"state": AMBIGUOUS_TARGET},
+                    data=failure_data(CAP_LIST, "ambiguous",
+                                      state=AMBIGUOUS_TARGET),
                 )
             if not matches:
                 return ActionResult(
@@ -346,6 +355,7 @@ class GnomeTextEditorAdapter(AutomationAdapter):
                     "running or may not expose accessibility "
                     "information)."
                 ),
+                data={"category": "app_missing"},
             )
         matches, ambiguous = resolve_candidates(self.session, root, locator)
         if ambiguous:
@@ -355,7 +365,9 @@ class GnomeTextEditorAdapter(AutomationAdapter):
                 capability=CAP_FIND,
                 message="",
                 error=ambiguity_error(locator, len(matches)),
-                data={"matches": len(matches), "state": AMBIGUOUS_TARGET},
+                data=failure_data(CAP_FIND, "ambiguous",
+                              matches=len(matches),
+                              state=AMBIGUOUS_TARGET),
             )
         node = matches[0] if matches else None
         if node is not None and node_is_defunct(self.session, node):
@@ -368,7 +380,8 @@ class GnomeTextEditorAdapter(AutomationAdapter):
                     "The matching control is defunct; nothing was "
                     "reported as identified."
                 ),
-                data={"state": STALE_TARGET},
+                data=failure_data(CAP_FIND, "stale_target",
+                                  state=STALE_TARGET),
             )
         if node is None:
             wanted = f"role '{safe_app_text(locator.role, 40)}'"
@@ -419,7 +432,7 @@ class GnomeTextEditorAdapter(AutomationAdapter):
                     f"Role '{safe_app_text(locator.role, 40)}' is not "
                     f"activatable in the editor (nothing was performed)."
                 ),
-                data={"unsupported": CAP_ACTIVATE},
+                data=failure_data(CAP_ACTIVATE, "unsupported"),
             )
         try:
             app, root, node = self._revalidate(locator)
@@ -430,7 +443,8 @@ class GnomeTextEditorAdapter(AutomationAdapter):
                 capability=CAP_ACTIVATE,
                 message="",
                 error=str(exc),
-                data={"state": AMBIGUOUS_TARGET},
+                data=failure_data(CAP_ACTIVATE, "ambiguous",
+                                  state=AMBIGUOUS_TARGET),
             )
         except StaleStateError as exc:
             return ActionResult(
@@ -439,7 +453,8 @@ class GnomeTextEditorAdapter(AutomationAdapter):
                 capability=CAP_ACTIVATE,
                 message="",
                 error=str(exc),
-                data={"state": STALE_TARGET},
+                data=failure_data(CAP_ACTIVATE, "stale_target",
+                                  state=STALE_TARGET),
             )
         except (BackendError, AutomationError) as exc:
             return self._unavailable(CAP_ACTIVATE, exc)
@@ -456,7 +471,7 @@ class GnomeTextEditorAdapter(AutomationAdapter):
                     "accessibility action (state unknown — nothing was "
                     "performed)."
                 ),
-                data={"unsupported": CAP_ACTIVATE},
+                data=failure_data(CAP_ACTIVATE, "unsupported"),
             )
         before = self.session.states(node)
         try:
@@ -515,7 +530,7 @@ class GnomeTextEditorAdapter(AutomationAdapter):
                 "through accessibility on this build (no text "
                 "interface) — reading is unsupported, not simulated."
             ),
-            data={"unsupported": "read_control"},
+            data=failure_data("read_control", "unsupported"),
         )
 
     def enter_text(self, locator: ControlLocator, text: str) -> ActionResult:
@@ -529,7 +544,7 @@ class GnomeTextEditorAdapter(AutomationAdapter):
                 "interface through accessibility on this build — "
                 "typing is unsupported, not simulated."
             ),
-            data={"unsupported": "enter_text"},
+            data=failure_data("enter_text", "unsupported"),
         )
 
     def save_document(self) -> ActionResult:
@@ -542,7 +557,7 @@ class GnomeTextEditorAdapter(AutomationAdapter):
                 "No reviewed save control is exposed through "
                 "accessibility for GNOME Text Editor — unsupported."
             ),
-            data={"unsupported": "save_document"},
+            data=failure_data("save_document", "unsupported"),
         )
 
 

@@ -503,7 +503,10 @@ class TestStatus(unittest.TestCase):
         sb.module.desktop_error = RuntimeError("bus gone")
         result = sb.controller.status("nautilus")
         self.assertTrue(result.ok)
-        self.assertEqual(result.data["a11y"], "unavailable")
+        # v0.19: a dead bus is a TRANSIENT probe failure — the a11y
+        # facet is "unknown" (never forced into permanent
+        # "unavailable"), while /proc still answers honestly.
+        self.assertEqual(result.data["a11y"], "unknown")
         self.assertIsNone(result.data["windows"])
         self.assertTrue(result.data["running"])  # /proc still answers
 

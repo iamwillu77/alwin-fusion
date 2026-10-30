@@ -1,6 +1,6 @@
 # Alwin Fusion — Security Model and Limitations
 
-Version: 0.18.0 — Milestone: Verified Document Workflows
+Version: 0.19.0 — Milestone: Reliable Application Integrations
 
 This document states what the prototype defends against, how, and —
 importantly — **what it does not defend against**. Passing tests does
@@ -1508,6 +1508,29 @@ New surface introduced by v0.6, stated honestly:
       control socket, which this milestone forbids — no listener
       exists, no desktop setting was changed, and the capability
       stays explicitly unavailable.
+52. **Reliability reporting cannot widen the trust boundary** (v0.19).
+    * *Capability claims are evidence-bound.* `interact`/`window_state`
+      now require install evidence plus an observable accessibility
+      interface; the structured facets (available / unavailable /
+      blocked / unknown) are computed from injectable probes whose
+      failures map to `unknown` — a transient probe failure can never
+      be reported as permanent unavailability, and installation alone
+      never claims controllability. The automation security gate
+      (registry `automate` capability + bindings) is unchanged: the
+      new facets refine *reporting*, they do not authorize anything.
+    * *Diagnostics are inert.* The closed failure `category` set and
+      the whitelisting `failure_data()` helper admit only fixed keys
+      with bounded values — application-provided text never enters a
+      diagnostic payload (AST-pinned), and no diagnostic string is
+      ever read by a permission, approval or policy decision. The
+      sequence `partial` block carries fixed strings only (no step
+      contents, commands or document text — AST-pinned).
+    * *Partial completion is reported, never hidden.* A failed plan
+      states whether earlier steps changed state; completed results
+      stand (no rollback engine exists), remaining steps are SKIPPED,
+      and nothing is retried automatically — approval digests and the
+      per-step permission re-check are untouched, so recovery can
+      never launder an unauthorized mutation.
 
 ## Reporting security issues
 

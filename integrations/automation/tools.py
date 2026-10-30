@@ -334,7 +334,7 @@ class AutomationTools:
                 message="",
                 error=f"Capability '{CAP_LIST}' is unavailable: {reason}.",
                 data={"state": FAILED_UNKNOWN, "capability": CAP_LIST,
-                      "unsupported": CAP_LIST},
+                      "unsupported": CAP_LIST, "category": "unsupported"},
             )
         locator = None
         if control:
@@ -380,7 +380,7 @@ class AutomationTools:
                 message="",
                 error=f"Capability '{capability}' is unavailable: {reason}.",
                 data={"state": FAILED_UNKNOWN, "capability": capability,
-                      "unsupported": capability},
+                      "unsupported": capability, "category": "unsupported"},
             )
         locator = ControlLocator(
             role=str(control.get("role", "")), name=str(control.get("name", ""))

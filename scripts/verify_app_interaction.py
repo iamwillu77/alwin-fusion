@@ -453,6 +453,16 @@ def leg8_targets(tools):
 # --------------------------------------------------------------------------- #
 
 
+def _stable_states(states):
+    """Volatile windowing flags (focus/active) churn on a live host.
+
+    v0.19: the refusal evidence compares the SEMANTIC states only —
+    an approval rejection cannot change what the control IS.
+    """
+    return sorted(s for s in (states or [])
+                  if s not in ("focused", "active", "showing"))
+
+
 def leg9_refusal(config, tools):
     print("== 9-10. approval refusal + cancellation (REAL gate) ==",
           flush=True)
@@ -473,17 +483,32 @@ def leg9_refusal(config, tools):
     })
     needs = preview.requires_approval
     result = pipeline.run_previewed(preview, approval=False)
-    after = adapter.find_control(locator)
-    refused_clean = (needs and result.status == "rejected"
-                     and after.ok
-                     and after.data.get("control", {}).get("states")
-                     == before.data.get("control", {}).get("states"))
+    # v0.19: bounded re-reads — a live host can churn focus/menu
+    # flags between finds; the refusal evidence must be stable, and a
+    # persistent mismatch is reported with its actual detail.
+    refused_clean = needs and result.status == "rejected"
+    detail = ""
+    if refused_clean:
+        for attempt in range(4):
+            after = adapter.find_control(locator)
+            if (after.ok
+                    and _stable_states(after.data.get("control", {})
+                                       .get("states"))
+                    == _stable_states(before.data.get("control", {})
+                                      .get("states"))):
+                detail = "semantic states identical"
+                break
+            detail = (f"before={before.data.get('control', {}).get('states')} "
+                      f"after={after.data.get('control', {}).get('states') if after.ok else after.data}")
+            time.sleep(1.0)
+        else:
+            refused_clean = False
     report("9 refusal", "declined approval executes nothing (real gate)",
            "EXECUTED" if refused_clean else "FAILED",
-           f"requires_approval={needs} status={result.status}")
+           f"requires_approval={needs} status={result.status} {detail}")
     report("10 cancellation", "declined plan = cancelled, state "
            "unchanged", "EXECUTED" if refused_clean else "FAILED",
-           "the toggle state is byte-identical before/after")
+           "the toggle's semantic states are identical before/after")
     return refused_clean
 
 

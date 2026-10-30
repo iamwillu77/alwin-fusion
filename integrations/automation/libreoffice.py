@@ -72,6 +72,7 @@ from integrations.automation.base import (
     ControlLocator,
     ActionResult,
     StaleStateError,
+    failure_data,
     safe_app_text,
 )
 
@@ -247,6 +248,11 @@ class LibreOfficeAdapter(AutomationAdapter):
 
     @staticmethod
     def _unavailable(capability: str, exc: Exception) -> ActionResult:
+        # v0.19: distinguish the failure kind — a dead bus/app call is
+        # 'bus_error'; the application simply not being there (the
+        # revalidation refusal) is 'app_missing'.
+        category = ("bus_error" if isinstance(exc, BackendError)
+                    else "app_missing")
         return ActionResult(
             ok=False,
             state=FAILED_UNKNOWN,
@@ -256,7 +262,8 @@ class LibreOfficeAdapter(AutomationAdapter):
                 f"Automation capability '{capability}' could not run: {exc} "
                 f"(state unknown)"
             ),
-            data={"unsupported": capability, "reason": str(exc)},
+            data=failure_data(capability, category,
+                              reason=str(exc)),
         )
 
     def _guard_role(self, capability: str, locator: ControlLocator,
@@ -347,6 +354,7 @@ class LibreOfficeAdapter(AutomationAdapter):
                     "running or may not expose accessibility "
                     "information)."
                 ),
+                data={"category": "app_missing"},
             )
         start = root
         if locator is not None:
@@ -363,7 +371,8 @@ class LibreOfficeAdapter(AutomationAdapter):
                     capability=CAP_LIST,
                     message="",
                     error=ambiguity_error(locator, len(matches)),
-                    data={"state": AMBIGUOUS_TARGET},
+                                        data=failure_data(CAP_LIST, "ambiguous",
+                                      state=AMBIGUOUS_TARGET),
                 )
             if not matches:
                 return ActionResult(
@@ -433,6 +442,7 @@ class LibreOfficeAdapter(AutomationAdapter):
                     "(state unknown: the application may not be running or may "
                     "not expose accessibility information)."
                 ),
+                data={"category": "app_missing"},
             )
         try:
             matches, ambiguous = resolve_candidates(
@@ -447,7 +457,9 @@ class LibreOfficeAdapter(AutomationAdapter):
                 capability=CAP_FIND,
                 message="",
                 error=ambiguity_error(locator, len(matches)),
-                data={"matches": len(matches), "state": AMBIGUOUS_TARGET},
+                            data=failure_data(CAP_FIND, "ambiguous",
+                              matches=len(matches),
+                              state=AMBIGUOUS_TARGET),
             )
         node = matches[0] if matches else None
         if node is not None and node_is_defunct(self.session, node):
@@ -460,7 +472,8 @@ class LibreOfficeAdapter(AutomationAdapter):
                     "The matching control is defunct (the application "
                     "closed it); nothing was reported as identified."
                 ),
-                data={"state": STALE_TARGET},
+                                data=failure_data(CAP_FIND, "stale_target",
+                                  state=STALE_TARGET),
             )
         if node is None:
             wanted = f"role '{safe_app_text(locator.role, 40)}'"
@@ -502,7 +515,7 @@ class LibreOfficeAdapter(AutomationAdapter):
                 capability=CAP_READ,
                 message="",
                 error=str(exc),
-                data={"unsupported": CAP_READ},
+                                data=failure_data(CAP_READ, "unsupported"),
             )
         except (BackendError, AutomationError) as exc:
             return self._unavailable(CAP_READ, exc)
@@ -517,7 +530,9 @@ class LibreOfficeAdapter(AutomationAdapter):
                     "The control was identified but exposes no readable text "
                     "through accessibility (state unknown — nothing was read)."
                 ),
-                data={"unsupported": CAP_READ, "control": self._control_info(node).as_dict()},
+                                data=failure_data(CAP_READ, "unsupported",
+                                  reason="the control exposes no "
+                                         "accessible text"),
             )
         truncated = len(text) > MAX_READ_TEXT_CHARS
         stored = text[:MAX_READ_TEXT_CHARS]
@@ -557,7 +572,7 @@ class LibreOfficeAdapter(AutomationAdapter):
                 capability=CAP_ACTIVATE,
                 message="",
                 error=str(exc),
-                data={"unsupported": CAP_ACTIVATE},
+                                data=failure_data(CAP_ACTIVATE, "unsupported"),
             )
         except AmbiguousTargetError as exc:
             return ActionResult(
@@ -566,7 +581,8 @@ class LibreOfficeAdapter(AutomationAdapter):
                 capability=CAP_ACTIVATE,
                 message="",
                 error=str(exc),
-                data={"state": AMBIGUOUS_TARGET},
+                                data=failure_data(CAP_ACTIVATE, "ambiguous",
+                                  state=AMBIGUOUS_TARGET),
             )
         except StaleStateError as exc:
             return ActionResult(
@@ -575,7 +591,8 @@ class LibreOfficeAdapter(AutomationAdapter):
                 capability=CAP_ACTIVATE,
                 message="",
                 error=str(exc),
-                data={"state": STALE_TARGET},
+                                data=failure_data(CAP_ACTIVATE, "stale_target",
+                                  state=STALE_TARGET),
             )
         except (BackendError, AutomationError) as exc:
             return self._unavailable(CAP_ACTIVATE, exc)
@@ -591,7 +608,7 @@ class LibreOfficeAdapter(AutomationAdapter):
                     "The control was identified but exposes no accessibility "
                     "action (state unknown — nothing was performed)."
                 ),
-                data={"unsupported": CAP_ACTIVATE},
+                                data=failure_data(CAP_ACTIVATE, "unsupported"),
             )
         before = self.session.states(node)
         try:
@@ -653,7 +670,7 @@ class LibreOfficeAdapter(AutomationAdapter):
                 capability=CAP_ENTER,
                 message="",
                 error=str(exc),
-                data={"unsupported": CAP_ENTER},
+                                data=failure_data(CAP_ENTER, "unsupported"),
             )
         except AmbiguousTargetError as exc:
             return ActionResult(
@@ -662,7 +679,8 @@ class LibreOfficeAdapter(AutomationAdapter):
                 capability=CAP_ENTER,
                 message="",
                 error=str(exc),
-                data={"state": AMBIGUOUS_TARGET},
+                                data=failure_data(CAP_ENTER, "ambiguous",
+                                  state=AMBIGUOUS_TARGET),
             )
         except StaleStateError as exc:
             return ActionResult(
@@ -671,7 +689,8 @@ class LibreOfficeAdapter(AutomationAdapter):
                 capability=CAP_ENTER,
                 message="",
                 error=str(exc),
-                data={"state": STALE_TARGET},
+                                data=failure_data(CAP_ENTER, "stale_target",
+                                  state=STALE_TARGET),
             )
         except (BackendError, AutomationError) as exc:
             return self._unavailable(CAP_ENTER, exc)

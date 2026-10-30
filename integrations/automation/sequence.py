@@ -23,7 +23,50 @@ from __future__ import annotations
 from typing import Callable, Dict, List, Optional
 
 from ai_core.permissions import PermissionChecker
+from integrations.automation.base import FAILURE_CATEGORIES
 from integrations.filesystem.tools import ToolResult
+
+#: v0.19: safe, bounded next-action hints per failure category
+#: (fixed strings — never derived from application or document text).
+_NEXT_ACTION_HINTS = {
+    "unsupported": (
+        "The adapter does not expose this operation; use a supported "
+        "operation or the trusted document tools instead."
+    ),
+    "app_missing": (
+        "Start the application (or check its capability in Settings), "
+        "then run the remaining steps as a new, separately approved "
+        "plan."
+    ),
+    "bus_error": (
+        "The accessibility bus or application disappeared mid-step; "
+        "re-check application status, then re-run the remaining steps "
+        "as a new plan — the completed steps are not repeated."
+    ),
+    "window_gone": (
+        "The application window closed; reopen the document through "
+        "the normal open action, then continue with a new plan."
+    ),
+    "stale_target": (
+        "The target control changed or vanished; re-inspect the "
+        "application's controls and retry with a fresh, explicitly "
+        "approved plan."
+    ),
+    "ambiguous": (
+        "Several controls matched; narrow the locator (exact "
+        "accessible name) and re-run as a new plan — nothing was "
+        "attempted."
+    ),
+    "refused": (
+        "The application refused the action; inspect its current "
+        "state manually before planning any further steps."
+    ),
+    "denied": (
+        "The permission stage denied this step; nothing was executed "
+        "for it — adjust the request or the permitted roots instead "
+        "of retrying."
+    ),
+}
 
 STATUS_OK = "ok"
 STATUS_FAILED = "failed"
@@ -234,14 +277,43 @@ class TaskSequenceRunner:
             "failed_step": failed_step,
         }
         if failed_step is not None:
+            # v0.19: an explicit partial-completion block — what
+            # finished, whether earlier steps changed state, the
+            # failure category, and a SAFE next action.  Fixed bounded
+            # strings only: no step contents, nothing that could
+            # influence a permission decision.
+            changed = any(bool(r.get("changed")) for r in records)
+            failed_record = records[failed_step - 1]
+            category = str(
+                (failed_record.get("data") or {}).get("category")
+                or ("denied" if failed_record.get("status") == STATUS_DENIED
+                    else "unknown")
+            )
+            if category not in FAILURE_CATEGORIES:
+                category = "unknown"
+            data["partial"] = {
+                "completed": completed,
+                "total": total,
+                "failed_step": failed_step,
+                "changed": changed,
+                "category": category,
+                "next_action": _NEXT_ACTION_HINTS.get(
+                    category,
+                    "Inspect the failed step's error, then re-run the "
+                    "remaining steps as a new, separately approved plan "
+                    "(nothing is retried automatically)."),
+            }
             return ToolResult(
                 ok=False,
                 message="",
-                changed=any(bool(r.get("changed")) for r in records),
+                changed=changed,
                 error=(
                     f"{failure}. Step {failed_step} of {total} did not "
                     f"complete, so the task is NOT reported as successful; "
                     f"remaining steps were skipped."
+                    + (" Earlier steps DID change state; their results "
+                       f"stand ({completed} of {total} completed)."
+                       if changed and completed else "")
                 ),
                 data=data,
             )

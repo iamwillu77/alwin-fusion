@@ -212,6 +212,40 @@ def safe_app_text(value: object, limit: int = 80) -> str:
 # --------------------------------------------------------------------------- #
 
 
+#: v0.19: the closed set of failure CATEGORIES shared by every
+#: adapter and the unavailable stand-in, so recovery logic and
+#: reports can branch on the kind of failure instead of parsing
+#: strings.  Bounded, content-free, never derived from app text.
+FAILURE_CATEGORIES = (
+    "unsupported",   # the adapter does not expose this capability
+    "app_missing",   # the application has no accessible interface now
+    "bus_error",     # the accessibility bus/app died mid-call
+    "window_gone",   # the application window disappeared
+    "stale_target",  # the control went defunct / changed identity
+    "ambiguous",     # several controls matched; nothing attempted
+    "refused",       # the application refused the action
+    "unknown",       # anything else (state genuinely unknown)
+)
+
+
+def failure_data(capability: str, category: str, **extra: object) -> Dict:
+    """Structured, bounded failure payload (v0.19 standard shape).
+
+    Only whitelisted keys pass through, every value is bounded, and no
+    application-provided text is ever placed here — diagnostics must
+    never influence a permission decision or leak content.
+    """
+    if category not in FAILURE_CATEGORIES:
+        category = "unknown"
+    data: Dict = {"capability": capability, "category": category}
+    for key in ("unsupported", "reason", "state", "matches"):
+        if key in extra:
+            value = extra[key]
+            data[key] = (safe_app_text(value, 200)
+                         if isinstance(value, str) else value)
+    return data
+
+
 class AutomationError(Exception):
     """Base class for desktop-automation failures."""
 
@@ -423,7 +457,9 @@ class UnavailableAdapter(AutomationAdapter):
                 f"Automation capability '{capability}' is unavailable for "
                 f"{self.application or 'this application'}: {self.reason}"
             ),
-            data={"unsupported": capability, "reason": self.reason},
+            data=failure_data(capability, "unsupported",
+                              unsupported=capability,
+                              reason=self.reason),
         )
 
     def inspect(self) -> AppSnapshot:

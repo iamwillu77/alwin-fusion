@@ -27,7 +27,7 @@ from __future__ import annotations
 import importlib.util
 import shutil
 import time
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional, Sequence
 
 from ai_core.planner import ACTION_SCHEMA
 from integrations.apps.registry import BUILTIN_REGISTRY
@@ -108,9 +108,20 @@ def application_tiers(
             tiers.append("open_file")
         # /proc process observation works for every registered app.
         tiers.append("inspect")
-        if automation_bindings and definition.a11y_names:
+        if automation_bindings and definition.a11y_names \
+                and installed:
+            # v0.19: window metadata requires the app to actually BE
+            # installable/present — bindings + registry names alone
+            # proved nothing about a specific application.
             tiers.append("window_state")
-        if automation_bindings and "automate" in definition.capabilities:
+        if automation_bindings and installed \
+                and "automate" in definition.capabilities:
+            # v0.19: 'interact' is a PLAN-TIME permission fact only.
+            # It must never be derived from installation alone in the
+            # other direction either — and the RUNTIME truth (the app
+            # may be installed yet blocked from the accessibility bus,
+            # exactly like LibreOffice on the reference host) comes
+            # from application_readiness() below / application_status.
             tiers.append("interact")
         out[definition.id] = {
             "tiers": tuple(tiers),
@@ -120,6 +131,136 @@ def application_tiers(
             ),
         }
     return out
+
+
+#: Facet statuses (v0.19): the four honest answers, reused everywhere.
+FACET_AVAILABLE = "available"
+FACET_UNAVAILABLE = "unavailable"
+FACET_BLOCKED = "blocked"
+FACET_UNKNOWN = "unknown"
+FACET_STATUSES = (FACET_AVAILABLE, FACET_UNAVAILABLE, FACET_BLOCKED,
+                  FACET_UNKNOWN)
+
+
+def application_readiness(
+    definition,
+    *,
+    bindings: bool = True,
+    which: Optional[Callable[[str], Optional[str]]] = None,
+    running_probe: Optional[Callable[[dict], Optional[bool]]] = None,
+    bus_probe: Optional[Callable[[dict], Sequence[str]]] = None,
+) -> Dict[str, Any]:
+    """Structured, evidence-based readiness for one registered app (v0.19).
+
+    Three facets, each one of AVAILABLE / UNAVAILABLE / BLOCKED /
+    UNKNOWN — never a guess:
+
+    * ``installed`` — AVAILABLE/UNAVAILABLE from the executable probe;
+      UNKNOWN when no probe is available or it raises (a transient
+      probe failure is UNKNOWN, never permanent unavailability).
+    * ``running`` — True/False/UNKNOWN from the injected /proc probe
+      (None or exception => UNKNOWN).
+    * ``a11y`` — AVAILABLE when the injected bus probe lists the
+      application's reviewed accessibility identity; BLOCKED only on
+      POSITIVE evidence (the app is RUNNING, the bindings exist, it
+      declares an a11y identity, yet the bus does not list it —
+      exactly the reference host's LibreOffice); UNKNOWN when the app
+      is not running, no bindings exist, or the probe fails;
+      UNAVAILABLE when the bindings themselves are absent.
+
+    ``control`` derives: interact | open_only | unknown — an app that
+    is installed but bus-blocked is NEVER 'interact'.  All probes are
+    bounded by the caller (this function performs no I/O itself).
+    """
+    finder = which if which is not None else shutil.which
+
+    # -- installed -------------------------------------------------- #
+    try:
+        # Call the finder DIRECTLY (not through the swallowing helper):
+        # a probe that RAISES is a transient failure => UNKNOWN, never
+        # permanent UNAVAILABLE.
+        candidates = [
+            getattr(definition.launch, "executable", ""),
+            getattr(definition.launch, "fallback_executable", ""),
+        ] + list(getattr(getattr(definition, "detection", None),
+                         "executables", ()) or ())
+        installed_present = False
+        for candidate in candidates:
+            if not candidate:
+                continue
+            if finder(candidate):
+                installed_present = True
+                break
+        installed = (FACET_AVAILABLE if installed_present
+                     else FACET_UNAVAILABLE)
+    except Exception:  # noqa: BLE001 - probe failure is UNKNOWN
+        installed_present = None
+        installed = FACET_UNKNOWN
+
+    # -- running ----------------------------------------------------- #
+    running: Any = False
+    if running_probe is not None:
+        try:
+            running = running_probe(definition.__dict__
+                                    if hasattr(definition, "__dict__")
+                                    else {})
+            if running is None:
+                running = None                  # unknown, not False
+        except Exception:  # noqa: BLE001 - transient probe failure
+            running = None
+    else:
+        running = None
+
+    # -- a11y -------------------------------------------------------- #
+    a11y_names = tuple(getattr(definition, "a11y_names", ()) or ())
+    if not bindings:
+        a11y = FACET_UNAVAILABLE
+    elif bus_probe is None or not a11y_names or not installed_present:
+        a11y = FACET_UNKNOWN
+    else:
+        try:
+            listed = tuple(str(n).lower()
+                           for n in (bus_probe(definition) or ()))
+        except Exception:  # noqa: BLE001 - bus hiccup is UNKNOWN
+            listed = None
+        if listed is None:
+            a11y = FACET_UNKNOWN
+        elif any(name in listed for name in a11y_names):
+            a11y = FACET_AVAILABLE
+        elif running is True:
+            # Positive evidence of a block: the process IS running,
+            # the bindings exist, the app declares its bus identity —
+            # and the bus does not list it.
+            a11y = FACET_BLOCKED
+        else:
+            a11y = FACET_UNKNOWN
+
+    # -- derived control ---------------------------------------------- #
+    if a11y == FACET_AVAILABLE and "automate" in (
+            getattr(definition, "capabilities", ()) or ()):
+        control = "interact"
+    elif a11y == FACET_BLOCKED:
+        control = "open_only"
+    else:
+        control = "unknown"
+
+    return {
+        "installed": installed,
+        "running": running,          # True | False | None (unknown)
+        "a11y": a11y,
+        "control": control,
+        "tiers": tuple(
+            t for t, keep in (
+                ("discover", True),
+                ("launch", bool(installed_present)
+                 and getattr(definition, "launches_bare", False)),
+                ("open_file", bool(installed_present)
+                 and getattr(definition, "opens_files", False)),
+                ("inspect", True),
+                ("interact", control == "interact"),
+            ) if keep
+        ),
+    }
 
 
 def discover_capabilities(

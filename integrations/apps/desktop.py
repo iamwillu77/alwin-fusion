@@ -394,19 +394,63 @@ class DesktopController:
                     windows.append(self._window_summary(frame))
             windows_found = len(windows)
 
-        a11y_state = "unavailable" if app_windows is None else "available"
+        # v0.19: one honest facet computation drives the legacy fields
+        # AND the structured readiness block.  "Bus reachable" is NOT
+        # "this app's a11y is available" — an app with no windows on
+        # the bus is available only when its process is actually
+        # running and still absent (BLOCKED), never assumed.
+        from ai_core.capabilities import (
+            FACET_AVAILABLE, FACET_BLOCKED, FACET_UNKNOWN, FACET_UNAVAILABLE,
+        )
+        if app_windows is None:
+            a11y_facet = FACET_UNKNOWN        # bus itself unreachable
+        elif windows_found:
+            a11y_facet = FACET_AVAILABLE      # this app's windows listed
+        elif running is True and definition.a11y_names:
+            a11y_facet = FACET_BLOCKED        # running, yet never listed
+        elif installed:
+            a11y_facet = FACET_UNKNOWN        # not running: no evidence
+        else:
+            a11y_facet = FACET_UNAVAILABLE
+        a11y_state = a11y_facet               # legacy key, honest value
+
+        if installed:
+            installed_facet = FACET_AVAILABLE
+        elif entry is None:
+            installed_facet = FACET_UNKNOWN   # detection itself failed
+        else:
+            installed_facet = FACET_UNAVAILABLE
+        can_automate = "automate" in definition.capabilities
+        if a11y_facet == FACET_AVAILABLE and can_automate:
+            control_facet = "interact"
+        elif not can_automate:
+            control_facet = "open_only"
+        else:
+            control_facet = "unknown"
+        readiness = {
+            "installed": installed_facet,
+            "running": running,               # True / False / None
+            "a11y": a11y_facet,
+            "control": control_facet,
+        }
+
         tiers = [
             "discover",
             *(["launch"] if definition.launches_bare else []),
             "inspect",  # /proc process observation works for every app
         ]
-        if a11y_state == "available" and windows_found:
+        if a11y_facet == FACET_AVAILABLE and windows_found:
             tiers.append("window_state")
-        if "automate" in definition.capabilities:
+        # v0.19: tiers reflect EVIDENCE, not registry intent —
+        # 'interact' requires the app's accessibility interface to be
+        # observable right now (a running app whose bus identity never
+        # appears is BLOCKED, exactly LibreOffice on the reference
+        # host, and never 'interact').
+        if control_facet == "interact":
             tiers.append("interact")
         if "open_file" in definition.capabilities:
             tiers.append("open_file")
-        if not ("automate" in definition.capabilities):
+        if not can_automate:
             tiers.append("open_only_for_control")
 
         data = {
@@ -419,6 +463,7 @@ class DesktopController:
             "windows": windows,
             "windows_found": windows_found,
             "a11y": a11y_state,
+            "readiness": readiness,
             "tiers": tuple(tiers),
             "evidence": {
                 "executables_found": list(entry["executables_found"]) if entry else [],
