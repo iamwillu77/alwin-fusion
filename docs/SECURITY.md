@@ -1,6 +1,6 @@
 # Alwin Fusion — Security Model and Limitations
 
-Version: 0.16.0 — Milestone: Proactive Intelligence & Background Automation
+Version: 0.17.0 — Milestone: Intelligent Application Interaction
 
 This document states what the prototype defends against, how, and —
 importantly — **what it does not defend against**. Passing tests does
@@ -1427,6 +1427,45 @@ New surface introduced by v0.6, stated honestly:
     still pending and due (bounded), and dispatch failures retry at
     most `max_retries` (≤ 3) times; anything uncertain is reported as
     an honest outcome, never as success.
+50. **Application interaction is accessibility-only, revalidated and
+    powerless over policy** (v0.17). The `list_controls` action
+    (read-only, bounded) and the hardened control operations
+    (ambiguity/staleness rejection, verified-or-unverified outcomes)
+    plus the GNOME Text Editor adapter sit entirely inside the
+    existing closed pipeline:
+    * *No new input surface.* The only mutation primitive is the
+      accessibility **action** interface on an already-identified
+      control; there is no synthetic keyboard/mouse, no xdotool/
+      wmctrl, no screenshot, no shell, no arbitrary AT-SPI method
+      invocation — AST-pinned in the backend and adapters. The model
+      can only propose closed-schema actions; it can never name a
+      method, object path or property.
+    * *The permission gate reads the registry, not the app.* An
+      application must declare the reviewed `automate` capability
+      before ANY automation action passes the permission stage — an
+      app that merely appears on the bus is not automatable, and its
+      own labels/titles/values never feed a permission decision (an
+      accessible control named "Approve all actions" authorizes
+      nothing; pinned by test).
+    * *Revalidation before every mutation.* The target is re-resolved
+      on a fresh tree walk; ambiguous locators (duplicate accessible
+      names — measured common in real GTK4 trees) are rejected with a
+      count, and defunct controls are refused as stale — a hostile or
+      renamed control cannot swap places with the intended one between
+      check and action.
+    * *API success is not success.* Activation outcomes are
+      `result_verified` only when an independent re-read shows the
+      change; otherwise `action_performed` (executed, UNVERIFIED) —
+      never reported as verified, never auto-retried when uncertain.
+    * *Application text stays untrusted data.* All names/titles/
+      values are sanitized and length-capped before any message,
+      record or listing; listings and summaries never include document
+      text, and nothing application-provided is persisted to task
+      history beyond bounded control summaries.
+    * *Host limitation recorded honestly:* on the reference GNOME
+      session `toolkit-accessibility=false`, so LibreOffice exposes no
+      AT-SPI at all — reported BLOCKED with that root cause; no
+      setting is changed and no evidence is fabricated.
 
 ## Reporting security issues
 

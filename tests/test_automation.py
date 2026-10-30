@@ -406,14 +406,28 @@ class TestFindAndRead(unittest.TestCase):
         finally:
             s.cleanup()
 
-    def test_find_by_role_alone_returns_first_match(self):
+    def test_find_by_role_alone_ambiguous_is_rejected(self):
+        # v0.17: three buttons share role 'button' — a role-only
+        # locator is AMBIGUOUS and must never silently pick the first.
         s = AutomationSandbox()
         try:
             result = s.tools.find_control(
                 "libreoffice-writer", {"role": "button", "name": ""}
             )
+            self.assertFalse(result.ok)
+            self.assertEqual(result.data.get("state"), "ambiguous_target")
+            self.assertIn("ambiguous", result.error.lower())
+        finally:
+            s.cleanup()
+
+    def test_find_by_role_alone_unique_still_identifies(self):
+        s = AutomationSandbox()
+        try:
+            result = s.tools.find_control(
+                "libreoffice-writer", {"role": "status bar", "name": ""}
+            )
             self.assertTrue(result.ok)
-            self.assertEqual(result.data["control"]["name"], "Save")
+            self.assertEqual(result.data["control"]["role"], "status bar")
         finally:
             s.cleanup()
 

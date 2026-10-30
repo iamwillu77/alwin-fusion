@@ -44,6 +44,9 @@ ACTION_SCHEMA: dict[str, frozenset] = {
     # ---- v0.4 desktop automation (closed set; see AUTOMATION_ACTIONS) ----
     "inspect_application": frozenset({"action", "application"}),
     "find_control": frozenset({"action", "application", "control"}),
+    # v0.17 bounded read-only control listing (control optional: the
+    # whole window may be listed).
+    "list_controls": frozenset({"action", "application", "control"}),
     "read_control": frozenset({"action", "application", "control"}),
     "activate_control": frozenset({"action", "application", "control"}),
     "enter_text": frozenset({"action", "application", "control", "content"}),
@@ -366,6 +369,18 @@ def validate_action(payload: object) -> dict:
             "action": action,
             "application": _resolve_application(payload.get("application", "")),
         }
+
+    if action == "list_controls":
+        # v0.17: read-only bounded listing; the control locator is
+        # OPTIONAL (absent = list the application window) and when
+        # present it goes through the exact same closed validation.
+        application = _resolve_application(payload.get("application", ""))
+        raw_control = payload.get("control")
+        if raw_control in (None, "", {}):
+            return {"action": action, "application": application}
+        control = _validate_control(raw_control, action=action)
+        return {"action": action, "application": application,
+                "control": control}
 
     if action in (
         "find_control",

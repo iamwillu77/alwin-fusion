@@ -32,15 +32,20 @@ from typing import Optional
 
 from integrations.automation.atspi_backend import (
     AtspiSession,
+    ambiguity_error,
+    node_is_defunct,
     normalize_name,
     normalize_role,
+    resolve_candidates,
 )
 from integrations.automation.base import (
     ACTIVATABLE_ROLES,
+    AMBIGUOUS_TARGET,
     CAP_ACTIVATE,
     CAP_ENTER,
     CAP_FIND,
     CAP_INSPECT,
+    CAP_LIST,
     CAP_READ,
     CAP_SAVE,
     CONTROL_IDENTIFIED,
@@ -49,11 +54,16 @@ from integrations.automation.base import (
     FAILED_UNKNOWN,
     INTERFACE_DETECTED,
     MAX_CONTROL_NAME_CHARS,
+    MAX_LIST_CONTROLS,
+    MAX_LIST_DEPTH,
     MAX_READ_TEXT_CHARS,
     READABLE_ROLES,
     ACTION_PERFORMED,
     RESULT_VERIFIED,
+    STALE_TARGET,
+    STRUCTURAL_ROLES,
     AppSnapshot,
+    AmbiguousTargetError,
     AutomationAdapter,
     AutomationError,
     BackendError,
@@ -61,6 +71,7 @@ from integrations.automation.base import (
     ControlInfo,
     ControlLocator,
     ActionResult,
+    StaleStateError,
     safe_app_text,
 )
 
@@ -123,7 +134,8 @@ class LibreOfficeAdapter(AutomationAdapter):
 
     def capabilities(self):
         return frozenset(
-            {CAP_INSPECT, CAP_FIND, CAP_READ, CAP_ACTIVATE, CAP_ENTER, CAP_SAVE}
+            {CAP_INSPECT, CAP_FIND, CAP_READ, CAP_ACTIVATE, CAP_ENTER,
+             CAP_SAVE, CAP_LIST}
         )
 
     # ------------------------------------------------------------------ #
@@ -170,14 +182,24 @@ class LibreOfficeAdapter(AutomationAdapter):
         return app, (window if window is not None else app)
 
     def _revalidate(self, locator: ControlLocator):
-        """Fresh app + control lookup immediately before a mutation."""
+        """Fresh app + control lookup immediately before a mutation.
+
+        v0.17: the same ambiguity and staleness rules as find — more
+        than one match aborts (never acts on "probably the first one"),
+        and a defunct accessible aborts as stale.
+        """
         app, root = self._root()
         if app is None:
             raise AutomationError(
                 "the application no longer exposes an accessible interface "
                 "(it may have exited); operation aborted, state unknown"
             )
-        node = self.session.find_in(root, locator)
+        matches, ambiguous = resolve_candidates(self.session, root, locator)
+        if ambiguous:
+            raise AmbiguousTargetError(
+                ambiguity_error(locator, len(matches))
+            )
+        node = matches[0] if matches else None
         if node is None:
             wanted = f"role '{locator.role}'"
             if locator.name:
@@ -185,6 +207,11 @@ class LibreOfficeAdapter(AutomationAdapter):
             raise AutomationError(
                 f"the control ({wanted}) could not be re-located; "
                 "operation aborted, state unknown"
+            )
+        if node_is_defunct(self.session, node):
+            raise StaleStateError(
+                "the target control is defunct (the application closed "
+                "it); operation aborted, state unknown"
             )
         # Identity re-check: the node we are about to touch must still
         # have the requested role and name.
@@ -292,6 +319,104 @@ class LibreOfficeAdapter(AutomationAdapter):
             detail=detail,
         )
 
+    def list_controls(self, locator: Optional[ControlLocator] = None
+                      ) -> ActionResult:
+        """Read-only: a bounded summary of controls under the window.
+
+        v0.17: at most ``MAX_LIST_CONTROLS`` entries within
+        ``MAX_LIST_DEPTH``; roles, sanitized names, states and action
+        names only — never document text, never raw accessible
+        objects, never an unbounded dump.  When *locator* is given,
+        the listing is rooted at the single matching control (still
+        ambiguity-checked); otherwise it covers the application
+        window.
+        """
+        try:
+            app, root = self._root()
+        except (BackendError, AutomationError) as exc:
+            return self._unavailable(CAP_LIST, exc)
+        if app is None:
+            return ActionResult(
+                ok=False,
+                state=FAILED_UNKNOWN,
+                capability=CAP_LIST,
+                message="",
+                error=(
+                    "No accessible interface for this application was "
+                    "found (state unknown: the application may not be "
+                    "running or may not expose accessibility "
+                    "information)."
+                ),
+            )
+        start = root
+        if locator is not None:
+            try:
+                matches, ambiguous = resolve_candidates(
+                    self.session, root, locator
+                )
+            except BackendError as exc:
+                return self._unavailable(CAP_LIST, exc)
+            if ambiguous:
+                return ActionResult(
+                    ok=False,
+                    state=AMBIGUOUS_TARGET,
+                    capability=CAP_LIST,
+                    message="",
+                    error=ambiguity_error(locator, len(matches)),
+                    data={"state": AMBIGUOUS_TARGET},
+                )
+            if not matches:
+                return ActionResult(
+                    ok=False,
+                    state=FAILED_UNKNOWN,
+                    capability=CAP_LIST,
+                    message="",
+                    error=(
+                        "No control matched the locator; nothing was "
+                        "listed (state unknown)."
+                    ),
+                )
+            start = matches[0]
+        summaries = []
+        truncated = False
+        try:
+            for node, depth in self.session.walk(start):
+                if len(summaries) >= MAX_LIST_CONTROLS:
+                    truncated = True
+                    break
+                if depth == 0:
+                    continue  # never list the root itself as a control
+                if depth > MAX_LIST_DEPTH:
+                    continue
+                role = self.session.role(node)
+                if not role or role == "application":
+                    continue
+                # Unnamed layout scaffolding is traversal noise, not a
+                # control: it does not count toward the summary cap.
+                if role in STRUCTURAL_ROLES and not self.session.name(node):
+                    continue
+                info = self._control_info(node)
+                summaries.append(info.as_dict())
+        except BackendError as exc:
+            return self._unavailable(CAP_LIST, exc)
+        data = {
+            "controls": summaries,
+            "count": len(summaries),
+            "truncated": truncated,
+            "state": INTERFACE_DETECTED,
+        }
+        return ActionResult(
+            ok=True,
+            state=INTERFACE_DETECTED,
+            capability=CAP_LIST,
+            message=(
+                f"Listed {len(summaries)} control(s)"
+                + (" (bounded listing is truncated)" if truncated else "")
+                + "."
+            ),
+            data=data,
+        )
+
     def find_control(self, locator: ControlLocator) -> ActionResult:
         try:
             app, root = self._root()
@@ -310,9 +435,33 @@ class LibreOfficeAdapter(AutomationAdapter):
                 ),
             )
         try:
-            node = self.session.find_in(root, locator)
+            matches, ambiguous = resolve_candidates(
+                self.session, root, locator
+            )
         except BackendError as exc:
             return self._unavailable(CAP_FIND, exc)
+        if ambiguous:
+            return ActionResult(
+                ok=False,
+                state=AMBIGUOUS_TARGET,
+                capability=CAP_FIND,
+                message="",
+                error=ambiguity_error(locator, len(matches)),
+                data={"matches": len(matches), "state": AMBIGUOUS_TARGET},
+            )
+        node = matches[0] if matches else None
+        if node is not None and node_is_defunct(self.session, node):
+            return ActionResult(
+                ok=False,
+                state=STALE_TARGET,
+                capability=CAP_FIND,
+                message="",
+                error=(
+                    "The matching control is defunct (the application "
+                    "closed it); nothing was reported as identified."
+                ),
+                data={"state": STALE_TARGET},
+            )
         if node is None:
             wanted = f"role '{safe_app_text(locator.role, 40)}'"
             if locator.name:
@@ -410,6 +559,24 @@ class LibreOfficeAdapter(AutomationAdapter):
                 error=str(exc),
                 data={"unsupported": CAP_ACTIVATE},
             )
+        except AmbiguousTargetError as exc:
+            return ActionResult(
+                ok=False,
+                state=AMBIGUOUS_TARGET,
+                capability=CAP_ACTIVATE,
+                message="",
+                error=str(exc),
+                data={"state": AMBIGUOUS_TARGET},
+            )
+        except StaleStateError as exc:
+            return ActionResult(
+                ok=False,
+                state=STALE_TARGET,
+                capability=CAP_ACTIVATE,
+                message="",
+                error=str(exc),
+                data={"state": STALE_TARGET},
+            )
         except (BackendError, AutomationError) as exc:
             return self._unavailable(CAP_ACTIVATE, exc)
 
@@ -487,6 +654,24 @@ class LibreOfficeAdapter(AutomationAdapter):
                 message="",
                 error=str(exc),
                 data={"unsupported": CAP_ENTER},
+            )
+        except AmbiguousTargetError as exc:
+            return ActionResult(
+                ok=False,
+                state=AMBIGUOUS_TARGET,
+                capability=CAP_ENTER,
+                message="",
+                error=str(exc),
+                data={"state": AMBIGUOUS_TARGET},
+            )
+        except StaleStateError as exc:
+            return ActionResult(
+                ok=False,
+                state=STALE_TARGET,
+                capability=CAP_ENTER,
+                message="",
+                error=str(exc),
+                data={"state": STALE_TARGET},
             )
         except (BackendError, AutomationError) as exc:
             return self._unavailable(CAP_ENTER, exc)

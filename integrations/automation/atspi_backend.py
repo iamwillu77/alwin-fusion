@@ -28,11 +28,14 @@ from __future__ import annotations
 from typing import List, Optional, Tuple
 
 from integrations.automation.base import (
+    MAX_AMBIGUOUS_CANDIDATES,
+    MAX_CONTROL_NAME_CHARS,
     MAX_TREE_DEPTH,
     MAX_TREE_NODES,
     AutomationError,
     BackendError,
     ControlLocator,
+    safe_app_text,
 )
 
 
@@ -386,3 +389,64 @@ class AtspiSession:
                     lowered = lowered[len("atspi_state_"):]
                 out.append(lowered)
         return tuple(sorted(set(out)))
+
+    def is_defunct(self, node) -> bool:
+        """Has *node* gone defunct (application closed it)?
+
+        A defunct accessible is a stale target: acting on it either
+        fails silently or hits whatever replaced it.  Callers must
+        treat True as :class:`StaleStateError` and never act.
+        """
+        try:
+            return "defunct" in self.states(node)
+        except BackendError:
+            return True   # a dead call means the node is gone
+        except Exception:  # noqa: BLE001 - unknown liveness = assume dead
+            return True
+
+
+# --------------------------------------------------------------------------- #
+# Shared target-resolution helpers (v0.17) — used by every adapter so
+# ambiguity and staleness are handled IDENTICALLY everywhere.
+# --------------------------------------------------------------------------- #
+
+
+def resolve_candidates(session, root, locator: ControlLocator,
+                      *, limit: int = MAX_AMBIGUOUS_CANDIDATES):
+    """``(matches, ambiguous)`` for *locator* under *root* (bounded).
+
+    Uses the session's bounded ``find_all`` when it exists; older or
+    test-injected sessions without it fall back to first-match
+    ``find_in`` (ambiguous=False) — defence in depth, never a hang.
+    """
+    finder = getattr(session, "find_all", None)
+    if not callable(finder):
+        node = session.find_in(root, locator)
+        return ([node] if node is not None else []), False
+    matches = list(finder(root, locator, max_matches=max(2, limit)))
+    return matches, len(matches) > 1
+
+
+def node_is_defunct(session, node) -> bool:
+    """Defunct check with a fallback for sessions without the probe."""
+    checker = getattr(session, "is_defunct", None)
+    if not callable(checker):
+        return False
+    try:
+        return bool(checker(node))
+    except Exception:  # noqa: BLE001 - a failed probe means "assume dead"
+        return True
+
+
+def ambiguity_error(locator: ControlLocator, count: int) -> str:
+    """Fixed, content-bounded ambiguity message (no guessing, ever)."""
+    wanted = f"role '{safe_app_text(locator.role, 40)}'"
+    if locator.name:
+        wanted += (
+            f" name '{safe_app_text(locator.name, MAX_CONTROL_NAME_CHARS)}'"
+        )
+    return (
+        f"Target ambiguous: {count} or more controls matched {wanted} — "
+        f"narrow the locator (add or change the accessible name); "
+        f"nothing was done."
+    )

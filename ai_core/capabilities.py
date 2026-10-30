@@ -187,7 +187,8 @@ def missing_for(action: str, caps: Dict[str, Any]) -> Optional[str]:
     if action == "create_pdf" and not caps["documents"].get("create_pdf"):
         return "create_pdf needs the 'reportlab' package (pip install reportlab)."
     if action in ("inspect_application", "find_control", "read_control",
-                  "activate_control", "enter_text", "save_document") \
+                  "activate_control", "enter_text", "save_document",
+                  "list_controls") \
             and not caps.get("automation_bindings"):
         return ("desktop automation needs the python3-gi + "
                 "gir1.2-atspi-2.0 bindings; they are not installed.")

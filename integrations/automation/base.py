@@ -53,8 +53,18 @@ DOCUMENT_OPEN = "document_open"
 CONTROL_IDENTIFIED = "control_identified"
 #: An allowlisted action was performed on a revalidated control.
 ACTION_PERFORMED = "action_performed"
-#: The result was confirmed by an independent re-read (e.g. file digest).
+#: The action ran, but no independent state change could be observed —
+#: reported as executed-but-UNVERIFIED, never as success (v0.17).
+EXECUTED_UNVERIFIED = "executed_unverified"
+#: The result was confirmed by an independent re-read (e.g. file digest,
+#: or a re-inspected accessibility state change) (v0.17).
 RESULT_VERIFIED = "result_verified"
+#: More than one control matched the locator — the target is ambiguous
+#: and NO action was taken (v0.17: duplicate names are never guessed).
+AMBIGUOUS_TARGET = "ambiguous_target"
+#: The identified control or its application went away (defunct
+#: accessible) — the target is stale and NO action was taken (v0.17).
+STALE_TARGET = "stale_target"
 #: The operation failed or the state cannot be verified honestly.
 FAILED_UNKNOWN = "failed_or_unknown"
 
@@ -67,7 +77,10 @@ APPLICATION_STATES = (
     DOCUMENT_OPEN,
     CONTROL_IDENTIFIED,
     ACTION_PERFORMED,
+    EXECUTED_UNVERIFIED,
     RESULT_VERIFIED,
+    AMBIGUOUS_TARGET,
+    STALE_TARGET,
     FAILED_UNKNOWN,
 )
 
@@ -87,6 +100,9 @@ CAP_READ = "read_control"
 CAP_ACTIVATE = "activate_control"
 CAP_ENTER = "enter_text"
 CAP_SAVE = "save_document"
+#: v0.17 bounded, read-only listing of an application's controls
+#: (roles/names/states/action names only — never document text).
+CAP_LIST = "list_controls"
 
 CAPABILITIES = (
     CAP_INSPECT,
@@ -95,9 +111,12 @@ CAPABILITIES = (
     CAP_ACTIVATE,
     CAP_ENTER,
     CAP_SAVE,
+    CAP_LIST,
 )
 
-READ_ONLY_CAPABILITIES = frozenset({CAP_INSPECT, CAP_FIND, CAP_READ})
+READ_ONLY_CAPABILITIES = frozenset(
+    {CAP_INSPECT, CAP_FIND, CAP_READ, CAP_LIST}
+)
 
 # --------------------------------------------------------------------------- #
 # Bounds (every tree walk and every text value is capped)
@@ -147,6 +166,28 @@ MAX_READ_TEXT_CHARS = 4096
 MAX_TREE_NODES = 4000
 MAX_TREE_DEPTH = 40
 
+#: v0.17 bounded control listing: at most this many summaries, within
+#: this depth below the identified window, each name capped again by
+#: MAX_CONTROL_NAME_CHARS on serialization.
+#: Depth note: GTK4 applications (e.g. GNOME Text Editor) bury their
+#: real controls under a deep chain of layout panels — the reference
+#: host exposes buttons/toggles at depth 10-18, so the bound is 20
+#: (measured on the real tree, still strictly bounded).
+MAX_LIST_CONTROLS = 40
+MAX_LIST_DEPTH = 20
+#: Structural layout roles with no accessible name carry no
+#: user-meaningful information (measured: a GTK4 editor window has
+#: dozens of unnamed 'panel'/'grouping' nodes).  Listings keep the
+#: bounds but summarize the CONTROLS, not the layout scaffolding —
+#: named structural nodes still appear.
+STRUCTURAL_ROLES = frozenset(
+    {"panel", "grouping", "separator", "scroll pane", "layered pane",
+     "split pane", "filler", "section"}
+)
+#: How many ambiguous candidates the backend collects before it stops
+#: (enough to say "more than one match" — never a full desktop dump).
+MAX_AMBIGUOUS_CANDIDATES = 8
+
 _CONTROL_UNSAFE_RE = re.compile(r"[\x00-\x1f\x7f]")
 
 
@@ -185,6 +226,14 @@ class ControlNotFound(AutomationError):
 
 class StaleStateError(AutomationError):
     """The application or control disappeared between check and action."""
+
+
+class AmbiguousTargetError(AutomationError):
+    """Several controls matched the locator — nothing was attempted.
+
+    v0.17: duplicate accessible names are never resolved by guessing;
+    the caller must narrow the locator.
+    """
 
 
 class BackendError(AutomationError):

@@ -38,6 +38,7 @@ from integrations.automation.base import (
     CAP_ENTER,
     CAP_FIND,
     CAP_INSPECT,
+    CAP_LIST,
     CAP_READ,
     CAP_SAVE,
     FAILED_UNKNOWN,
@@ -53,6 +54,7 @@ from integrations.automation.base import (
     UnavailableAdapter,
     safe_app_text,
 )
+from integrations.automation.gnome_text_editor import GnomeTextEditorAdapter
 from integrations.automation.libreoffice import LibreOfficeAdapter
 from integrations.automation import processes
 from integrations.apps.registry import (
@@ -63,13 +65,15 @@ from integrations.apps.registry import (
 )
 from integrations.filesystem.tools import ToolResult
 
-#: Integration id -> adapter builder.  v0.4 supports LibreOffice
-#: Writer and Calc only; every other id gets an honest
-#: :class:`UnavailableAdapter` (and the permission stage denies it
-#: before any of this runs).
+#: Integration id -> adapter builder.  v0.4 automates LibreOffice
+#: Writer and Calc; v0.17 adds GNOME Text Editor (bounded inspection +
+#: activation only — its real tree exposes no document text interface).
+#: Every other id gets an honest :class:`UnavailableAdapter` (and the
+#: permission stage denies it before any of this runs).
 ADAPTER_BUILDERS: Dict[str, Callable[..., AutomationAdapter]] = {
     "libreoffice-writer": LibreOfficeAdapter,
     "libreoffice-calc": LibreOfficeAdapter,
+    "gnome-text-editor": GnomeTextEditorAdapter,
 }
 
 
@@ -303,6 +307,46 @@ class AutomationTools:
         return self._operate(
             CAP_FIND, application, control, "find_control", dry_run=dry_run
         )
+
+    def list_controls(
+        self, application: str, control: Optional[dict] = None,
+        *, dry_run: bool = False
+    ) -> ToolResult:
+        """v0.17 read-only bounded listing of an app's controls.
+
+        *control* is optional: when given, the listing is rooted at
+        that (ambiguity-checked) control; otherwise it covers the
+        application window.  Never mutates, never reads document text.
+        """
+        try:
+            self._definition(application)
+        except RegistryError as exc:
+            return ToolResult(ok=False, message="", error=str(exc))
+        adapter = self.adapter_for(application)
+        if not adapter.supports(CAP_LIST):
+            reason = (
+                adapter.reason
+                if isinstance(adapter, UnavailableAdapter)
+                else "the application does not expose this capability"
+            )
+            return ToolResult(
+                ok=False,
+                message="",
+                error=f"Capability '{CAP_LIST}' is unavailable: {reason}.",
+                data={"state": FAILED_UNKNOWN, "capability": CAP_LIST,
+                      "unsupported": CAP_LIST},
+            )
+        locator = None
+        if control:
+            locator = ControlLocator(
+                role=str(control.get("role", "")),
+                name=str(control.get("name", "")),
+            )
+        try:
+            result = adapter.list_controls(locator)
+        except AutomationError as exc:
+            return self._adapter_failure(CAP_LIST, exc)
+        return self._result_tool(result, changed=False)
 
     def read_control(
         self, application: str, control: dict, *, dry_run: bool = False
@@ -578,6 +622,10 @@ def make_automation_handlers(
         ),
         "find_control": lambda action, *, dry_run=False: tools.find_control(
             action["application"], action["control"], dry_run=dry_run
+        ),
+        "list_controls": lambda action, *, dry_run=False: tools.list_controls(
+            action["application"], action.get("control"),
+            dry_run=dry_run,
         ),
         "read_control": lambda action, *, dry_run=False: tools.read_control(
             action["application"], action["control"], dry_run=dry_run

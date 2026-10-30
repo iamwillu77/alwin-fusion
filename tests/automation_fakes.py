@@ -369,6 +369,12 @@ class SwapSession(AtspiSession):
     def find_in(self, root, locator: ControlLocator):
         return self.swap
 
+    def find_all(self, root, locator: ControlLocator, *,
+                 max_matches: int = 5):
+        # v0.17: the adapter resolves through find_all (ambiguity
+        # detection) — the swap must apply there too.
+        return [self.swap]
+
 
 # --------------------------------------------------------------------------- #
 # The sandbox

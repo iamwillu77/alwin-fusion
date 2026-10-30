@@ -1,6 +1,6 @@
 # Alwin Fusion — Architecture
 
-Version: 0.16.0 — Milestone: Proactive Intelligence & Background Automation
+Version: 0.17.0 — Milestone: Intelligent Application Interaction
 
 Alwin Fusion is an open-source, offline-first AI-native operating
 system in the making. This document describes what exists today, how
@@ -156,10 +156,23 @@ integrations/            Pluggable action handlers (the extension point)
                          role policies, bounds, untrusted-text sanitizing
         processes.py     read-only /proc observation (never starts processes)
         atspi_backend.py AtspiSession over gi.repository.Atspi (no gi = clean
-                         BackendUnavailable; no keystrokes/mouse/shell ever)
+                         BackendUnavailable; no keystrokes/mouse/shell ever);
+                         v0.17: find_all-based ambiguity detection,
+                         is_defunct staleness probe, shared
+                         resolve_candidates/node_is_defunct helpers
         libreoffice.py   LibreOfficeAdapter: Writer/Calc root discovery,
-                         find/read/activate/enter/save with revalidation
-        tools.py         the 7 automation handlers re-checking permissions
+                         find/read/activate/enter/save with revalidation;
+                         v0.17: ambiguous locators rejected (never
+                         first-match), defunct targets refused as stale,
+                         bounded read-only list_controls, activation
+                         outcome verified-or-unverified
+        gnome_text_editor.py  v0.17 GNOME Text Editor adapter (bounded:
+                         inspect/find/list/activate with post-action
+                         verification; read/enter/save honestly
+                         unsupported — the real GTK4 tree exposes no
+                         document-text interface, measured on the host)
+        tools.py         the automation handlers re-checking permissions
+                         (v0.17 adds the bounded read-only list_controls)
         sequence.py      TaskSequenceRunner (stop-on-failure, per-step
                          records; optional step_observer for live progress)
         mcp.py           future-MCP tool descriptors only (no server/
@@ -1385,6 +1398,45 @@ every mutation the locator is **revalidated** against a freshly walked
 tree — if the control changed identity or vanished, the action aborts
 with `failed_or_unknown` instead of acting on the wrong control.
 
+**Application interaction hardening + GNOME Text Editor (v0.17).**
+Three cross-cutting guarantees were added and are enforced identically
+in every adapter through shared helpers
+(`resolve_candidates`/`node_is_defunct` in `atspi_backend.py`):
+
+- *Ambiguous targets are rejected, never guessed.* Control search now
+  collects bounded candidates (`find_all`, ≤ 8); more than one match
+  is an `ambiguous_target` failure with a count — role-only locators
+  over trees with duplicate names (measured: real GTK4 trees have
+  several `Open` controls) can no longer silently act on the first.
+- *Stale targets are refused.* A defunct accessible (the application
+  closed it) is detected before every mutation and reported as
+  `stale_target`; nothing runs against a corpse.
+- *Bounded read-only listing* (`list_controls`, a new closed action,
+  schema `{application, control?}`, **not** in `MUTATING_ACTIONS`):
+  ≤ 40 control summaries within depth 20, names capped at 120 chars,
+  roles/names/states/action-names only — unnamed layout scaffolding
+  (`panel`/`grouping`/…) is skipped so the cap counts real controls,
+  and document text never rides along.
+- *Verified vs unverified.* Activation re-reads the target's states
+  after the action: an observable change is `result_verified`, an
+  accepted call without one is `action_performed` (executed but
+  UNVERIFIED) — an accessibility API "success" alone is never success,
+  and uncertain mutations are never retried automatically.
+
+The new `GnomeTextEditorAdapter` (`gnome_text_editor.py`) is built
+from the **measured** GTK4 tree on the reference host: application
+`gnome-text-editor`, one frame titled `… - Text Editor`, buttons /
+toggle buttons / page tabs / labels under a deep layout-panel chain —
+and **no document-text interface**, so read/enter/save are honest
+unsupported answers, never simulations. The registry entry declares
+the reviewed `automate` capability (v1.1.0), which is exactly what the
+permission stage checks before any automation action runs.
+LibreOffice automation on the reference host is BLOCKED by the session
+setting `org.gnome.desktop.interface toolkit-accessibility=false`
+(GTK3 bridge never registers); the adapter and its mocked tests stand,
+and the verification script reports that root cause verbatim instead
+of claiming LibreOffice evidence.
+
 **Digest-confirmed save.** The tools layer records the target file's
 sha256 before activating the Save control and re-reads the file after
 a bounded wait (injectable clock/sleep, default 2 s). If the digest
@@ -1675,7 +1727,18 @@ ops against real files/roots/registry, NL intents including
 question-never-creates and vague-phrase refusal, conversation
 integration with the confirmation slot, credential/injection/AST trust
 isolation, storage-failure honesty, regression pins) — for **1355
-passed, 2 skipped (2876 subtests)**. The v0.9 additions were: the six voice-stack suites
+passed, 2 skipped (2876 subtests)**; the v0.17 suite adds **40 more**
+(`tests/test_app_interaction.py`: missing app/window, duplicate-name
+ambiguity with zero executions, stale/defunct targets (including
+defunct-between-find-and-activate), unsupported capabilities,
+oversized names, traversal bounds on huge trees, bounded listings with
+document-text exclusion and truncation honesty, the measured GNOME
+Text Editor tree (identify/activate with verified-vs-unverified
+outcomes, unsupported read), uncertain-mutation single-attempt pins,
+planner/permission pins for the new read-only action, a control named
+"Approve all actions" authorizing nothing, AST trust isolation, no
+synthetic-input surface, registry contract pins) — for **1395
+passed, 2 skipped (2889 subtests)**. The v0.9 additions were: the six voice-stack suites
 (registry, detection, conversation, capture, recognition, voice output),
 the window voice-cycle suite (real `GLib.idle_add` marshalling pumped
 on the default main context, all devices/models/LLM faked), the

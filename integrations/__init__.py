@@ -265,7 +265,19 @@ def build_default_dispatcher(
         automation_handlers["find_control"],
         description=(
             "Find a control by accessible role and name in a supported "
-            "application (read-only)."
+            "application (read-only; ambiguous matches are rejected, "
+            "never guessed)."
+        ),
+        mutates=False,
+        requires_approval=False,
+    )
+    dispatcher.register(
+        "list_controls",
+        automation_handlers["list_controls"],
+        description=(
+            "List a bounded summary of a supported application's "
+            "accessible controls — roles, names, states, action names "
+            "only; no document text, no mutation (read-only)."
         ),
         mutates=False,
         requires_approval=False,

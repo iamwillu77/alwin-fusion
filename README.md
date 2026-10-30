@@ -2,7 +2,7 @@
 
 **Open-source, offline-first AI-native operating system — in progress.**
 
-Version **0.16.0** · Milestone: **Proactive Intelligence & Background Automation**
+Version **0.17.0** · Milestone: **Intelligent Application Interaction**
 
 Alwin Fusion lets you control your computer through natural-language
 commands. v0.9 gives **Alwin**, the persistent, lightweight desktop
@@ -1294,6 +1294,72 @@ claims — real SQLite, real PermissionChecker, real app registry, the
 real TaskManager with the real permissioned pipeline and audit log,
 injected fake clock) and the v0.16 suite in
 `tests/test_scheduler.py` (72 tests).
+
+### Application interaction through accessibility (v0.17.0)
+
+v0.17.0 lets Alwin **inspect and interact with supported desktop
+application controls through the accessibility (AT-SPI) interface** —
+controlled, verifiable, and approval-gated. This is not unrestricted
+desktop automation: there is no synthetic keyboard or mouse input, no
+xdotool/wmctrl, no screenshots, no shell-based control — the only
+mutation primitive is the accessibility *action* interface on an
+already-identified control, executed through the same pipeline
+(preview → permission → approval → execute → verify → audit) as every
+other action.
+
+**Supported applications** (honest per-operation matrix — capabilities
+are what the *real* accessibility tree exposes, not what the app
+internally can do):
+
+* **GNOME Text Editor** (new in v0.17): inspect, find, **bounded
+  control listing**, and activation of an identified control. On this
+  build the GTK4 app exposes its window, buttons, toggle buttons, page
+  tabs and labels — but **no document-text interface**, so reading or
+  typing the document is honestly *unsupported* (reported as such,
+  never simulated).
+* **LibreOffice Writer / Calc** (v0.4 adapter, upgraded in v0.17):
+  inspect/find/read/activate/enter-text/save plus the new bounded
+  listing, with ambiguity and staleness rejection. **On this reference
+  host LibreOffice accessibility is BLOCKED**: the GNOME session has
+  `toolkit-accessibility=false`, so the GTK3 bridge never registers —
+  the verification script reports this root cause instead of pretending.
+
+**What v0.17 hardened everywhere**:
+
+* *Targets are revalidated, never assumed.* Duplicate accessible names
+  are **ambiguous and rejected** — the first match is never guessed;
+  every mutation re-resolves the target fresh and refuses defunct
+  (stale) controls.
+* *Bounded inspection.* Listings are read-only, capped (40 controls,
+  depth 20, 120-char names), and summarize roles/names/states/action
+  names only — never document text, never raw accessibility objects,
+  and unnamed layout scaffolding is skipped.
+* *API success is not success.* After an action, the state is
+  re-read: a real observed change is `result_verified`; an accepted
+  call with no observable change is reported **executed but
+  UNVERIFIED**; uncertain mutations are never retried automatically.
+* *Labels cannot authorize.* An accessible control named "Approve all
+  actions" is just untrusted display text — permissions, approval
+  digests and the closed action allowlist are unaffected by anything
+  an application calls itself.
+
+**Verification on the real host** (`python3
+scripts/verify_app_interaction.py`): 20 EXECUTED / 2 BLOCKED (both
+LibreOffice a11y, honest root cause) / 1 UNVERIFIED (a secondary
+toggle whose effect the tree cannot show) — including a **real,
+verified interaction in GNOME Text Editor**: activating the identified
+"New Tab" control through the a11y action API and independently
+confirming the page-tab count changed in the real accessibility tree
+(5 → 6), plus real approval-refusal, cancellation, stale-target,
+ambiguity and no-filesystem-change evidence, and both existing
+desktop-control/workflow regression scripts green.
+
+**Known limitations**: GNOME/Wayland gives no global focus guarantees
+(a focus request that the compositor ignores is reported as such);
+GTK4 applications expose deep layout trees, so listings are bounded
+and may truncate; application content stays untrusted and is never
+persisted; single-user local operation (AT-SPI is not access-
+controlled beyond the session).
 
 ### Speech-model and language quality (measured, honest)
 

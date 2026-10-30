@@ -201,6 +201,8 @@ class TestActionValidation(unittest.TestCase):
                 "open_file",
                 "inspect_application",
                 "find_control",
+                # v0.17: bounded read-only control listing.
+                "list_controls",
                 "read_control",
                 "activate_control",
                 "enter_text",

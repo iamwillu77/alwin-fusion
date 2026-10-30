@@ -237,6 +237,8 @@ class TestNoDestructiveCapability(unittest.TestCase):
                 "open_file",
                 "inspect_application",
                 "find_control",
+                # v0.17: bounded read-only control listing.
+                "list_controls",
                 "read_control",
                 "activate_control",
                 "enter_text",
@@ -283,6 +285,7 @@ class TestNoDestructiveCapability(unittest.TestCase):
         for read_only in (
             "inspect_application",
             "find_control",
+            "list_controls",
             "read_control",
             "application_status",
             "active_window",

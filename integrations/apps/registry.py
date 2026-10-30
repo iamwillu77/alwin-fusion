@@ -661,9 +661,13 @@ BUILTIN_INTEGRATIONS = (
     {
         "id": "gnome-text-editor",
         "name": "Text Editor",
-        "version": "1.0.0",
+        # v0.17: minor bump for the added 'automate' capability —
+        # reviewed together with the bounded GnomeTextEditorAdapter
+        # (inspect/find/list/activate only; its real tree exposes no
+        # document-text interface, so read/enter/save stay unsupported).
+        "version": "1.1.0",
         "aliases": ("text editor", "gnome text editor"),
-        "capabilities": ("launch", "open_file"),
+        "capabilities": ("launch", "open_file", "automate"),
         "file_types": (".txt", ".md", ".csv"),
         "detection": {
             "executables": ("gnome-text-editor",),
@@ -675,7 +679,7 @@ BUILTIN_INTEGRATIONS = (
             "arguments": (PATH_TOKEN,),
         },
         "verification": {"strategy": "process_started"},
-        "required_permissions": ("open_file", "launch"),
+        "required_permissions": ("open_file", "launch", "automate"),
         "a11y_names": ("gnome-text-editor",),
     },
     {
