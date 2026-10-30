@@ -205,6 +205,19 @@ class TestActionValidation(unittest.TestCase):
                 "activate_control",
                 "enter_text",
                 "save_document",
+                # v0.13: five desktop-control actions (two read-only:
+                # application_status, active_window; three approval-
+                # gated mutations: launch_application, focus_application,
+                # close_application).  No shell, no signals, no force-
+                # kill, no screenshots: launches are registry-argv-only
+                # and re-observed via /proc, focus/close go through the
+                # accessibility window's own mechanisms and are verified
+                # by re-reading the bus.
+                "launch_application",
+                "application_status",
+                "active_window",
+                "focus_application",
+                "close_application",
                 "task_sequence",
                 "explain",
             },

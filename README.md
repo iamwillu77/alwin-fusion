@@ -2,7 +2,7 @@
 
 **Open-source, offline-first AI-native operating system — in progress.**
 
-Version **0.12.0** · Milestone: **Intelligent Task Planning & Autonomous Execution**
+Version **0.13.0** · Milestone: **Desktop Intelligence & Application Control**
 
 Alwin Fusion lets you control your computer through natural-language
 commands. v0.9 gives **Alwin**, the persistent, lightweight desktop
@@ -145,6 +145,20 @@ execution and verification stay where they were.
     in ...`, `enter "42" into the Search entry in ...`, `save the
     document in LibreOffice Writer to Documents/notes.txt` — read-only
     inspection/finding/reading, approval-gated mutations
+  - **desktop intelligence & application control** (v0.13): launch a
+    registered application without a file (`launch the file manager`),
+    report its installed/running/window state (`application_status`),
+    observe the focused window (`Show me the currently active window`),
+    request focus (`focus ...`) and close a window through its own
+    `window.close` accessibility action (`close the text editor`) —
+    every step registry-validated, approval-gated where it mutates,
+    verified by re-reading real state (/proc, the accessibility bus),
+    and honestly UNVERIFIED when the environment cannot confirm it
+    (e.g. compositors that restrict cross-application focus on
+    Wayland). Launching never implies controllability: per-application
+    tiers (discover / launch / open_file / inspect / window_state /
+    interact, control = interact | open_only) are derived from real
+    evidence, and Nautilus-class apps are open-only for control.
   - **multi-step tasks** (v0.4): `create a folder named Batch in
     Documents then create a file named log.txt in Documents containing
     done` — every step planned, permission-checked and verified
@@ -491,6 +505,19 @@ python3 -m ai_core.cli "Create a folder named Batch in Documents then create a f
 
 # v0.4: see the whole sequence without doing anything
 python3 -m ai_core.cli --dry-run "Inspect the state of LibreOffice Writer then find the Save button in LibreOffice Writer"
+
+# v0.13: desktop intelligence & application control — reached through
+# the task window's planner (--llm; the deterministic CLI parser keeps
+# its own closed phrases). Every step is registry-validated,
+# approval-gated where it mutates, and verified by re-reading real
+# state; unobservable outcomes are reported UNVERIFIED, never faked:
+python3 -m taskui --llm
+#   then type e.g.:  launch the file manager and check its state for me
+#                    Show me the currently active window
+#                    close the text editor and report whether it closed
+# real desktop verification (launches/closes real apps on your live
+# session; all files sandboxed under /tmp):
+python3 scripts/verify_desktop_control.py
 
 # Show effective configuration / probe the local AI runtime
 python3 -m ai_core.cli --show-config
@@ -869,6 +896,101 @@ parser-supported requests on the unchanged path and additionally routes
 clear *task goals* to the manager (where this planning flow runs);
 chat stays conversational. English-language basis, same as the
 deterministic parser (documented limitation).
+
+### Desktop intelligence & application control (v0.13.0)
+
+Alwin can now discover, launch, inspect, focus and close **registered**
+Linux desktop applications — always through the reviewed registry and
+the existing trusted pipeline, and always distinguishing five levels
+of capability (launching never implies controllability):
+
+1. **discover** — the id exists in the reviewed registry; evidence is
+   a resolvable PATH executable and/or a `.desktop` entry filename
+   (`detect_applications`, read-only).
+2. **launch** — can be started *without* a file (`launch_application`:
+   argv built from the registry template, `shell=False`, then
+   re-observed via `/proc` — "request accepted" is never reported as
+   "running" unless the process is actually seen).
+3. **inspect** — its running state is observable (`application_status`:
+   installed/running **tri-state** `True/False/None=unknown` plus
+   bounded, credential-scrubbed window metadata from the accessibility
+   bus when available).
+4. **interact** — may be driven through accessibility APIs (only
+   reviewed integrations with the `automate` capability and present
+   bindings; the pre-v0.4 control actions).
+5. **open-only** — it may be opened and left for the user to drive
+   (e.g. Files/Nautilus: launch, status, focus, close — but never
+   control-level automation).
+
+New closed actions (the allowlist is now **22**, still pinned by
+tests): `launch_application`, `application_status`, `focus_application`,
+`close_application` (all approval-gated except the read-only status
+probe) and `active_window` (read-only observation). Every one validates
+its `application` against the registry — an unknown id is rejected at
+the validation and permission stages before any mechanism exists.
+
+**Honest lifecycle semantics** (verified on the real desktop):
+
+* a launch reports `process_observed: true` only after `/proc` shows
+  the process (comm matching is truncation-safe — the kernel caps comm
+  at 15 characters); otherwise the result is honestly UNVERIFIED,
+* `active_window` reports the focused window via the accessibility
+  `active` state (real evidence on GNOME Wayland), or an honest
+  "no window reports the active state" / "the accessibility bus is not
+  available" — window **titles are bounded, control-char-stripped and
+  credential-scrubbed** (`password: hunter2` → `password: [redacted]`),
+* `focus_application` asks the window's Component interface, falls
+  back to the window's own `default.activate` action, and then
+  **re-reads the active state**: on compositors that restrict
+  cross-application focus (observed: GNOME Wayland refuses
+  `grab_focus` with `atspi_error 1`) the outcome is reported as
+  UNVERIFIED, never as success,
+* `close_application` invokes the window's own `window.close`
+  accessibility action and verifies the **targeted window** (role +
+  title identity) left the bus; an unsaved-work dialog that keeps the
+  window alive is detected and reported — **nothing is ever
+  force-killed, no signal is ever sent**,
+* duplicates: launching an already-running app hands the request to the
+  running instance and says so; verification never claims more than
+  the evidence.
+
+**Per-application tiers** (`application_tiers` in
+`ai_core/capabilities.py`) are derived from real probes (PATH
+executables, registry capabilities, bindings presence) and shown in the
+planning prompt and the status report, so the model can never propose
+"close the calculator" for an application this build can only open.
+
+```bash
+# Real desktop verification (launches/closes real apps on your live
+# session; all files sandboxed under /tmp; exit 0 = every claim
+# evidence-backed):
+python3 scripts/verify_desktop_control.py
+
+# Latest real run on the development machine (GNOME on Wayland, real
+# AT-SPI): 25 EXECUTED, 0 BLOCKED, 0 FAILED — real approval-gated
+# nautilus launch verified via /proc, real window metadata, real
+# active-window report (ptyxis frame), real window.close on the
+# 'Home' frame verified by disappearance, sandboxed
+# create→open→verify workflow in the real Text Editor, declined plan
+# launched nothing, missing-app failure honest.
+```
+
+**Privacy — exactly what desktop metadata is collected**: only when a
+desktop action actually runs, Alwin reads (a) process names from
+`/proc/<pid>/comm` for registered executables, and (b) window *metadata*
+— title, role name, and the boolean `active` flag — from the
+accessibility bus. Titles are sanitized to 80 characters, stripped of
+control characters, and scrubbed of credential-shaped text before they
+enter a record. **No screenshots, no screen contents, no window
+*contents*, no keystrokes, no pointer events, no accessibility-tree
+dumps** are ever captured or retained; nothing leaves the machine.
+
+Known limitations (honest): cross-application focus is refused by some
+compositors (GNOME Wayland) and reported UNVERIFIED; a window that
+exposes no `window.close` action cannot be closed (we never kill
+processes); multi-window applications close the first window
+deterministically (the total count is reported); goal-gate routing is
+English-centric like the deterministic parser.
 
 ### Speech-model and language quality (measured, honest)
 

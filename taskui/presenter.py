@@ -249,6 +249,31 @@ def risk_notes(record: TaskRecord) -> List[str]:
             "desktop hides an application's interface); that is reported "
             "as-is instead of guessed."
         )
+    desktop_actions = {
+        "launch_application",
+        "application_status",
+        "active_window",
+        "focus_application",
+        "close_application",
+    }
+    if any(r["action"] in desktop_actions for r in rows):
+        notes.append(
+            "Desktop operations are verified by re-reading real state, "
+            "never assumed: a launch is only \"done\" once /proc shows the "
+            "process, a close only once the window leaves the accessibility "
+            "bus. On a desktop that hides window state (for example some "
+            "Wayland sessions), Alwin Fusion reports \"unavailable\" or "
+            "\"unverified\" rather than claiming success."
+        )
+    if any(
+        r["action"] in {"launch_application", "focus_application", "close_application"}
+        for r in rows
+    ):
+        notes.append(
+            "Launching, focusing or closing an application needs your "
+            "approval. Closing never force-quits: an unsaved-work dialog "
+            "keeps the window open and is reported, not overridden."
+        )
     return notes
 
 

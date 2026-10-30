@@ -18,6 +18,11 @@ from typing import Iterable, Optional, Sequence
 #: Default kernel process directory (Linux).
 DEFAULT_PROC_ROOT = "/proc"
 
+#: The kernel caps ``/proc/<pid>/comm`` at 15 characters; a longer
+#: executable name is silently truncated there ('gnome-text-editor'
+#: appears as 'gnome-text-edit').
+KERNEL_COMM_CHARS = 15
+
 
 def running_comm_names(proc_root: str = DEFAULT_PROC_ROOT) -> frozenset:
     """Names (``/proc/<pid>/comm``) of every process currently running.
@@ -73,8 +78,17 @@ def any_running(
         for exe in wanted:
             token = exe.lower()
             # 'soffice' matches comm 'soffice.bin'; an exact match
-            # always counts.  Truncation-safe: comm is capped at 15
-            # characters by the kernel, so prefix matching is used.
-            if lowered == token or lowered.startswith(token):
+            # always counts.  Truncation-safe in BOTH directions (real
+            # bug found by the v0.13 live verification): the kernel caps
+            # comm at 15 characters, so a long executable name appears
+            # truncated ('gnome-text-editor' -> comm 'gnome-text-edit').
+            # A comm shorter than the executable counts only when it is
+            # exactly at the kernel cap (so an unrelated short comm like
+            # 'bash' can never match 'bashful-app').
+            if (
+                lowered == token
+                or lowered.startswith(token)
+                or (len(lowered) == KERNEL_COMM_CHARS and token.startswith(lowered))
+            ):
                 return True
     return False

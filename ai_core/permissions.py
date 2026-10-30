@@ -373,6 +373,66 @@ class PermissionChecker:
                 resolved=None,
                 reason="application detection is read-only",
             )
+        # ---- v0.13 desktop intelligence & application control ---------- #
+        elif name in (
+            "launch_application",
+            "application_status",
+            "focus_application",
+            "close_application",
+        ):
+            # Deferred import, like the automation branch above.
+            from integrations.apps.registry import (
+                BUILTIN_REGISTRY,
+                RegistryError,
+            )
+
+            application = action.get("application", "")
+            operation = {
+                "launch_application": "launch",
+                "application_status": "status",
+                "focus_application": "focus",
+                "close_application": "close",
+            }[name]
+            try:
+                definition = BUILTIN_REGISTRY.get(application)
+            except RegistryError as exc:
+                # An unknown application is denied here, before any
+                # launch mechanism could even be considered.
+                return PermissionDecision(
+                    allowed=False,
+                    operation=operation,
+                    requested=str(application),
+                    resolved=None,
+                    reason=str(exc),
+                )
+            mutation = name in (
+                "launch_application",
+                "focus_application",
+                "close_application",
+            )
+            return PermissionDecision(
+                allowed=True,
+                operation=operation,
+                requested=definition.id,
+                resolved=None,
+                reason=(
+                    "registered application; the operation still requires "
+                    "user approval" if mutation
+                    else "read-only state probe of a registered application"
+                ),
+            )
+        elif name == "active_window":
+            # Read-only observation of window *metadata* (title/role/
+            # active flag) through the accessibility bus.  No screen
+            # content, no titles, nothing is retained beyond the
+            # bounded record fields.
+            return PermissionDecision(
+                allowed=True,
+                operation="observe",
+                requested="active window",
+                resolved=None,
+                reason="read-only desktop observation via the accessibility bus",
+            )
         else:
             return PermissionDecision(
                 allowed=False,

@@ -177,6 +177,39 @@ class AtspiSession:
                     stack.append((child, depth + 1))
         return None
 
+    def find_all(self, root, locator: ControlLocator,
+                 *, max_matches: int = 5) -> List:
+        """Every node matching *locator*, bounded (v0.13).
+
+        Same bounds as :meth:`find_in`; returns at most *max_matches*
+        nodes so a caller can detect an ambiguous locator (several
+        controls share the role/name) instead of silently acting on
+        the first one.
+        """
+        wanted_role = normalize_role(locator.role)
+        wanted_name = normalize_name(locator.name)
+        matches: List = []
+        visited = 0
+        stack: List[Tuple[object, int]] = [(root, 0)]
+        while stack:
+            node, depth = stack.pop()
+            if depth > self.max_depth:
+                continue
+            visited += 1
+            if visited > self.max_nodes:
+                break  # bounded: an oversized tree is not searched
+            if self.role(node) == wanted_role and (
+                not wanted_name
+                or normalize_name(self.name(node)) == wanted_name
+            ):
+                matches.append(node)
+                if len(matches) >= max_matches:
+                    break
+            if depth < self.max_depth:
+                for child in reversed(self.children(node)):
+                    stack.append((child, depth + 1))
+        return matches
+
     def walk(self, root, *, max_nodes: Optional[int] = None):
         """Yield ``(node, depth)`` pairs with hard bounds (for inspection)."""
         limit = max_nodes or self.max_nodes
@@ -235,6 +268,58 @@ class AtspiSession:
         except Exception as exc:  # noqa: BLE001 - app exited mid-action
             raise BackendError(f"the control action failed ({exc})") from exc
 
+    def do_named_action(self, node, names) -> Optional[str]:
+        """Invoke the first accessibility action named in *names* (v0.13).
+
+        Returns the action name that was invoked, or ``None`` when the
+        node exposes none of them.  Used for the window-level lifecycle
+        actions (``window.close``) that GNOME/KDE expose on frames —
+        still no keys, no mouse, no signals.
+        """
+        wanted = {str(n).lower() for n in names}
+        get_n = getattr(node, "get_n_actions", None)
+        get_name = getattr(node, "get_action_name", None)
+        if get_n is None or get_name is None:
+            return None
+        try:
+            count = int(get_n())
+        except Exception:  # noqa: BLE001
+            return None
+        for index in range(max(0, count)):
+            try:
+                name = str(get_name(index) or "")
+            except Exception:  # noqa: BLE001
+                continue
+            if name.lower() in wanted:
+                self.do_action(node, index)
+                return name
+        return None
+
+    def grab_focus(self, node) -> bool:
+        """Focus *node* via the accessibility Component interface (v0.13).
+
+        Returns False when the node exposes no component interface;
+        raises :class:`BackendError` when the request itself fails (a
+        dead application/bus).  No keyboard or mouse events are ever
+        synthesized.
+        """
+        get_component = getattr(node, "get_component_iface", None)
+        if get_component is None:
+            return False
+        try:
+            component = get_component()
+        except Exception as exc:  # noqa: BLE001
+            raise BackendError(f"the focus request failed ({exc})") from exc
+        if component is None:
+            return False
+        grab = getattr(component, "grab_focus", None)
+        if grab is None:
+            return False
+        try:
+            return bool(grab())
+        except Exception as exc:  # noqa: BLE001
+            raise BackendError(f"the focus request failed ({exc})") from exc
+
     def set_text(self, node, text: str) -> bool:
         """Replace an input field's contents (``EditableText``)."""
         setter = getattr(node, "set_text_contents", None)
@@ -254,12 +339,27 @@ class AtspiSession:
             raise BackendError(f"text entry failed ({exc})") from exc
 
     def states(self, node) -> Tuple[str, ...]:
-        """A11y state names (e.g. ``checked``) — used to confirm changes."""
+        """A11y state names (e.g. ``active``, ``defunct``) — used for
+        focus/active/liveness checks.
+
+        Handles both binding styles: pyatspi-style objects with
+        ``.name``/``get_name()``, and the ``gi`` GObject-introspection
+        binding where ``get_state_set()`` yields ``StateType`` enums
+        (``value_nick`` like ``'active'``).  The gi path is the real
+        one on this machine — the pre-v0.13 implementation returned
+        ``()`` there because the enums expose no ``get_name`` (real
+        bug found during the v0.13 environment audit).
+        """
         getter = getattr(node, "get_state", None)
         states = getattr(node, "get_states", None)
+        state_set = getattr(node, "get_state_set", None)
         raw = None
         try:
-            if states is not None:
+            if state_set is not None:
+                ss = state_set()
+                ss_get = getattr(ss, "get_states", None)
+                raw = ss_get() if ss_get is not None else ss
+            elif states is not None:
                 raw = states()
             elif getter is not None:
                 raw = getter()
@@ -269,12 +369,20 @@ class AtspiSession:
             return ()
         out = []
         for item in raw:
-            name = getattr(item, "name", None)
-            if name is None and hasattr(item, "get_name"):
-                try:
-                    name = item.get_name()
-                except Exception:  # noqa: BLE001
-                    name = None
+            name = None
+            nick = getattr(item, "value_nick", None)  # gi StateType enum
+            if isinstance(nick, str) and nick:
+                name = nick
+            else:
+                name = getattr(item, "name", None)
+                if name is None and hasattr(item, "get_name"):
+                    try:
+                        name = item.get_name()
+                    except Exception:  # noqa: BLE001
+                        name = None
             if isinstance(name, str) and name:
-                out.append(name.lower())
+                lowered = name.lower()
+                if lowered.startswith("atspi_state_"):
+                    lowered = lowered[len("atspi_state_"):]
+                out.append(lowered)
         return tuple(sorted(set(out)))

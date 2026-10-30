@@ -119,6 +119,7 @@ class TaskManager:
         pipeline_factory: Optional[Callable[[TaskRecord], TaskPipeline]] = None,
         automation_tools=None,
         app_tools=None,
+        desktop_tools=None,
         on_update: Optional[Callable[[TaskRecord], None]] = None,
         step_observer: Optional[Callable[..., None]] = None,
     ) -> None:
@@ -131,6 +132,7 @@ class TaskManager:
 
         self._automation_tools = automation_tools
         self._app_tools = app_tools
+        self._desktop_tools = desktop_tools
         self._pipeline_factory = pipeline_factory
 
         self._lock = threading.RLock()
@@ -325,6 +327,7 @@ class TaskManager:
             checker,
             app_tools=self._app_tools,
             automation_tools=self._automation_tools,
+            desktop_tools=self._desktop_tools,
             step_observer=_step,
         )
         return TaskPipeline(

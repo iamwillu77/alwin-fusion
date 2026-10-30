@@ -1,4 +1,4 @@
-"""Voice interface for the Alwin companion (v0.12.0) — the engine seam.
+"""Voice interface for the Alwin companion (v0.13.0) — the engine seam.
 
 This module defines the **small, replaceable interface**
 (``VoiceEngine``: speak/stop/status/available) that the companion

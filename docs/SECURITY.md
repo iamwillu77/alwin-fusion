@@ -1,6 +1,6 @@
 # Alwin Fusion — Security Model and Limitations
 
-Version: 0.12.0 — Milestone: Intelligent Task Planning & Autonomous Execution
+Version: 0.13.0 — Milestone: Desktop Intelligence & Application Control
 
 This document states what the prototype defends against, how, and —
 importantly — **what it does not defend against**. Passing tests does
@@ -262,6 +262,60 @@ clicking, shell or arbitrary command execution, automating
 unregistered applications, typing into document bodies, hidden or
 unattended sensitive actions (every mutation is individually
 approved), disabling desktop security, and any auto-install.
+
+### 2e. Desktop intelligence & application control (v0.13)
+
+**Registry-scoped lifecycle only.** The five new desktop actions
+(`launch_application`, `application_status`, `active_window`,
+`focus_application`, `close_application`) accept **only** an
+application id resolved against the closed registry. Validation
+rejects unknown ids (`PlanValidationError`) and the permission branch
+denies them again (defence in depth); there is no executable path, no
+command string and no model-generated text anywhere in the launch
+flow — the argv is the reviewed registry template with `{path}`
+dropped, executed with `shell=False`.
+
+**No process termination, ever.** `close_application` invokes only
+the window's own `window.close` (or `close`/`quit`) accessibility
+action and then *observes* whether the targeted window left the
+accessibility bus. No signal constant (`SIGTERM`, `SIGKILL`), no
+`kill`, no `popen("kill ...")` exists in the desktop controller; the
+test suite pins the absence of `os.kill`, `signal`, `SIGKILL` and
+`terminate(` in `integrations/apps/desktop.py`. A modal dialog (e.g.
+unsaved work) that keeps the window open is detected and reported —
+Alwin never overrides it.
+
+**Untrusted accessibility content.** Window titles come from other
+applications and are treated as hostile input: bounded (80 chars),
+control-character stripped, and scrubbed of credential-shaped text
+(`password:`, `token=`, `Bearer …`) by a deterministic regex before
+they can enter a task record, the audit log or the UI. An
+application window cannot authorize anything: no action is ever
+derived from window contents, and a prompt-injection payload in a
+title or document cannot add a step, change a digest or alter the
+permission policy (the pipeline only ever sees closed-set validated
+actions).
+
+**Observation minimization.** The only desktop metadata collected is
+(a) `/proc/<pid>/comm` names for registered executables (process
+presence) and (b) window title, role name and the boolean `active`
+flag from the accessibility bus — read only when a desktop action
+actually runs. No screenshots, no screen or window *contents*, no
+keystrokes, no pointer events, no accessibility-tree dumps, and
+nothing is persisted beyond the bounded audit fields. Everything is
+local; no network API exists in this path.
+
+**Approval and verification.** `launch_application`,
+`focus_application` and `close_application` are derived-mutating
+(pinned to the trusted `MUTATING_ACTIONS` set) and require the same
+digest-bound approval as filesystem mutations;
+`application_status` and `active_window` are read-only and run
+without approval, exactly like `detect_applications`. Verification
+never exceeds the evidence: a launch passes only with
+`process_observed`, focus only with the re-read `active` state, a
+close only with the window's disappearance; otherwise the step is
+FAILED with an explicit UNVERIFIED message and the task lands in
+`needs_attention` — never "completed".
 
 ### 2b. Structured content validation (v0.2)
 
@@ -1074,6 +1128,43 @@ New surface introduced by v0.6, stated honestly:
     companion smoke test, headless `--check`/`--smoke` and programmatic
     checks. Companion settings (`companion_settings.json`) are
     cosmetic-only and not tamper-proof (see 3d, new surface 1).
+34. **Desktop control is bounded by what the accessibility bus
+    exposes — and compositors may refuse focus** (v0.13). Real
+    observation on GNOME/Wayland: the Component `grab_focus` request
+    is refused (`atspi_error 1`, cross-application focus is
+    restricted by design); the controller falls back to the window's
+    own `default.activate` action and then *verifies* by re-reading
+    the active state — on this desktop the result is honestly
+    UNVERIFIED/BLOCKED, never a claimed success. A window exposing
+    no `window.close` action cannot be closed (Alwin never kills
+    processes); an unsaved-work dialog keeps the window open and is
+    reported, not overridden.
+35. **Window identity for close verification is role + title** (v0.13).
+    The targeted window is considered gone when no window of that
+    application matches the same role and sanitized title. Two windows
+    of the same application with identical role and title are
+    indistinguishable — closing one while an identical twin remains
+    would honestly report the close as unverified (the poll still
+    sees a match), never as a false success. Multi-window applications
+    close the *first* window deterministically; the total count is
+    reported so the caller can see the ambiguity.
+36. **A launched application is outside Alwin's control — same
+    boundary as limitation 16, now also for bare launches** (v0.13).
+    `launch_application` starts a registered application with your
+    privileges; Alwin does not sandbox, monitor or constrain it
+    afterwards. `/proc` re-observation confirms the *process* only;
+    no window, document or behaviour claim follows from it. Duplicate
+    launches are handed to the running instance (application-defined
+    behaviour) and reported as such.
+37. **Desktop metadata handling is best-effort sanitizing** (v0.13).
+    Window titles from other applications are untrusted: bounded,
+    control-char stripped and scrubbed of credential-shaped text by
+    deterministic regexes. A credential format the regex does not
+    recognise would pass through into a task record/audit entry
+    (bounded to 80 chars); the scrubber errs toward over-redacting
+    common patterns (`password:`, `token=`, `Bearer …`), it is not a
+    general secret detector. No window *contents* are ever read, so
+    secrets inside documents never reach Alwin at all.
 
 ## Reporting security issues
 

@@ -1,4 +1,4 @@
-"""Capability discovery for plan-time honesty (v0.12.0).
+"""Capability discovery for plan-time honesty (v0.13.0).
 
 Answers one question before any planning happens: *what can this
 installation actually do right now?*  Every answer is a probe of real
@@ -25,6 +25,7 @@ propose what is listed), (b) plan validation hints, and (c) honest
 from __future__ import annotations
 
 import importlib.util
+import shutil
 import time
 from typing import Any, Callable, Dict, Optional
 
@@ -51,10 +52,81 @@ def _atspi_bindings_present(finder: Callable[[str], Any]) -> bool:
     return _module_available("gi", finder)
 
 
+def _executable_present(definition,
+                        which: Callable[[str], Optional[str]]) -> bool:
+    for candidate in (
+        definition.launch.executable,
+        definition.launch.fallback_executable,
+    ):
+        if not candidate:
+            continue
+        try:
+            found = which(candidate)
+        except Exception:  # noqa: BLE001 - a broken which() means unknown
+            found = None
+        if isinstance(found, str) and found:
+            return True
+    return False
+
+
+def application_tiers(
+    *,
+    which: Optional[Callable[[str], Optional[str]]] = None,
+    automation_bindings: bool,
+    registry=BUILTIN_REGISTRY,
+) -> Dict[str, Dict[str, Any]]:
+    """Per-application control tiers, derived from evidence (v0.13).
+
+    The five distinctions the milestone requires — never claimed,
+    always derived:
+
+    * ``discover`` — the id exists in the reviewed registry (the
+      discovery probe is ``detect_applications``),
+    * ``launch`` — can be started *without* a file (bare argv) and its
+      launch executable resolves on PATH right now,
+    * ``inspect`` — its running state can be observed via ``/proc``
+      (every registered application qualifies),
+    * ``interact`` — may be driven through accessibility APIs (the
+      reviewed ``automate`` capability AND the bindings are present),
+    * everything else is **open-only for control**: it may be opened
+      and left for the user to drive.  Launching never implies
+      controllability.
+
+    ``window_state`` (a11y window metadata) is added when the bindings
+    exist and the definition names its accessibility-bus identity;
+    whether a specific window is observable is runtime evidence
+    reported by ``application_status``, not a plan-time claim.
+    """
+    finder = which if which is not None else shutil.which
+    out: Dict[str, Dict[str, Any]] = {}
+    for definition in registry.definitions:
+        installed = _executable_present(definition, finder)
+        tiers = ["discover"]
+        if definition.launches_bare and installed:
+            tiers.append("launch")
+        if definition.opens_files and installed:
+            tiers.append("open_file")
+        # /proc process observation works for every registered app.
+        tiers.append("inspect")
+        if automation_bindings and definition.a11y_names:
+            tiers.append("window_state")
+        if automation_bindings and "automate" in definition.capabilities:
+            tiers.append("interact")
+        out[definition.id] = {
+            "tiers": tuple(tiers),
+            "installed": installed,
+            "control": (
+                "interact" if "interact" in tiers else "open_only"
+            ),
+        }
+    return out
+
+
 def discover_capabilities(
     *,
     llm_available: bool = False,
     spec_finder: Optional[Callable[[str], Any]] = None,
+    which: Optional[Callable[[str], Optional[str]]] = None,
 ) -> Dict[str, Any]:
     """Probe the real installation and return a JSON-able snapshot."""
     finder = spec_finder or importlib.util.find_spec
@@ -65,6 +137,8 @@ def discover_capabilities(
         "create_pdf": _module_available("reportlab", finder),
     }
     app_ids = [str(a) for a in getattr(BUILTIN_REGISTRY, "ids", ())]
+    bindings = _atspi_bindings_present(finder)
+    tiers = application_tiers(which=which, automation_bindings=bindings)
 
     # MCP truth: the manifest itself declares "descriptors only".
     mcp_status = "descriptors_only_no_server"
@@ -82,7 +156,10 @@ def discover_capabilities(
         "documents": documents,
         "applications": app_ids[:MAX_APP_IDS],
         "applications_total": len(app_ids),
-        "automation_bindings": _atspi_bindings_present(finder),
+        "application_tiers": {
+            k: v for k, v in list(tiers.items())[:MAX_APP_IDS]
+        },
+        "automation_bindings": bindings,
         "llm": bool(llm_available),
         "mcp": {
             "status": mcp_status,
@@ -114,6 +191,11 @@ def missing_for(action: str, caps: Dict[str, Any]) -> Optional[str]:
             and not caps.get("automation_bindings"):
         return ("desktop automation needs the python3-gi + "
                 "gir1.2-atspi-2.0 bindings; they are not installed.")
+    if action in ("active_window", "focus_application", "close_application") \
+            and not caps.get("automation_bindings"):
+        return (f"'{action}' needs the accessibility bus (python3-gi + "
+                "gir1.2-atspi-2.0); the bindings are not installed, so the "
+                "operation cannot be performed or verified honestly.")
     return None
 
 
@@ -147,6 +229,7 @@ class CapabilityCache:
 __all__ = [
     "DEFAULT_CAPABILITY_TTL",
     "CapabilityCache",
+    "application_tiers",
     "discover_capabilities",
     "missing_for",
 ]

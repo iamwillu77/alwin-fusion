@@ -1,4 +1,4 @@
-"""Bedroom scene model for the Alwin companion (v0.12.0).
+"""Bedroom scene model for the Alwin companion (v0.13.0).
 
 This module is the **renderer-independent world model**: it knows *where*
 Alwin is in his bedroom, *where* he can walk, and *which* scene commands

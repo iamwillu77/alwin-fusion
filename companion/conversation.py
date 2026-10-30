@@ -1,4 +1,4 @@
-"""Shared conversation pipeline for typed and spoken input (v0.12.0).
+"""Shared conversation pipeline for typed and spoken input (v0.13.0).
 
 One service takes *any* user utterance — typed in the task window or
 recognized from the microphone — and drives it through exactly the

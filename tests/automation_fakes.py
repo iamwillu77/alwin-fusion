@@ -50,6 +50,25 @@ class FakeState:
         self.name = name
 
 
+class FakeComponent:
+    """Accessibility Component interface stand-in (v0.13 focus tests)."""
+
+    def __init__(self, node: "FakeNode") -> None:
+        self._node = node
+
+    def grab_focus(self) -> bool:
+        node = self._node
+        if node.focus_raises:
+            # Real GNOME/Wayland observation: GLib.Error('atspi_error', 1)
+            raise RuntimeError("atspi_error: (1)")
+        if node.focus_refused:
+            return False
+        node.focus_requested += 1
+        if node.on_focus is not None:
+            node.on_focus()
+        return True
+
+
 class FakeNode:
     """An in-memory accessible with the GObject-style AT-SPI surface.
 
@@ -86,6 +105,12 @@ class FakeNode:
         self.action_raises = False
         self.corrupt_set_text = False
         self.on_action: Optional[Callable[[], None]] = None
+        # v0.13 focus surface (frames have a Component interface).
+        self.focus_requested = 0
+        self.focus_refused = False
+        self.focus_raises = False  # compositor refusal (GNOME/Wayland)
+        self.on_focus: Optional[Callable[[], None]] = None
+        self.get_component_iface = lambda: FakeComponent(self)  # type: ignore[attr-defined]
 
         if text is not None:
             # Only text-exposing nodes have the text interface.

@@ -1,4 +1,4 @@
-"""LLM-assisted task planning with trusted validation (v0.12.0).
+"""LLM-assisted task planning with trusted validation (v0.13.0).
 
 Separates *proposing* from *deciding*: the local model may propose a
 structured plan, a clarifying question, or a decline — nothing else —
@@ -203,10 +203,16 @@ def _scrub(message: str) -> str:
 
 _GOAL_OBJECT_RE = re.compile(
     r"\b(files?|folders?|directories|report|reports|spreadsheet|excel|"
-    r"pdf|document|documents|csv|expenses?|directory)\b", re.IGNORECASE)
+    r"pdf|document|documents|csv|expenses?|directory|"
+    # v0.13 desktop objects (so "Open LibreOffice." and "Show me the
+    # currently active window" reach planning at all):
+    r"libreoffice|writer|calc|start center|file manager|text editor|"
+    r"editor|applications?|apps?|windows?|desktop)\b", re.IGNORECASE)
 _GOAL_VERB_RE = re.compile(
     r"\b(create|make|open|read|list|show|check|save|export|generate|"
-    r"build|write|convert)\b", re.IGNORECASE)
+    r"build|write|convert|"
+    # v0.13 desktop verbs:
+    r"launch|start|close|quit|focus|activate|inspect)\b", re.IGNORECASE)
 _GOAL_ANALYZE_RE = re.compile(
     r"\b(summariz|summaris|analy[sz])\w*\b", re.IGNORECASE)
 #: Weaker verbs need an object too (weather "comparison" is chat).
@@ -277,11 +283,33 @@ class TaskPlanningService:
             "(open_file requires an \"application\" id such as "
             "\"default\" or a registry id; use read_file to READ a "
             "file's contents — do not open files just to read them).",
+        ]
+        # v0.13: per-application control tiers, so the model never
+        # proposes interacting with an application it may only open.
+        tiers = caps.get("application_tiers") or {}
+        if tiers:
+            parts = []
+            for app_id, info in list(tiers.items())[:12]:
+                control = info.get("control", "open_only")
+                installed = "installed" if info.get("installed") else "not-installed"
+                parts.append(f"{app_id}({installed},control={control})")
+            lines.append(
+                "Applications (id: install state, control tier). "
+                "control=interact apps additionally support control-level "
+                "automation (find_control/read_control/activate_control/"
+                "enter_text/save_document); launch_application/"
+                "application_status/focus_application/close_application/"
+                "active_window work per-app and are verified honestly at "
+                "runtime (a close can be refused, e.g. unsaved work; a "
+                "launch that cannot be re-observed reports UNVERIFIED): "
+                + ", ".join(parts) + "."
+            )
+        lines.extend([
             "Desktop automation bindings: "
             + ("present" if caps.get("automation_bindings") else "MISSING"),
             "MCP: " + str(caps.get("mcp", {}).get(
                 "note", "descriptors only, not executable")),
-        ]
+        ])
         return " ".join(lines)
 
     # -- context --------------------------------------------------------- #

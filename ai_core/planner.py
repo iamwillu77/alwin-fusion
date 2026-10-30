@@ -48,6 +48,12 @@ ACTION_SCHEMA: dict[str, frozenset] = {
     "activate_control": frozenset({"action", "application", "control"}),
     "enter_text": frozenset({"action", "application", "control", "content"}),
     "save_document": frozenset({"action", "application", "path"}),
+    # ---- v0.13 desktop intelligence & application control (closed) ----
+    "launch_application": frozenset({"action", "application"}),
+    "application_status": frozenset({"action", "application"}),
+    "active_window": frozenset({"action"}),
+    "focus_application": frozenset({"action", "application"}),
+    "close_application": frozenset({"action", "application"}),
     "task_sequence": frozenset({"action", "steps"}),
     "explain": frozenset({"action", "target"}),
 }
@@ -85,6 +91,14 @@ MUTATING_ACTIONS = frozenset(
         "activate_control",
         "enter_text",
         "save_document",
+        # v0.13: starting an application changes the desktop, focusing a
+        # window changes the user's focus, closing a window may discard
+        # unsaved work — all three need approval.  The read-only
+        # desktop probes (application_status, active_window) stay out,
+        # exactly like detect_applications and inspect_application.
+        "launch_application",
+        "focus_application",
+        "close_application",
         "task_sequence",
     }
 )
@@ -134,6 +148,11 @@ KNOWN_ROLES = frozenset(
         "toggle button",
         "tool bar",
         "window",
+        # v0.13: dialogs (e.g. an unsaved-work prompt) may be *named* in
+        # a locator; nothing can be typed into them unless the role is
+        # also 'entry', and every mutation still needs approval.
+        "alert",
+        "dialog",
     }
 )
 
@@ -379,6 +398,35 @@ def validate_action(payload: object) -> dict:
                 f"milestone (got '{suffix or 'no extension'}')."
             )
         return {"action": action, "application": application, "path": path}
+
+    # ---- v0.13 desktop intelligence & application control ------------- #
+    # No path is involved: the target is an application *id* resolved
+    # against the trusted registry (or nothing at all, for the
+    # read-only active-window probe).  Reaching the generic path
+    # validation below would reject these correctly-shaped actions.
+    if action in (
+        "launch_application",
+        "application_status",
+        "focus_application",
+        "close_application",
+    ):
+        try:
+            application = resolve_integration_id(
+                payload.get("application"), BUILTIN_REGISTRY
+            )
+        except RegistryError as exc:
+            raise PlanValidationError(str(exc)) from exc
+        if not application:
+            raise PlanValidationError(
+                f"'{action}' needs an 'application' id (a registry id, name "
+                f"or alias such as 'libreoffice' or 'file manager')."
+            )
+        return {"action": action, "application": application}
+
+    if action == "active_window":
+        # Deliberately takes no arguments: the currently active window
+        # is observed, not selected (no title, no target, no guessing).
+        return {"action": action}
 
     path = _validate_path(payload.get("path"))
 

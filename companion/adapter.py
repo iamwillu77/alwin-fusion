@@ -1,4 +1,4 @@
-"""Task-event adapter for the Alwin companion (v0.12.0).
+"""Task-event adapter for the Alwin companion (v0.13.0).
 
 This is the *only* bridge between the trusted task experience
 (:class:`taskui.manager.TaskManager` / :class:`taskui.lifecycle.TaskRecord`)

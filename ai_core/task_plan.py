@@ -1,4 +1,4 @@
-"""Typed, validated task plans for Alwin Fusion (v0.12.0).
+"""Typed, validated task plans for Alwin Fusion (v0.13.0).
 
 A *plan* is an ordered, dependency-carrying list of **already-closed-
 set actions** — never arbitrary code, never model-generated shell.  The

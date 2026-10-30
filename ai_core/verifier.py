@@ -301,6 +301,16 @@ class Verifier:
         if name in ("create_report", "create_pdf", "create_spreadsheet"):
             return self._verify_document(name, action, checks)
 
+        # ---- v0.13 desktop intelligence & application control ---------- #
+        if name in (
+            "launch_application",
+            "application_status",
+            "active_window",
+            "focus_application",
+            "close_application",
+        ):
+            return self._verify_desktop(name, action, execution, checks)
+
         # ---- v0.4 desktop automation --------------------------------- #
         if name in (
             "inspect_application",
@@ -807,6 +817,188 @@ class Verifier:
                 else "Verification failed: the file change could not be "
                 "confirmed against the recorded digest, so NO save is "
                 "reported (state unknown)."
+            ),
+            checks=checks,
+        )
+
+    def _verify_desktop(
+        self,
+        name: str,
+        action: dict,
+        execution: ExecutionResult,
+        checks: List[Dict],
+    ) -> VerificationResult:
+        """v0.13 desktop operations: verify only what the evidence shows.
+
+        A launched *process* is never proof that a window appeared; a
+        focus request is only verified by the re-read ``active`` state;
+        a close is only verified by the window's disappearance.  When
+        the evidence is missing the result is FAILED with an explicit
+        "unverified" message — never a success.
+        """
+        data = execution.data or {}
+
+        if name == "launch_application":
+            requested = self._add(
+                checks,
+                "launch_requested",
+                data.get("launch_requested") is True,
+                str(data.get("detail") or "no launch detail reported"),
+            )
+            observed = self._add(
+                checks,
+                "process_observed",
+                data.get("process_observed") is True,
+                "re-observed via /proc" if data.get("process_observed") is True
+                else "the process was NOT observed after the request",
+            )
+            known_app = self._add(
+                checks,
+                "registered_application",
+                bool(data.get("application")),
+                str(data.get("application") or "missing"),
+            )
+            ok = requested and observed and known_app
+            return VerificationResult(
+                status=STATUS_PASSED if ok else STATUS_FAILED,
+                message=(
+                    "Verified: the application process was started and is "
+                    "observed running (this confirms the process only — no "
+                    "claim is made about its window)."
+                    if ok
+                    else "UNVERIFIED: the launch request was accepted but the "
+                    "application process was not observed; startup is not "
+                    "reported as successful."
+                ),
+                checks=checks,
+            )
+
+        if name == "application_status":
+            well_formed = self._add(
+                checks,
+                "report_well_formed",
+                data.get("application") == action.get("application")
+                and isinstance(data.get("installed"), bool)
+                and data.get("running") in (True, False, None)
+                and data.get("a11y") in ("available", "unavailable"),
+                f"installed={data.get('installed')} running={data.get('running')} "
+                f"a11y={data.get('a11y')}",
+            )
+            windows_bounded = self._add(
+                checks,
+                "windows_bounded",
+                isinstance(data.get("windows"), (list, type(None)))
+                and len(data.get("windows") or []) <= 8,
+                f"{len(data.get('windows') or [])} window(s) reported",
+            )
+            ok = well_formed and windows_bounded
+            return VerificationResult(
+                status=STATUS_PASSED if ok else STATUS_FAILED,
+                message=(
+                    "Status report verified as internally honest "
+                    "(read-only; /proc + accessibility metadata)."
+                    if ok
+                    else "Verification failed: the status report is malformed."
+                ),
+                checks=checks,
+            )
+
+        if name == "active_window":
+            source_ok = self._add(
+                checks,
+                "atspi_backed",
+                data.get("source") == "atspi",
+                str(data.get("source")),
+            )
+            if data.get("active") is True:
+                shape_ok = self._add(
+                    checks,
+                    "window_metadata_present",
+                    isinstance(data.get("title"), str)
+                    and isinstance(data.get("role"), str)
+                    and bool(data.get("application")),
+                    f"'{data.get('title')}' ({data.get('role')})",
+                )
+            else:
+                shape_ok = self._add(
+                    checks,
+                    "honest_empty_reported",
+                    data.get("active") is None and bool(data.get("detail")),
+                    str(data.get("detail")),
+                )
+            ok = source_ok and shape_ok
+            return VerificationResult(
+                status=STATUS_PASSED if ok else STATUS_FAILED,
+                message=(
+                    "Active-window report verified: it carries only bounded "
+                    "accessibility metadata (title/role/active flag) from a "
+                    "live accessibility session."
+                    if ok
+                    else "Verification failed: the active-window report lacks "
+                    "its accessibility backing."
+                ),
+                checks=checks,
+            )
+
+        if name == "focus_application":
+            already = data.get("already_active") is True
+            delivered = self._add(
+                checks,
+                "focus_delivered",
+                data.get("focus_delivered") is True or already,
+                str(data.get("mechanism"))
+                + (" (already active — no request needed)" if already else ""),
+            )
+            active = self._add(
+                checks,
+                "became_active",
+                data.get("became_active") is True,
+                "the window reports the active state"
+                if data.get("became_active") is True
+                else "the window never reported the active state",
+            )
+            ok = delivered and active
+            return VerificationResult(
+                status=STATUS_PASSED if ok else STATUS_FAILED,
+                message=(
+                    "Focus verified: the window reports the active "
+                    "accessibility state (delivered request or confirmed "
+                    "already-active)."
+                    if ok
+                    else "UNVERIFIED: the focus request was delivered but the "
+                    "window never became active (some compositors, e.g. "
+                    "GNOME Wayland, restrict cross-application focus); focus "
+                    "is not reported as successful."
+                ),
+                checks=checks,
+            )
+
+        # name == "close_application"
+        closed = self._add(
+            checks,
+            "window_disappeared",
+            data.get("closed_confirmed") is True,
+            "the window vanished from the accessibility bus"
+            if data.get("closed_confirmed") is True
+            else "the window was still present after the close request",
+        )
+        action_used = self._add(
+            checks,
+            "close_action_reported",
+            bool(data.get("action_used")),
+            str(data.get("action_used") or "no accessibility close action"),
+        )
+        ok = closed and action_used
+        return VerificationResult(
+            status=STATUS_PASSED if ok else STATUS_FAILED,
+            message=(
+                "Close verified: the window is gone from the accessibility "
+                "bus (no signal or force-kill was ever used; the process "
+                f"state after: {data.get('running_after')})."
+                if ok
+                else "UNVERIFIED: the close request did not remove the window "
+                "(an unsaved-work dialog or a refusing application keeps it "
+                "open); nothing was forced."
             ),
             checks=checks,
         )

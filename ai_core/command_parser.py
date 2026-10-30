@@ -939,6 +939,46 @@ def _parse_read(text: str, raw: str) -> Optional[ParsedIntent]:
     name = name.strip("\"'")
     if not name:
         return _unsupported("Tell me which file to read, e.g. 'Read notes.txt in Documents'.", raw)
+
+    # v0.13 routing: 'Open LibreOffice.' / 'Open the file manager.' name
+    # a REGISTERED APPLICATION, not a file.  Claiming them as read_file
+    # would fail on a nonexistent path and never reach the planner, so
+    # they stay unsupported here and the task-goal gate routes them to
+    # the desktop controller.  The check uses the FULL target (the read
+    # regex's optional '(the |file )' prefixes are greedy and would
+    # otherwise shred 'the file manager' down to 'manager'); only
+    # extension-less targets that resolve exactly to a registry
+    # id/name/alias are diverted ('notes.txt', 'report final', 'my
+    # essay' and every real file name are untouched, and a target with
+    # a location or 'with <app>' never matches the registry).
+    candidate = re.sub(r"^(?:read|open|cat)\s+", "", text, flags=re.IGNORECASE).strip()
+    variants = {candidate.strip(" .?!'\"")}
+    for _ in range(3):
+        # Each stripping stage is a candidate: the read regex's greedy
+        # '(file )?' would otherwise shred 'the file manager' to
+        # 'manager', so 'file manager' must be tried before it is
+        # stripped away.
+        candidate = re.sub(
+            r"^(?:(?:my|the|file)\s+)", "", candidate, flags=re.IGNORECASE
+        ).strip()
+        variants.add(candidate.strip(" .?!'\""))
+    if any(v and "." not in v for v in variants):
+        from integrations.apps.registry import (
+            BUILTIN_REGISTRY,
+            RegistryError,
+            resolve_integration_id,
+        )
+
+        for v in variants:
+            if not v or "." in v:
+                continue
+            try:
+                resolve_integration_id(v, registry=BUILTIN_REGISTRY)
+            except RegistryError:
+                continue
+            else:
+                return None
+
     return ParsedIntent(
         READ_FILE, {"name": name, "location": normalize_location(location)}, raw
     )

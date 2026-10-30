@@ -1,4 +1,4 @@
-"""Wake-word service for the Alwin companion (v0.12.0).
+"""Wake-word service for the Alwin companion (v0.13.0).
 
 A **local, two-stage** wake-word detector with an explicit
 microphone-ownership contract — hands-free "Hey Alwin" without giving

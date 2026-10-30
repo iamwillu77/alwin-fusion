@@ -22,6 +22,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable, Dict
 
+from integrations.apps.desktop import DesktopController, make_desktop_handlers
 from integrations.apps.tools import ApplicationTools, make_app_handlers
 from integrations.automation.sequence import TaskSequenceRunner
 from integrations.automation.tools import AutomationTools, make_automation_handlers
@@ -95,6 +96,7 @@ def build_default_dispatcher(
     *,
     app_tools: "ApplicationTools | None" = None,
     automation_tools: "AutomationTools | None" = None,
+    desktop_tools: "DesktopController | None" = None,
     step_observer: "Callable[..., None] | None" = None,
 ) -> ActionDispatcher:
     """Dispatcher with the filesystem, document, application and
@@ -191,6 +193,62 @@ def build_default_dispatcher(
         requires_approval=True,
     )
 
+    # ---- v0.13 desktop intelligence & application control ------------ #
+    desktop = desktop_tools or DesktopController(checker)
+    desktop_handlers = make_desktop_handlers(desktop)
+    dispatcher.register(
+        "launch_application",
+        desktop_handlers["launch_application"],
+        description=(
+            "Launch a registered application without a file (argv-only, "
+            "verified by re-observing /proc; approval required)."
+        ),
+        mutates=True,
+        requires_approval=True,
+    )
+    dispatcher.register(
+        "application_status",
+        desktop_handlers["application_status"],
+        description=(
+            "Report a registered application's installed/running/window "
+            "state (read-only; /proc + accessibility metadata)."
+        ),
+        mutates=False,
+        requires_approval=False,
+    )
+    dispatcher.register(
+        "active_window",
+        desktop_handlers["active_window"],
+        description=(
+            "Report the currently active window via the accessibility bus "
+            "(read-only metadata; honest 'unavailable' otherwise)."
+        ),
+        mutates=False,
+        requires_approval=False,
+    )
+    dispatcher.register(
+        "focus_application",
+        desktop_handlers["focus_application"],
+        description=(
+            "Request focus for a registered application's window through "
+            "the accessibility Component interface, then re-read the "
+            "active state (approval required)."
+        ),
+        mutates=True,
+        requires_approval=True,
+    )
+    dispatcher.register(
+        "close_application",
+        desktop_handlers["close_application"],
+        description=(
+            "Close a registered application's window via its own "
+            "window.close accessibility action and verify it disappeared "
+            "— never a signal, never a force-kill (approval required)."
+        ),
+        mutates=True,
+        requires_approval=True,
+    )
+
     # ---- v0.4 desktop automation ------------------------------------ #
     dispatcher.register(
         "inspect_application",
@@ -276,6 +334,7 @@ def build_default_dispatcher(
 
 __all__ = [
     "ActionDispatcher",
+    "DesktopController",
     "DispatchError",
     "HandlerSpec",
     "build_default_dispatcher",

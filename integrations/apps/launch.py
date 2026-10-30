@@ -130,6 +130,100 @@ class LaunchAdapter:
 
     # ------------------------------------------------------------------ #
 
+    @staticmethod
+    def build_argv_app(
+        definition: IntegrationDefinition, resolved_executable: str
+    ) -> list:
+        """Build the argv for starting the application *without* a file (v0.13).
+
+        The argv is the reviewed template with the ``{path}`` token
+        dropped (flags are still registry literals).  A launch-only
+        integration (no ``open_file`` capability) has a template
+        without ``{path}`` and is used verbatim.  Raises
+        :class:`LaunchError` on any malformed element.
+        """
+        if not definition.launches_bare:
+            raise LaunchError(
+                f"'{definition.id}' is not launchable without a file "
+                f"(kind: {definition.kind})."
+            )
+        argv = [resolved_executable]
+        for template in definition.launch.arguments:
+            if template != PATH_TOKEN:
+                argv.append(template)
+        for element in argv:
+            if not isinstance(element, str) or "\x00" in element:
+                raise LaunchError("Refusing to launch: malformed argv element.")
+        return argv
+
+    def launch_app(self, definition: IntegrationDefinition) -> LaunchOutcome:
+        """Start *definition*'s application with no file (v0.13).
+
+        Same honesty contract as :meth:`launch`: reports only that a
+        process was started (or exited immediately).  Nothing is ever
+        installed, and no signal is ever sent to any process.
+        """
+        executable = self.resolve_executable(definition)
+        if executable is None:
+            wanted = " or ".join(
+                n
+                for n in (
+                    definition.launch.executable,
+                    definition.launch.fallback_executable,
+                )
+                if n
+            )
+            raise LaunchError(
+                f"{definition.name} does not appear to be installed "
+                f"(executable '{wanted}' not found on PATH). Alwin Fusion "
+                f"never installs applications automatically."
+            )
+
+        argv = self.build_argv_app(definition, executable)
+
+        try:
+            process = self._popen(
+                argv,
+                shell=False,  # explicit: no part of this is ever a shell string
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                close_fds=True,
+                start_new_session=True,
+            )
+        except (OSError, ValueError) as exc:
+            raise LaunchError(
+                f"Failed to start {definition.name}: "
+                f"{getattr(exc, 'strerror', None) or exc}"
+            ) from exc
+
+        returncode = process.poll()
+        pid = getattr(process, "pid", None)
+        if returncode is None:
+            detail = (
+                f"process started (pid {pid}) and still running; "
+                f"Alwin Fusion does not control the application."
+            )
+        elif returncode == 0:
+            detail = (
+                f"process started and exited cleanly (status 0, pid {pid}); "
+                f"the running instance or desktop session took over."
+            )
+        else:
+            raise LaunchError(
+                f"{definition.name} exited immediately with status "
+                f"{returncode}; the application was not started."
+            )
+        return LaunchOutcome(
+            started=True,
+            integration_id=definition.id,
+            application_name=definition.name,
+            executable=executable,
+            pid=pid,
+            returncode=returncode,
+            detail=detail,
+        )
+
     def launch(self, definition: IntegrationDefinition, file_path: Path) -> LaunchOutcome:
         """Start *definition*'s application for *file_path*.
 

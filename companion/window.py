@@ -1,4 +1,4 @@
-"""Companion window: the GTK4 view for the Alwin character (v0.12.0).
+"""Companion window: the GTK4 view for the Alwin character (v0.13.0).
 
 A lightweight, persistent window that shows the character, a speech
 bubble, a minimal task status and a small control row.  It is a **thin

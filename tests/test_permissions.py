@@ -241,6 +241,14 @@ class TestNoDestructiveCapability(unittest.TestCase):
                 "activate_control",
                 "enter_text",
                 "save_document",
+                # v0.13 desktop control (read-only: application_status,
+                # active_window; approval-gated: launch_application,
+                # focus_application, close_application).
+                "launch_application",
+                "application_status",
+                "active_window",
+                "focus_application",
+                "close_application",
                 "task_sequence",
                 "explain",
             },
@@ -263,11 +271,22 @@ class TestNoDestructiveCapability(unittest.TestCase):
                 "activate_control",
                 "enter_text",
                 "save_document",
+                # v0.13: starting an app, moving focus and closing a
+                # window all change the desktop and need approval.
+                "launch_application",
+                "focus_application",
+                "close_application",
                 "task_sequence",
             },
         )
         # Read-only automation never silently joins the mutating set.
-        for read_only in ("inspect_application", "find_control", "read_control"):
+        for read_only in (
+            "inspect_application",
+            "find_control",
+            "read_control",
+            "application_status",
+            "active_window",
+        ):
             self.assertNotIn(read_only, MUTATING_ACTIONS)
 
     def test_filesystem_tools_have_no_destructive_calls(self):

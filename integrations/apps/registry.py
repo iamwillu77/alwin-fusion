@@ -71,10 +71,14 @@ PATH_TOKEN = "{path}"
 #: may be driven by the desktop-automation layer (v0.4); only reviewed
 #: applications that genuinely expose accessibility information declare
 #: it, and ``ai_core.permissions`` denies automation without it.
-KNOWN_CAPABILITIES = frozenset({"open_file", "automate"})
+#: ``launch`` (v0.13) = may be started *without* a file and its state
+#: observed (a "launch-only" integration: the user opens it and drives
+#: it themselves).  Launching never implies controllability — the
+#: control tiers are derived from evidence, not from this word.
+KNOWN_CAPABILITIES = frozenset({"open_file", "automate", "launch"})
 
 #: Permissions an integration may require.
-KNOWN_REQUIRED_PERMISSIONS = frozenset({"open_file", "automate"})
+KNOWN_REQUIRED_PERMISSIONS = frozenset({"open_file", "automate", "launch"})
 
 #: Launch strategies.  Only argv-list execution exists; there is no
 #: shell strategy and there never should be.
@@ -100,6 +104,7 @@ DEFINITION_KEYS = frozenset(
         "verification",
         "required_permissions",
         "kind",
+        "a11y_names",
     }
 )
 DETECTION_KEYS = frozenset({"executables", "desktop_entries"})
@@ -154,9 +159,25 @@ class IntegrationDefinition:
     required_permissions: Tuple[str, ...]
     aliases: Tuple[str, ...] = ()
     kind: str = "application"
+    #: Reviewed accessibility-bus application names used to find this
+    #: application's windows (v0.13).  Empty means "derive the
+    #: candidates from detection executables + desktop-entry ids".
+    a11y_names: Tuple[str, ...] = ()
 
     def supports_file_type(self, suffix: str) -> bool:
         return suffix.lower() in self.file_types
+
+    @property
+    def opens_files(self) -> bool:
+        """May this integration be launched *with* a file?"""
+        return "open_file" in self.capabilities
+
+    @property
+    def launches_bare(self) -> bool:
+        """May this integration be started *without* a file?"""
+        return self.kind == "application" and (
+            "launch" in self.capabilities or "open_file" in self.capabilities
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -259,8 +280,13 @@ def validate_integration(payload: object) -> IntegrationDefinition:
     file_types = _string_tuple(
         payload.get("file_types"), field_name="file_types", pattern=FILE_TYPE_RE
     )
-    if not file_types:
-        raise _err("file_types", "an integration must support at least one file type.")
+    if not file_types and "open_file" in capabilities:
+        raise _err(
+            "file_types",
+            "an integration that opens files must support at least one file "
+            "type (a launch-only integration declares no 'open_file' "
+            "capability and may list none).",
+        )
     if len(set(file_types)) != len(file_types):
         raise _err("file_types", "duplicate file types are not allowed.")
 
@@ -340,12 +366,22 @@ def validate_integration(payload: object) -> IntegrationDefinition:
         pattern=re.compile(r"^(?:[A-Za-z0-9 ._:=,%+-]{1,120}|\{path\})$"),
         max_items=8,
     )
-    if not arguments:
-        raise _err("launch.arguments", "must contain at least one entry.")
-    if arguments.count(PATH_TOKEN) != 1:
+    if "open_file" in capabilities:
+        if not arguments:
+            raise _err("launch.arguments", "must contain at least one entry.")
+        if arguments.count(PATH_TOKEN) != 1:
+            raise _err(
+                "launch.arguments",
+                "must contain exactly one '{path}' placeholder (the file to "
+                "open).",
+            )
+    elif arguments.count(PATH_TOKEN) != 0:
+        # v0.13 launch-only integration (no 'open_file'): it is started
+        # without a file, so the template must not reference one.
         raise _err(
             "launch.arguments",
-            "must contain exactly one '{path}' placeholder (the file to open).",
+            "a launch-only integration (no 'open_file' capability) must not "
+            "contain a '{path}' placeholder.",
         )
     launch = LaunchStrategy(
         strategy=strategy,
@@ -373,6 +409,12 @@ def validate_integration(payload: object) -> IntegrationDefinition:
         )
     verification = VerificationStrategy(strategy=verification_strategy)
 
+    # ---- accessibility-bus names (v0.13, optional) --------------------- #
+    a11y_names = _string_tuple(
+        payload.get("a11y_names", ()), field_name="a11y_names",
+        pattern=EXECUTABLE_RE,
+    )
+
     return IntegrationDefinition(
         id=integration_id,
         name=name,
@@ -385,6 +427,7 @@ def validate_integration(payload: object) -> IntegrationDefinition:
         required_permissions=required_permissions,
         aliases=aliases,
         kind=kind,
+        a11y_names=a11y_names,
     )
 
 
@@ -572,6 +615,68 @@ BUILTIN_INTEGRATIONS = (
         },
         "verification": {"strategy": "process_started"},
         "required_permissions": ("open_file",),
+    },
+    {
+        "id": "libreoffice",
+        "name": "LibreOffice",
+        # v0.13: the suite's Start Center — the honest target for
+        # "open LibreOffice" (bare launch); with a file it hands the
+        # document to the right component (soffice <file>).
+        "version": "1.0.0",
+        "aliases": ("libreoffice", "start center", "libreoffice start center"),
+        "capabilities": ("launch", "open_file"),
+        "file_types": (".txt", ".csv", ".odt"),
+        "detection": {
+            "executables": ("soffice", "libreoffice"),
+            "desktop_entries": ("libreoffice-startcenter",),
+        },
+        "launch": {
+            "strategy": "exec",
+            "executable": "soffice",
+            "fallback_executable": "libreoffice",
+            "arguments": (PATH_TOKEN,),
+        },
+        "verification": {"strategy": "process_started"},
+        "required_permissions": ("open_file", "launch"),
+        "a11y_names": ("libreoffice", "soffice.bin"),
+    },
+    {
+        "id": "nautilus",
+        "name": "Files (Nautilus)",
+        # v0.13: launch-only (tier: open and leave for the user) —
+        # it manages files itself, so Alwin never drives it.
+        "version": "1.0.0",
+        "aliases": ("files", "file manager", "nautilus"),
+        "capabilities": ("launch",),
+        "file_types": (),
+        "detection": {
+            "executables": ("nautilus",),
+            "desktop_entries": ("org.gnome.Nautilus",),
+        },
+        "launch": {"strategy": "exec", "executable": "nautilus", "arguments": ()},
+        "verification": {"strategy": "process_started"},
+        "required_permissions": ("launch",),
+        "a11y_names": ("nautilus",),
+    },
+    {
+        "id": "gnome-text-editor",
+        "name": "Text Editor",
+        "version": "1.0.0",
+        "aliases": ("text editor", "gnome text editor"),
+        "capabilities": ("launch", "open_file"),
+        "file_types": (".txt", ".md", ".csv"),
+        "detection": {
+            "executables": ("gnome-text-editor",),
+            "desktop_entries": ("org.gnome.TextEditor",),
+        },
+        "launch": {
+            "strategy": "exec",
+            "executable": "gnome-text-editor",
+            "arguments": (PATH_TOKEN,),
+        },
+        "verification": {"strategy": "process_started"},
+        "required_permissions": ("open_file", "launch"),
+        "a11y_names": ("gnome-text-editor",),
     },
     {
         "id": "default",

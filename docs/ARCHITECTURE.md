@@ -1,6 +1,6 @@
 # Alwin Fusion — Architecture
 
-Version: 0.12.0 — Milestone: Intelligent Task Planning & Autonomous Execution
+Version: 0.13.0 — Milestone: Desktop Intelligence & Application Control
 
 Alwin Fusion is an open-source, offline-first AI-native operating
 system in the making. This document describes what exists today, how
@@ -81,9 +81,21 @@ integrations/            Pluggable action handlers (the extension point)
         spreadsheet.py   openpyxl workbook build + reopen/inspect
         tools.py         O_EXCL create-only handlers re-checking security
     apps/                v0.3 application integration engine
+                         (+ v0.13 desktop intelligence & lifecycle control)
         registry.py      closed, schema-validated integration definitions
+                         (v0.13: 'launch' capability, a11y_names,
+                         launch-only integrations; 8 integrations)
         discovery.py     read-only detection (PATH + desktop-entry names)
-        launch.py        argv-only LaunchAdapter (shell=False, one {path})
+        launch.py        argv-only LaunchAdapter (shell=False; file and
+                         v0.13 bare launch_app — registry argv only)
+        desktop.py       v0.13 DesktopController: launch (+ /proc
+                         re-observation), status (installed/running
+                         tri-state + bounded a11y window metadata),
+                         active_window, focus (grab_focus + activate
+                         fallback, verified by the active state), close
+                         (window.close action + verified disappearance;
+                         never a signal/force-kill); credential-scrubbed
+                         titles, injectable clock/proc/session
         tools.py         detect/open_file handlers re-checking permissions
     automation/          v0.4 desktop automation engine (AT-SPI)
         base.py          state machine, control locators, capabilities,
@@ -1024,17 +1036,25 @@ consumes a *validated* action and nothing else.
 
 **Registry (`registry.py`).** An integration definition is reviewed
 data in this repository: stable id, human name, semantic version,
-aliases, capabilities (`open_file` only for now), file types,
-detection strategy (executable names + desktop-entry ids), launch
-strategy (executable, argv template with exactly one `{path}`,
-optional fallback), verification strategy (`process_started` only),
-and required permissions. `validate_integration()` enforces a closed
-schema — unknown keys, unknown capabilities/strategies, shell
-metacharacters, absolute or slashed executables, and multiple `{path}`
-tokens are all rejected. There is intentionally **no** manifest
-loading from disk or model output in this milestone; the builtin
-registry is the only source, and identifiers are resolved against it
-(`resolve_integration_id`, case/separator-insensitive).
+aliases, capabilities (`open_file`, `automate`, and — since v0.13 —
+`launch` for file-less starts), file types, detection strategy
+(executable names + desktop-entry ids), launch strategy (executable,
+argv template; exactly one `{path}` when the integration opens files,
+none when it is launch-only), verification strategy
+(`process_started` only), required permissions, and (v0.13) reviewed
+`a11y_names` — the accessibility-bus application names used to find
+its windows. `validate_integration()` enforces a closed schema —
+unknown keys, unknown capabilities/strategies, shell metacharacters,
+absolute or slashed executables, `{path}` miscounts (missing for
+open-file integrations, present for launch-only ones) are all
+rejected. There is intentionally **no** manifest loading from disk or
+model output in this milestone; the builtin registry is the only
+source, and identifiers are resolved against it
+(`resolve_integration_id`, case/separator-insensitive). v0.13 adds
+three reviewed integrations: `libreoffice` (Start Center — bare
+launch + file hand-off), `nautilus` (launch-only: Files is opened and
+left for the user; it declares no `open_file` and no `automate`), and
+`gnome-text-editor`.
 
 **Discovery (`discovery.py`).** Read-only: `shutil.which` for the
 registered executable names, and the *file names* (never contents) of
@@ -1071,6 +1091,53 @@ launch/verification-strategy enums are where an MCP-backed or
 accessibility-API adapter would plug in (as new *reviewed* strategy
 values with their own trusted adapter code); an untrusted manifest
 still cannot introduce one.
+
+**Desktop controller (`desktop.py`, v0.13).** `DesktopController`
+implements the five lifecycle operations the milestone requires, all
+registry-scoped and evidence-based:
+
+* `launch` — bare (file-less) start through
+  `LaunchAdapter.launch_app()` (argv from the reviewed template with
+  `{path}` dropped, `shell=False`), then a bounded `/proc` poll that
+  distinguishes "request accepted" from "process observed"; an
+  already-running application is reported as such (duplicate launches
+  are handed to the running instance, never spawned fresh), and an
+  unobserved launch is honestly UNVERIFIED.
+* `status` — installed (PATH + desktop-entry evidence), running
+  (tri-state `True/False/None=unknown` from `/proc`; comm matching is
+  truncation-safe for the kernel's 15-character cap), and bounded
+  window metadata (title/role/active) from the accessibility bus when
+  it answers, `unavailable` when it does not.
+* `active_window` — the first window on the bus reporting the
+  `active` state; honest "none reports active" or honest "bus not
+  available" otherwise. No screenshots, no window contents — metadata
+  only.
+* `focus` — Component `grab_focus`, falling back to the window's own
+  `default.activate` action when the compositor refuses (observed on
+  GNOME Wayland: `atspi_error 1`); success is claimed only when the
+  window then reports the `active` state, else UNVERIFIED.
+* `close` — the window's own `window.close` accessibility action
+  (reviewed names only) followed by a bounded poll that the
+  *targeted* window (role + title identity) left the bus; a modal
+  dialog (e.g. unsaved work) is detected and reported, and the
+  operation fails honestly. **No signal is ever sent and nothing is
+  ever force-killed** — process termination does not exist in this
+  codebase.
+
+Window titles are untrusted input: bounded to 80 characters,
+control-char stripped (`safe_app_text`) and credential-scrubbed
+(`password: x` → `password: [redacted]`) before they reach any
+record. Every wait is bounded and injectable (clock/sleep), so the
+mocked tests run instantly and the real script runs in seconds.
+
+**Capability tiers (`ai_core/capabilities.py::application_tiers`,
+v0.13).** Per registered application, derived from real probes (PATH
+resolve, registry capabilities, bindings presence): `discover`,
+`launch`, `open_file`, `inspect`, `window_state`, `interact`, with
+`control = interact | open_only`. The planning prompt lists these
+tiers so the model can only propose what the installation genuinely
+supports; `missing_for()` blocks `active_window`/`focus_application`/
+`close_application` when the accessibility bindings are absent.
 
 ## Desktop automation engine (integrations/automation/)
 

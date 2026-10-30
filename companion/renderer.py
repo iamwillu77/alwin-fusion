@@ -1,4 +1,4 @@
-"""Character renderer interface (v0.12.0) — the seam to a future 3D renderer.
+"""Character renderer interface (v0.13.0) — the seam to a future 3D renderer.
 
 A renderer knows how to *display* the character and play its
 animations; it never decides what the character should do.  The
