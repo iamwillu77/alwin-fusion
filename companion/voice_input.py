@@ -43,6 +43,17 @@ SAMPLE_RATE = 16000
 CHANNELS = 1
 SAMPLE_WIDTH = 2  # bytes (S16)
 
+#: One captured frame in bytes (S16LE mono).
+FRAME_BYTES = CHANNELS * SAMPLE_WIDTH
+
+#: v0.21 hard bound: a capture can never exceed this many seconds, no
+#: matter how long the mic is left open (60 s ≈ 1.92 MB).  When the
+#: cap is hit the NEWEST audio is kept (recent speech is what matters)
+#: and the result is flagged `truncated` — never silently.
+MAX_CAPTURE_SECONDS = 60
+MAX_CAPTURE_BYTES = MAX_CAPTURE_SECONDS * SAMPLE_RATE * CHANNELS * \
+    SAMPLE_WIDTH
+
 #: A captured chunk from the backend (S16LE bytes).
 ChunkCallback = Callable[[bytes], None]
 ErrorCallback = Callable[[str], None]
@@ -66,6 +77,11 @@ class CaptureResult:
     rms: float
     #: True when the user cancelled instead of stopping normally.
     cancelled: bool = False
+    #: v0.21: True when the hard capture cap dropped OLDER audio (the
+    #: newest window is what the caller receives — never silent).
+    truncated: bool = False
+    #: v0.21: chunks rejected for frame misalignment (0 when healthy).
+    dropped_frames: int = 0
 
     @property
     def sample_count(self) -> int:
@@ -245,6 +261,12 @@ class VoiceInputService:
         self._last_error: Optional[str] = None
         self._released = False
         self._listening = False
+        # v0.21 bounded-capture bookkeeping (diagnostics + honesty).
+        self._chunks = 0
+        self._dropped_chunks = 0
+        self._truncated = False
+        self._last_chunk_at = 0.0
+        self._started_chunks = 0
 
     # ------------------------------------------------------------------ #
     # State
@@ -283,14 +305,49 @@ class VoiceInputService:
         if self._listening:
             return  # already recording — start is idempotent
 
-        backend = self._backend_factory()
+        # v0.21: a factory that fails IS a device-initialization
+        # failure — normalize it exactly like an open() failure
+        # (honest error, never a half-open service).
+        try:
+            backend = self._backend_factory()
+        except VoiceInputError as exc:
+            self._last_error = str(exc)
+            raise
+        except Exception as exc:  # noqa: BLE001
+            message = f"The microphone could not be opened: {exc}"
+            self._last_error = message
+            raise VoiceInputError(message) from exc
         with self._lock:
             self._buffer = bytearray()
+            self._chunks = 0
+            self._dropped_chunks = 0
+            self._truncated = False
+            self._last_chunk_at = 0.0
+            self._started_chunks = 0
         self._last_error = None
 
         def _on_sample(chunk: bytes) -> None:
+            # v0.21: validate the frame boundary BEFORE it can poison
+            # the stream (one odd chunk permanently shifts S16 parity
+            # for everything after it) and keep the buffer BOUNDED —
+            # the newest window wins, drops are counted and surfaced.
+            if not isinstance(chunk, (bytes, bytearray, memoryview)) \
+                    or not chunk:
+                with self._lock:
+                    self._dropped_chunks += 1
+                return
+            if len(chunk) % FRAME_BYTES:
+                with self._lock:
+                    self._dropped_chunks += 1
+                return
             with self._lock:
+                self._chunks += 1
+                self._last_chunk_at = self._time()
                 self._buffer.extend(chunk)
+                overflow = len(self._buffer) - MAX_CAPTURE_BYTES
+                if overflow > 0:
+                    del self._buffer[:overflow]
+                    self._truncated = True
             observer = self._on_sample
             if observer is not None:
                 try:
@@ -363,6 +420,48 @@ class VoiceInputService:
             self._buffer = bytearray()  # discarded for good
         return CaptureResult(b"", 0.0, 0.0, 0.0, cancelled=True)
 
+    def diagnostics(self) -> dict:
+        """Bounded, content-free capture diagnostics (v0.21).
+
+        What it measures: format (fixed 16 kHz/mono/S16), chunk counts,
+        dropped/misaligned chunks, buffer bytes vs the hard cap,
+        arrival rate and last-chunk age, current levels with a CLIPPING
+        indicator, seconds listening, and the last (content-free)
+        device error.  It NEVER includes raw audio, transcripts or any
+        user content, and never touches the filesystem.
+        """
+        with self._lock:
+            buffered = len(self._buffer)
+            chunks = self._chunks
+            dropped = self._dropped_chunks
+            truncated = self._truncated
+            last_chunk_at = self._last_chunk_at
+            recent = bytes(self._buffer[-SAMPLE_RATE // 5 * FRAME_BYTES:])
+        peak, rms = _levels(recent) if self._listening else (0.0, 0.0)
+        now = self._time()
+        elapsed = (now - self._started_at) if self._listening else 0.0
+        window = max(1.0, now - self._started_at) if self._listening \
+            else 0.0
+        return {
+            "listening": self._listening,
+            "format": f"{SAMPLE_RATE} Hz / {CHANNELS} ch / S16LE",
+            "buffer_bytes": buffered,
+            "buffer_cap_bytes": MAX_CAPTURE_BYTES,
+            "truncated": truncated,
+            "chunks": chunks,
+            "dropped_chunks": dropped,
+            "chunks_per_second": round(chunks / window, 2)
+            if self._listening else 0.0,
+            "last_chunk_age_seconds": round(now - last_chunk_at, 2)
+            if last_chunk_at else None,
+            "peak": round(peak, 4),
+            "rms": round(rms, 4),
+            # Measured, not estimated: peak at full scale == clipping.
+            "clipping": bool(self._listening and peak >= 0.99),
+            "seconds_listening": round(elapsed, 2),
+            "last_error": self._last_error,
+        }
+
     def release(self) -> None:
         """Final teardown (window closed): stop, discard, refuse reuse."""
         if self._listening:
@@ -401,15 +500,22 @@ class VoiceInputService:
         with self._lock:
             pcm = bytes(self._buffer)
             self._buffer = bytearray()
+            truncated = self._truncated
+            dropped = self._dropped_chunks
         seconds = (len(pcm) / (SAMPLE_RATE * CHANNELS * SAMPLE_WIDTH))
         peak, rms = _levels(pcm)
-        return CaptureResult(pcm, seconds, peak, rms, cancelled=False)
+        return CaptureResult(pcm, seconds, peak, rms, cancelled=False,
+                             truncated=truncated,
+                             dropped_frames=dropped)
 
 
 __all__ = [
     "CaptureResult",
     "CHANNELS",
+    "FRAME_BYTES",
     "GStreamerBackend",
+    "MAX_CAPTURE_BYTES",
+    "MAX_CAPTURE_SECONDS",
     "SAMPLE_RATE",
     "SAMPLE_WIDTH",
     "VoiceInputError",

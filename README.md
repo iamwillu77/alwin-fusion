@@ -2,7 +2,7 @@
 
 **Open-source, offline-first AI-native operating system — in progress.**
 
-Version **0.20.0** · Milestone: **Intelligent Task Planning and Recovery**
+Version **0.21.0** · Milestone: **Voice & Hands-Free Reliability**
 
 Alwin Fusion lets you control your computer through natural-language
 commands. v0.9 gives **Alwin**, the persistent, lightweight desktop
@@ -1518,6 +1518,63 @@ cancellation executing nothing with distinct audit ids — plus green
 re-runs of **all six** existing verification scripts. The v0.20 suite
 adds `tests/test_planning_recovery.py` (17 tests) — full suite
 **1,464 passed, 2 skipped**.
+
+### Voice & hands-free reliability (v0.21.0)
+
+v0.21.0 strengthens the existing local voice pipeline where the audit
+found **reproducible** gaps — no stack replacement, no threshold
+tuning, no fabricated hardware claims:
+
+* **Capture is bounded and validated.** A hard 60-second cap
+  (1.92 MB) keeps the NEWEST window when a mic is left open — the
+  overflow is dropped, counted and flagged (`CaptureResult.truncated`,
+  surfaced in an honest bubble); chunks that are not whole S16LE frames
+  are **dropped at the boundary** (one odd chunk would permanently
+  misalign the stream); empty/malformed chunks are counted, never
+  stored. Factory and open failures normalize to the same honest
+  `VoiceInputError`, failed starts never leave a half-open service,
+  and duplicate start/stop/release stay idempotent.
+* **Hardware failure is no longer hidden behind "I didn't hear
+  anything"**: a device error that surfaces mid-listen is shown as the
+  device error (negative tone) when the capture was silent.
+* **Typed hands-free state model.** All phase writes go through one
+  `_set_phase()` with an explicit `ALLOWED_TRANSITIONS` table derived
+  from the real paths; illegal/stale transitions are refused (state
+  unchanged) and logged in a bounded transition log — a late callback
+  can never overwrite a newer session's phase. Universal stop
+  direction (`any → off`) is guaranteed.
+* **Bounded, content-free diagnostics** (`VoiceInputService.
+  diagnostics()`): format, buffer bytes vs cap, chunk/drop counters,
+  arrival rate, last-chunk age, peak/RMS with a measured **clipping**
+  flag, seconds listening, last device error — never raw audio,
+  never transcripts, no filesystem access.
+* **TTS system-library fallback**: when the optional `espeakng-loader`
+  Python package is absent, the synthesizer now resolves the OS
+  espeak-ng library + voice-data directories (verified present on this
+  host) — no download, no shell; with the loader present nothing
+  changes.
+
+**Measured on this host** (`python3 scripts/verify_voice_reliability.py`
+→ **18 EXECUTED, 6 BLOCKED, 1 UNVERIFIED, 0 FAILED — VERIFICATION
+OK**): real capture device init (128 ms open), 251 chunks @100/s over
+2.51 s with 0 drops; the live line measures **peak 1.0 / RMS 0.81 with
+clipping=True and nobody speaking** — the historical "line noise /
+acoustic coupling" blocker is now *measured*, not assumed; 3 seconds of
+the real live line produced **zero wake triggers** (the verification
+gate holds); a real local LLM reply (qwen3:0.6b, 117 chars); **real
+espeak-ng synthesis + playback to completion (3.6 s) with mid-playback
+interruption completing in 7 ms** (`on_done(False, "stopped")`,
+repeated stops safe); clean shutdown with release-refuses-reuse; 173
+SANDBOX voice tests green. **BLOCKED (exact causes, nothing
+installed)**: `faster-whisper` is missing on this host (live and
+file-fed ASR legs, plus `verify_voice_e2e` and the 2 ASR-dependent
+`verify_voice_gui` checks), the vosk wake-word model preflight
+(`verify_wake_word`), and the GStreamer `DeviceClass.AUDIO_SOURCE`
+binding limit (capture init itself was still verified directly).
+**UNVERIFIED**: a *spoken* wake phrase and command through the live
+microphone — no human speaker exists in an automated session; physical
+mic speech remains open until tested by a person. No audio or
+transcript is ever saved by any of these checks.
 
 ### Speech-model and language quality (measured, honest)
 

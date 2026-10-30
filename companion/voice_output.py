@@ -127,6 +127,36 @@ class EspeakSynthesizer:
 
     # ------------------------------------------------------------------ #
 
+    @staticmethod
+    def _system_espeak_paths():
+        """Documented system fallback when ``espeakng-loader`` is absent.
+
+        v0.21: the espeak-ng LIBRARY and voice data are frequently
+        installed by the OS package (libespeak-ng1 + espeak-ng-data)
+        without the Python convenience package.  This resolves the
+        standard system locations only — never a download, never a
+        shell, never a path outside the usual system prefixes.
+        Returns ``(library, data_dir)`` or ``None``.
+        """
+        import ctypes.util
+        import os
+
+        library = ctypes.util.find_library("espeak-ng")
+        if not library:
+            # The soname load is the standard linker lookup.
+            library = "libespeak-ng.so.1"
+        data_candidates = (
+            "/usr/lib/x86_64-linux-gnu/espeak-ng-data",
+            "/usr/lib/aarch64-linux-gnu/espeak-ng-data",
+            "/usr/share/espeak-ng-data",
+            "/usr/local/share/espeak-ng-data",
+        )
+        data_dir = next((d for d in data_candidates
+                         if os.path.isdir(d)), None)
+        if not data_dir:
+            return None
+        return library, data_dir
+
     def _ensure_loaded(self):
         """Load + initialize the library once; return it or None."""
         with self._lock:
@@ -134,24 +164,36 @@ class EspeakSynthesizer:
                 return self._lib
             if self._load_error is not None:
                 return None
-            try:
-                import ctypes
+            import ctypes
 
-                from espeakng_loader import get_data_path, get_library_path
-            except Exception as exc:  # noqa: BLE001 - honest absence
+            library_path = data_path = None
+            loader_used = False
+            try:
+                from espeakng_loader import (get_data_path,
+                                             get_library_path)
+
+                library_path = str(get_library_path())
+                data_path = str(get_data_path())
+                loader_used = True
+            except Exception:  # noqa: BLE001 - fall back to system paths
+                system = self._system_espeak_paths()
+                if system is not None:
+                    library_path, data_path = system
+            if library_path is None:
                 self._load_error = (
                     "espeak-ng is not installed (the 'espeakng-loader' "
-                    "package is missing). Install it with: pip install "
-                    f"espeakng-loader — details: {exc}"
+                    "package is missing and no system espeak-ng library "
+                    "+ voice data were found). Install it with: pip "
+                    "install espeakng-loader"
                 )
                 return None
             try:
-                lib = ctypes.CDLL(str(get_library_path()))
+                lib = ctypes.CDLL(library_path)
                 self._declare_prototypes(ctypes, lib)
                 rate = lib.espeak_Initialize(
                     1,  # AUDIO_OUTPUT_SYNCHRONOUS: samples via callback
                     0,
-                    str(get_data_path()).encode(),
+                    str(data_path).encode(),
                     0, 0,
                 )
                 if not rate:
@@ -161,6 +203,8 @@ class EspeakSynthesizer:
                 self._load_error = (
                     "The espeak-ng library failed to initialize: "
                     f"{exc}"
+                    + ("" if loader_used else
+                       " (system library fallback)")
                 )
                 return None
             self._lib = lib

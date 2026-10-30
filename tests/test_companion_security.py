@@ -133,7 +133,10 @@ VOICE_MODULE_LAZY_IMPORTS = {
                               "huggingface_hub"},
     # ctypes drives espeak-ng — allowed HERE and nowhere else, and only
     # with explicit prototypes (a default-typed espeak_Synth segfaults).
-    "voice_output.py": {"ctypes", "espeakng_loader", "gi"},
+    # v0.21: `os` joins the lazy set for the documented SYSTEM-library
+    # fallback (os.path.isdir probe of standard espeak data dirs only —
+    # no writes, no shell, no network; pinned by test_voice_reliability).
+    "voice_output.py": {"ctypes", "espeakng_loader", "gi", "os"},
     # v0.10.0: the detector loads the local vosk engine + JSON for the
     # keyword API, and lazily grabs VoiceInputService when no factory
     # was injected. Still no network, no recording, no process.

@@ -1,6 +1,6 @@
 # Alwin Fusion — Security Model and Limitations
 
-Version: 0.20.0 — Milestone: Intelligent Task Planning and Recovery
+Version: 0.21.0 — Milestone: Voice & Hands-Free Reliability
 
 This document states what the prototype defends against, how, and —
 importantly — **what it does not defend against**. Passing tests does
@@ -1557,6 +1557,36 @@ New surface introduced by v0.6, stated honestly:
       clarification note are fixed, bounded strings (no document
       contents, no secrets); document text and application text remain
       untrusted data with no path into any decision.
+54. **Voice hardening changes no boundary — and adds only content-free
+    telemetry** (v0.21).
+    * *Local-first intact.* Capture, wake verification, ASR, the reply
+      pipeline and TTS all stay local; v0.21 adds no network module,
+      no audio persistence and no shell (AST pins over all five voice
+      modules: no subprocess/pynput/pyautogui imports, no
+      system/popen calls; the capture module has zero file/network
+      imports). The espeak fallback resolves only standard system
+      library + voice-data directories (read-only `isdir` probe) — it
+      never downloads, and with the loader package present nothing
+      changes. The allowlist update (`os` in voice_output's lazy set)
+      is deliberate, commented and pinned.
+    * *Diagnostics are content-free.* `VoiceInputService.
+      diagnostics()` exposes format/buffer/drop/rate/level/clip/error
+      fields only — no PCM, no transcripts, no user content — and the
+      verification script stores no audio or transcript anywhere.
+    * *Wake and approval unchanged.* The candidate-gate + phrase-
+      verification model is untouched (measured: 3.0 s of the real
+      live line produced zero triggers), wake word remains default-off,
+      and a wake event still only starts the ordinary conversational
+      turn — voice requests reach `manager.submit()` with the same
+      allowlist, permissions and digest-bound approval as typed input.
+      Cancelling speech stops playback only: it never implies a
+      dispatched desktop mutation was rolled back (the execution layer
+      alone confirms that).
+    * *Honest environment reporting.* Missing `faster-whisper`, the
+      absent vosk wake model and the absent human speaker are recorded
+      as BLOCKED/UNVERIFIED with their exact causes — never converted
+      into passes, and no package, model or desktop setting was
+      installed or changed to make a check pass.
 
 ## Reporting security issues
 

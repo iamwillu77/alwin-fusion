@@ -1,6 +1,6 @@
 # Alwin Fusion — Architecture
 
-Version: 0.20.0 — Milestone: Intelligent Task Planning and Recovery
+Version: 0.21.0 — Milestone: Voice & Hands-Free Reliability
 
 Alwin Fusion is an open-source, offline-first AI-native operating
 system in the making. This document describes what exists today, how
@@ -335,7 +335,17 @@ companion/                 v0.9 Alwin companion (presentation layer only)
                          an optional on_sample streaming observer (the
                          wake-word service receives every chunk in
                          addition to — never instead of — the bounded
-                         capture buffer; a raising observer is isolated)
+                         capture buffer; a raising observer is isolated).
+                         v0.21: hard 60 s capture cap (newest window
+                         kept, overflow counted, `truncated` flagged),
+                         frame-boundary validation (misaligned/empty/
+                         malformed chunks dropped and counted),
+                         factory failures normalized like open()
+                         failures, and a bounded content-free
+                         diagnostics() (format, buffer vs cap, drop
+                         counters, arrival rate, last-chunk age,
+                         peak/RMS + measured clipping flag, device
+                         error — no audio, no transcripts, no I/O)
     speech_recognition.py v0.9 offline ASR: faster-whisper with
                          local_files_only=True (the app NEVER downloads),
                          decode on a worker thread, no-speech/short-audio
@@ -411,6 +421,12 @@ companion/                 v0.9 Alwin companion (presentation layer only)
                          stop-aware bus wait (await_playback_end) — a
                          user interrupt completes in ~0.1–0.5 s measured
                          (the old single bus wait delayed on_done by ~9 s)
+                         . v0.21: documented SYSTEM-library fallback
+                         (espeakng_loader optional): standard soname +
+                         distro voice-data dirs resolved read-only when
+                         the Python loader package is absent — no
+                         download, no shell; honest combined error when
+                         neither source exists
     wake_word.py         v0.10 hands-free wake word (opt-in, off by
                          default): TWO-StageDetector (vosk KWS candidate
                          gate, Apache-2.0 model, LOWERCASE keyword —
@@ -1162,6 +1178,38 @@ seams, every one of them optional, injectable and honest:
   completion truth the window relies on to leave `speaking`. This is
   the only module allowed to import `ctypes`.
 
+**Voice reliability layer (v0.21).** Evidence-backed hardening on top
+of the stack above (no stack replacement, no threshold tuning):
+
+- *Bounded, validated capture*: a hard 60 s cap keeps the newest
+  window (overflow counted, `truncated` flagged and surfaced), frame
+  boundaries are validated at the component edge (misaligned/empty/
+  malformed chunks are dropped and counted — one odd chunk would
+  permanently shift S16 parity), factory failures normalize like
+  open() failures, and every terminal path stays idempotent
+  (duplicate start/stop/release, teardown-during-capture, released
+  services refusing reuse).
+- *Hardware vs silence*: a device error surfacing at stop() is shown
+  as the device error when the capture was silent — never hidden
+  behind "I didn't hear anything".
+- *Typed hands-free state*: every `_voice_phase` write goes through
+  `_set_phase()` against an explicit `ALLOWED_TRANSITIONS` table
+  (derived from the real paths); illegal/stale transitions are
+  refused with the state unchanged and recorded in a bounded
+  transition log. `any → off` is universally legal (stop/cancel/
+  teardown), so cancellation can never strand a session.
+- *Diagnostics*: `VoiceInputService.diagnostics()` reports format,
+  buffer vs cap, drop counters, arrival rate, last-chunk age,
+  peak/RMS with a measured clipping flag, seconds listening and the
+  content-free device error — raw audio and transcripts are never
+  included, and nothing touches the filesystem.
+- *TTS system fallback*: absent `espeakng-loader` → standard system
+  soname + distro voice-data dirs (read-only probe), else one honest
+  combined error. Real measured on the reference host: interruption
+  completion in ~7 ms, playback `on_done(True)` at 3.6 s, and a live
+  line measuring peak 1.0/clipping with nobody speaking (the
+  line-noise blocker, now quantified).
+
 Language enters the system in exactly four places — reply prompt, ASR
 decode hint (auto vs forced), TTS voice, and detection configuration —
 and never in the task pipeline itself: `manager.submit()` and the
@@ -1911,7 +1959,17 @@ flows — completed mutation never repeated (byte + mtime evidence),
 original approval refused for the resumed plan, resume budget bound,
 cancel-during-resume, idle-manager guard, overwrite clarification
 note, needs_attention-as-resumable) — for **1464 passed, 2 skipped
-(2895 subtests)**. The v0.9 additions were: the six voice-stack suites
+(2895 subtests)**; the v0.21 suite adds **25 more**
+(`tests/test_voice_reliability.py`: bounded-capture cap with
+newest-window retention, frame-alignment drops, device-missing and
+factory-failure normalization, stream-death diagnostics at stop,
+duplicate start/stop/release idempotence, teardown-during-capture,
+observer isolation, content-free diagnostics + measured clipping flag,
+the full legal-transition matrix plus illegal/same-phase/bounded-log
+behaviour of `_set_phase`, espeak system-fallback resolution and
+no-download/no-shell pins, no-audio-persistence and no-synthetic-input
+AST pins, default-off wake pin) — for **1489 passed, 2 skipped (2897
+subtests)**. The v0.9 additions were: the six voice-stack suites
 (registry, detection, conversation, capture, recognition, voice output),
 the window voice-cycle suite (real `GLib.idle_add` marshalling pumped
 on the default main context, all devices/models/LLM faked), the

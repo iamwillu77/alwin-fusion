@@ -328,6 +328,8 @@ class CompanionWindow:
         # a cancelled turn can never be delivered late.
         self._voice_phase = "off"  # off|wake|listening|recognizing|replying|speaking
         self._turn_serial = 0
+        # v0.21: bounded transition history for diagnostics/tests.
+        self._phase_log: list = []
         self._meter_id: Optional[int] = None
         self._configure_services()
 
@@ -756,6 +758,51 @@ class CompanionWindow:
     PHASE_SPEAKING = "speaking"
     PHASE_WAKE = "wake"          # v0.10.0: monitoring for the phrase
 
+    #: v0.21: bounded recent-transition log (see _set_phase).
+    _PHASE_LOG_ENTRIES = 40
+
+    # v0.21: the LEGAL hands-free transitions, derived from the real
+    # code paths (every phase may always go to OFF — that is the
+    # universal stop/cancel/teardown direction).  All phase writes go
+    # through _set_phase(), which refuses anything outside this table:
+    # a stale or inconsistent transition can never overwrite a newer
+    # session's state.
+    ALLOWED_TRANSITIONS = {
+        "off": frozenset({"off", "wake", "listening"}),
+        "wake": frozenset({"wake", "off", "listening"}),
+        "listening": frozenset({"listening", "off", "recognizing"}),
+        "recognizing": frozenset({"recognizing", "off", "replying"}),
+        "replying": frozenset({"replying", "off", "speaking"}),
+        "speaking": frozenset({"speaking", "off"}),
+    }
+
+    def _set_phase(self, new_phase: str, reason: str = "") -> bool:
+        """Single writer for the hands-free phase (v0.21).
+
+        Legal transitions apply immediately; same-phase writes are
+        idempotent no-ops; anything else is REFUSED (state unchanged)
+        and recorded in a small bounded log so tests and diagnostics
+        can see stale/illegal attempts without guessing.  Never raises.
+        (All writers run on the GTK thread; readers are same-thread or
+        diagnostics-only.)
+        """
+        current = self._voice_phase
+        if new_phase == current:
+            return True
+        allowed = self.ALLOWED_TRANSITIONS.get(current, frozenset())
+        if new_phase not in allowed:
+            self._phase_log.append(
+                f"REFUSED {current} -> {new_phase}"
+                + (f" ({reason})" if reason else ""))
+            del self._phase_log[:-self._PHASE_LOG_ENTRIES]
+            return False
+        self._voice_phase = new_phase
+        self._phase_log.append(
+            f"{current} -> {new_phase}" + (f" ({reason})" if reason
+                                           else ""))
+        del self._phase_log[:-self._PHASE_LOG_ENTRIES]
+        return True
+
     # ------------------------------------------------------------------ #
     # v0.10.0 wake-word monitoring (opt-in, off by default)
     #
@@ -824,7 +871,7 @@ class CompanionWindow:
         if not self._wake_calm():
             return
         if self.wake_service.running:
-            self._voice_phase = self.PHASE_WAKE
+            self._set_phase(self.PHASE_WAKE, "wake already monitoring")
             if announce:
                 self._show_wake_indicator()
             else:
@@ -836,7 +883,7 @@ class CompanionWindow:
             )
             self._show_bubble(error[:300], presentation.TONE_NEGATIVE)
             return
-        self._voice_phase = self.PHASE_WAKE
+        self._set_phase(self.PHASE_WAKE, "wake monitoring started")
         if announce:
             self._show_wake_indicator()
         else:
@@ -858,7 +905,7 @@ class CompanionWindow:
         except Exception:  # noqa: BLE001 - stop never raises
             pass
         if self._voice_phase == self.PHASE_WAKE:
-            self._voice_phase = self.PHASE_OFF
+            self._set_phase(self.PHASE_OFF, "wake ended")
             if self.voice_input.listening:
                 self._start_level_meter()   # capture's own meter
             else:
@@ -878,7 +925,7 @@ class CompanionWindow:
         if self._closing or self._voice_phase != self.PHASE_WAKE:
             return                      # stale trigger: state moved on
         # The service stopped itself first: the microphone is free.
-        self._voice_phase = self.PHASE_OFF
+        self._set_phase(self.PHASE_OFF, "wake error")
         if not self._wake_calm():
             # Busy with something visible: no ack, no capture; the
             # normal calm hooks will resume monitoring later.
@@ -896,7 +943,7 @@ class CompanionWindow:
         if self._closing:
             return
         if self._voice_phase == self.PHASE_WAKE:
-            self._voice_phase = self.PHASE_OFF
+            self._set_phase(self.PHASE_OFF, "wake triggered")
             self._stop_level_meter()
         self._show_bubble(str(message)[:300],
                           presentation.TONE_NEGATIVE)
@@ -1005,14 +1052,14 @@ class CompanionWindow:
         try:
             self.voice_input.start()
         except Exception as exc:  # noqa: BLE001 - device errors surface
-            self._voice_phase = self.PHASE_OFF
+            self._set_phase(self.PHASE_OFF, "microphone open failed")
             self._show_bubble(
                 str(exc) or "The microphone could not be opened.",
                 presentation.TONE_NEGATIVE,
             )
             return
         self._turn_serial += 1
-        self._voice_phase = self.PHASE_LISTENING
+        self._set_phase(self.PHASE_LISTENING, "capture started")
         self.controller.enter(STATE_LISTENING, reason="microphone")
         self._set_mic_button(listening=True)
         self._start_level_meter()
@@ -1023,15 +1070,32 @@ class CompanionWindow:
         self._set_mic_button(listening=False)
         capture = self.voice_input.stop()
         if capture.silent or capture.cancelled:
-            self._voice_phase = self.PHASE_OFF
-            self._show_bubble(
-                "I didn't hear anything — tap the mic, speak, then tap "
-                "again to send.",
-                presentation.TONE_ATTENTION,
-            )
+            self._set_phase(self.PHASE_OFF, "silent capture refused")
+            # v0.21: a device failure that surfaced mid-listen is NOT
+            # silence — report the hardware/stream reason (content-free)
+            # instead of hiding it behind "I didn't hear anything".
+            device_error = str(
+                getattr(self.voice_input, "last_error", "") or "")
+            if device_error:
+                self._show_bubble(
+                    device_error[:300], presentation.TONE_NEGATIVE)
+            else:
+                self._show_bubble(
+                    "I didn't hear anything — tap the mic, speak, then "
+                    "tap again to send.",
+                    presentation.TONE_ATTENTION,
+                )
             self._return_to_calm()
             return
-        self._voice_phase = self.PHASE_RECOGNIZING
+        if capture.truncated:
+            # Honest note: the capture hit its hard cap (60 s) and the
+            # OLDEST audio was dropped — recognition runs on the newest
+            # window.
+            self._show_bubble(
+                "That went over the 60-second capture limit — I kept "
+                "the last 60 seconds.", presentation.TONE_ATTENTION,
+            )
+        self._set_phase(self.PHASE_RECOGNIZING, "recognizing capture")
         self.controller.enter(STATE_THINKING, reason="recognizing speech")
         # Language forcing only when auto-detection is off (the user's
         # deliberate choice); with auto-detection on the engine decodes
@@ -1052,7 +1116,7 @@ class CompanionWindow:
             ),
         )
         if not started:
-            self._voice_phase = self.PHASE_OFF
+            self._set_phase(self.PHASE_OFF, "recognition busy/dropped")
             self._show_bubble(
                 "A recognition is already running.",
                 presentation.TONE_ATTENTION,
@@ -1065,7 +1129,7 @@ class CompanionWindow:
                 or self._voice_phase != self.PHASE_RECOGNIZING):
             return False  # cancelled/superseded turn: the result is dropped
         if result.no_speech or not result.text.strip():
-            self._voice_phase = self.PHASE_OFF
+            self._set_phase(self.PHASE_OFF, "recognition error")
             self._show_bubble(
                 "I couldn't hear any words — tap the mic and try again.",
                 presentation.TONE_ATTENTION,
@@ -1083,7 +1147,7 @@ class CompanionWindow:
         if (self._closing or serial != self._turn_serial
                 or self._voice_phase != self.PHASE_RECOGNIZING):
             return False
-        self._voice_phase = self.PHASE_OFF
+        self._set_phase(self.PHASE_OFF, "turn submission failed")
         message = str(exc) or "Speech recognition failed."
         self._show_bubble(message[:300], presentation.TONE_NEGATIVE)
         self._return_to_calm()
@@ -1110,13 +1174,13 @@ class CompanionWindow:
                 want_reply=False,   # the reply is generated off-thread below
             )
         except Exception as exc:  # noqa: BLE001 - never crash the UI
-            self._voice_phase = self.PHASE_OFF
+            self._set_phase(self.PHASE_OFF, "turn refused")
             self._show_bubble(str(exc)[:300], presentation.TONE_NEGATIVE)
             self._return_to_calm()
             return
 
         if not turn.ok:
-            self._voice_phase = self.PHASE_OFF
+            self._set_phase(self.PHASE_OFF, "notice turn finished")
             self._show_bubble(turn.error or "The request could not be "
                               "sent.", presentation.TONE_NEGATIVE)
             self._return_to_calm()
@@ -1130,7 +1194,7 @@ class CompanionWindow:
                     if turn.notice_tone == "attention"
                     else presentation.TONE_CALM)
             self._show_bubble(turn.notice[:300], tone)
-            self._voice_phase = self.PHASE_OFF
+            self._set_phase(self.PHASE_OFF, "conversational turn ended")
             self._return_to_calm()
             return
 
@@ -1148,12 +1212,12 @@ class CompanionWindow:
             # v0.11 conversational turn: no manager record exists, so
             # nothing will drive the character through task states.
             if not want_reply:
-                self._voice_phase = self.PHASE_OFF
+                self._set_phase(self.PHASE_OFF, "record turn without reply")
                 self._return_to_calm()
                 return
             # With a reply pending, stay in `thinking` until it is
             # generated (reply/speaking paths resolve the state).
-            self._voice_phase = self.PHASE_REPLYING
+            self._set_phase(self.PHASE_REPLYING, "reply generation started")
             language = turn.language
             serial = self._turn_serial
             threading.Thread(
@@ -1168,10 +1232,10 @@ class CompanionWindow:
         if not want_reply:
             # The manager's record drives the character from here (the
             # observer was notified synchronously inside submit()).
-            self._voice_phase = self.PHASE_OFF
+            self._set_phase(self.PHASE_OFF, "record turn without reply")
             return
 
-        self._voice_phase = self.PHASE_REPLYING
+        self._set_phase(self.PHASE_REPLYING, "reply generation started")
         language = turn.language
         serial = self._turn_serial
         threading.Thread(
@@ -1202,7 +1266,7 @@ class CompanionWindow:
             # not attached.  Say so honestly (v0.9.1) instead of going
             # quiet — and only claim "still sent" when a task actually
             # was submitted (v0.11: conversational turns never were).
-            self._voice_phase = self.PHASE_OFF
+            self._set_phase(self.PHASE_OFF, "empty reply")
             detail = str(reason or "no reply was generated")[:300]
             tail = (". Your request was still sent." if sent
                     else "")
@@ -1238,10 +1302,10 @@ class CompanionWindow:
         if not dispatched:
             # Engine unavailable right now: the text stays visible, no
             # speaking state is entered, nothing is claimed as spoken.
-            self._voice_phase = self.PHASE_OFF
+            self._set_phase(self.PHASE_OFF, "speech start failed")
             self._return_to_calm()
             return False
-        self._voice_phase = self.PHASE_SPEAKING
+        self._set_phase(self.PHASE_SPEAKING, "speech started")
         self._enter_speaking()
         return False
 
@@ -1276,7 +1340,7 @@ class CompanionWindow:
         if self._closing:
             return False
         if self._voice_phase == self.PHASE_SPEAKING:
-            self._voice_phase = self.PHASE_OFF
+            self._set_phase(self.PHASE_OFF, "speech completed")
         if error and error != "stopped":
             self._show_bubble(
                 f"Speech failed: {error}"[:300],
@@ -1325,7 +1389,7 @@ class CompanionWindow:
             pass
         was_announced = self._voice_phase in (self.PHASE_RECOGNIZING,
                                               self.PHASE_REPLYING)
-        self._voice_phase = self.PHASE_OFF
+        self._set_phase(self.PHASE_OFF, "turn cancelled")
         self._stop_level_meter()
         self._set_mic_button(listening=False)
         if self.controller.state in (STATE_LISTENING, STATE_THINKING,
@@ -1433,7 +1497,7 @@ class CompanionWindow:
                 if state == STATE_SPEAKING:
                     # Lost completion callback safety net: clear the
                     # turn phase too, so the mic button is not stuck.
-                    self._voice_phase = self.PHASE_OFF
+                    self._set_phase(self.PHASE_OFF, "wake stopped")
                     self._set_mic_button(listening=False)
                 self.controller.enter(STATE_IDLE, reason="calm return")
                 if state in (STATE_CELEBRATING, STATE_ERROR):
@@ -2628,7 +2692,7 @@ class CompanionWindow:
                 action()
             except Exception:  # noqa: BLE001 - teardown never raises
                 pass
-        self._voice_phase = self.PHASE_OFF
+        self._set_phase(self.PHASE_OFF, "teardown")
         if self._auto_return_id is not None:
             GLib.source_remove(self._auto_return_id)
             self._auto_return_id = None
