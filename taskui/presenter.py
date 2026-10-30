@@ -76,6 +76,12 @@ STEP_MARKS = {
     "failed": "✘",
     "denied": "✘",
     "skipped": "⇥",
+    # v0.12 plan-step states
+    "ready": "◌",
+    "awaiting_approval": "◌",
+    "succeeded": "✔",
+    "cancelled": "⇥",
+    "verification_failed": "◌",
 }
 
 STEP_LABELS = {
@@ -86,6 +92,12 @@ STEP_LABELS = {
     "failed": "Failed",
     "denied": "Denied",
     "skipped": "Skipped",
+    # v0.12 plan-step states (honest distinctions)
+    "ready": "Ready",
+    "awaiting_approval": "Awaiting approval",
+    "succeeded": "Succeeded",
+    "cancelled": "Cancelled",
+    "verification_failed": "Ran, not verified",
 }
 
 # Verification presentation.
@@ -186,7 +198,8 @@ def plan_rows(record: TaskRecord) -> List[dict]:
     plan = record.plan
     if not plan:
         return []
-    if plan.get("action") == "task_sequence" and record.steps:
+    if plan.get("action") in ("task_sequence", "task_plan") \
+            and record.steps:
         rows = []
         for step in record.steps:
             rows.append(

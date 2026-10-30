@@ -1,6 +1,6 @@
 # Alwin Fusion — Architecture
 
-Version: 0.11.0 — Milestone: Context-Aware AI Companion
+Version: 0.12.0 — Milestone: Intelligent Task Planning & Autonomous Execution
 
 Alwin Fusion is an open-source, offline-first AI-native operating
 system in the making. This document describes what exists today, how
@@ -32,6 +32,23 @@ ai_core/                 Trusted application core (pure Python, stdlib only)
     specs.py             Structured content validation (reports, specs,
                          formulas) — closed schemas, bounded sizes
     planner.py           Intent/model proposal -> validated Action (allowlist)
+    task_plan.py         v0.12 typed TaskPlan/PlanStep + validate_plan:
+                         closed-set actions only, dependency rules (no
+                         cycles/forward/self/duplicates), derived risk,
+                         bounded sizes, derivation markers with
+                         sanitising hoist of misplaced model keys
+    capabilities.py      v0.12 capability discovery: real probes (closed
+                         actions, openpyxl/reportlab, app registry,
+                         AT-SPI bindings, attached LLM, honest MCP
+                         status = descriptors only, 0 executable) with
+                         a TTL cache + invalidate()
+    task_planning.py     v0.12 planning service: one bounded json_mode
+                         generation proposes plan|clarify|decline via
+                         the EXISTING Ollama client; validated + capability
+                         checked + credential-scrubbed; deterministic
+                         English goal gate; bounded validation-feedback
+                         retry; bounded replan_remaining(); summarize_text()
+                         for declared derivations (injection-resistant)
     permissions.py       Path resolution, containment, symlink/traversal gates
     executor.py          Runs validated actions via the dispatcher
     verifier.py          Re-checks the world after execution
@@ -45,7 +62,12 @@ ai_core/                 Trusted application core (pure Python, stdlib only)
                          two (one implementation per stage).  Adds
                          plan_digest() + ApprovalToken (approval bound
                          to one exact plan) and an optional progress
-                         callback ("executing"/"verifying").
+                         callback ("executing"/"verifying"). v0.12 adds
+                         preview_action(): stages 2.5-3 for an
+                         already-validated plan step — permission,
+                         proposal and digest computed under EXACTLY the
+                         same rules as a typed command (shared
+                         _preview_planned core), never executing.
     cli.py               `python3 -m ai_core.cli` interface
 ai_runtime/              Local AI runtime integration
     ollama_client.py     stdlib-only Ollama HTTP client (never pulls models)
@@ -74,12 +96,21 @@ integrations/            Pluggable action handlers (the extension point)
         tools.py         the 7 automation handlers re-checking permissions
         sequence.py      TaskSequenceRunner (stop-on-failure, per-step
                          records; optional step_observer for live progress)
-        mcp.py           future-MCP tool descriptors only (no server/transport)
+        mcp.py           future-MCP tool descriptors only (no server/
+                         transport, therefore NO MCP-executable tool
+                         exists — including any Blender integration;
+                         capability discovery reports this honestly)
 taskui/                  v0.5 task experience (UI-agnostic core + thin view)
     lifecycle.py         the task state machine (10 states) with a
                          validated transition table; TaskRecord (curated,
                          display-safe fields; the live pipeline preview
-                         is kept out of serialization)
+                         is kept out of serialization). v0.12 adds two
+                         plan-boundary edges (EXECUTING->CANCELLED,
+                         VERIFYING->CANCELLED) used ONLY between plan
+                         steps when nothing is running — the single-
+                         action rule that running actions are never
+                         interrupted is unchanged, plus a runtime-only
+                         TaskRecord.task_plan field (never serialized).
     history.py           TaskHistory: persistent, validated, display-only
                          JSONL task history (<state_dir>/task_history.jsonl,
                          0600/0700); schema-validated on read; malformed
@@ -88,10 +119,25 @@ taskui/                  v0.5 task experience (UI-agnostic core + thin view)
                          the trusted pipeline; one worker thread per task;
                          approval gate blocks on an event the UI releases
                          via approve()/reject()/cancel(); never executes
-                         anything itself
+                         anything itself. v0.12 adds the PLAN controller
+                         inside that same worker: unsupported objectives
+                         consult TaskPlanningService (plan -> one
+                         digest-bound plan-level approval, mirroring
+                         task_sequence; clarify -> honest failed record
+                         with the question; decline -> cancelled with
+                         reason; unavailable -> existing behaviour), then
+                         each step runs preview_action -> run_previewed
+                         sequentially (max concurrency 1) with per-step
+                         digest tokens, 300 s budget, one retry for
+                         read-only steps only, boundary cancellation
+                         preserving completed work, dependency skipping,
+                         and a digest-guarded single replan after
+                         zero-execution failures
     presenter.py         pure, headless view-model (no GTK, no I/O):
                          submission validation, plan badges, risk notes,
-                         step rendering, verification evidence, history
+                         step rendering (incl. the v0.12 plan-step states
+                         succeeded/awaiting_approval/verification_failed/
+                         cancelled), verification evidence, history
                          rows/detail, status labels, bounded untrusted text
     status.py            honest capability probes (AI runtime reachable?
                          model configured/installed? automation bindings
@@ -246,10 +292,15 @@ companion/                 v0.9 Alwin companion (presentation layer only)
                          PHASE_WAKE with ack -> command -> resume hooks
     window.py            thin GTK4 view: speech bubble, character area,
                          subtitle/status, controls (push-to-talk mic +
-                         level meter), settings popover (voice/language
-                         section); marshals worker-thread records AND all
-                         voice callbacks with GLib.idle_add; hides on
-                         close; never renders markup
+                         level meter), settings popover (voice/language,
+                         wake-word, and conversation sections incl. the
+                         clear-conversation control); marshals
+                         worker-thread records AND all voice callbacks
+                         with GLib.idle_add; the trusted routing
+                         predicate (parser verdict + v0.12 deterministic
+                         task-goal gate) feeds ConversationService so
+                         chat never reaches the manager while goals do;
+                         hides on close; never renders markup
     __main__.py          `python3 -m companion` (--check/--smoke headless,
                          --no-greeting, --llm attaches local Ollama for
                          optional spoken replies)
@@ -291,6 +342,14 @@ scripts/verify_context_conversation.py  real-service context tests:
                          window routing/clear/wake compatibility,
                          dead-endpoint recovery; BLOCKED for physical
                          spoken turns without a working microphone
+scripts/verify_task_planning.py  real-service planning demo (sandboxed
+                         files only): real Ollama plan -> closed-set
+                         check -> REAL digest-bound approval (wrong
+                         digest refused) -> execution -> reopened
+                         report evidence; real denial/cancel/chat-gate/
+                         dead-Ollama safety checks; mocked recovery
+                         paths are referenced from unit tests, never
+                         relabelled as real
 scripts/manual_smoke_apps.sh  opt-in real-launch smoke test (ALWIN_MANUAL_SMOKE=1)
 scripts/manual_smoke_automation.sh  opt-in real-AT-SPI automation smoke test
                          (ALWIN_AUTOMATION_SMOKE=1)
@@ -1120,6 +1179,50 @@ on *any* problem the pipeline falls back to the built-in parser and
 says so in a visible note. There is no cloud fallback path anywhere in
 the codebase.
 
+### Task planning & plan execution (v0.12)
+
+**Objective → plan.** A complex goal reaches the planner only through
+existing routing: the deterministic parser still handles simple
+commands (unchanged fast path); unsupported-but-task-like text (the
+deterministic English goal gate) goes to the manager, where
+`TaskPlanningService.propose()` issues ONE bounded `json_mode`
+generation against the same Ollama client. The model may answer
+`plan | clarify | decline`; `validate_plan()` (the trusted validator)
+decides whether the plan is executable at all — closed-set actions,
+dependency rules, derived risk, bounded sizes, sanitising hoist of
+misplaced model keys, and one bounded validation-feedback retry (still
+strictly validated). Clarifications become an honest failed record
+carrying the question; declines become a cancelled record with the
+reason ("nothing was executed"); an unavailable model falls back to
+the existing unsupported path with an appended note. Capabilities come
+from `discover_capabilities()` (real probes + TTL cache), so a plan
+that needs a missing dependency (e.g. `openpyxl`) turns into a
+clarifying redirect instead of a later failure.
+
+**One approval, then per-step trust.** Plans reuse the `task_sequence`
+precedent: the user approves **once**, bound to the plan digest
+(`plan_digest(plan.to_dict())`), after seeing every step. Each step
+then runs through `pipeline.preview_action()` → permission check →
+`run_previewed()` with a per-step digest token — identical rules to
+typed input, executed sequentially (max concurrency 1: single worker,
+non-thread-safe desktop integrations). Bounds: 12 steps per proposal
+(24 total), a 300 s plan budget, **one retry for read-only steps only**
+(mutations are never retried — a side effect may already have
+occurred), and cancellation at step boundaries that preserves completed
+steps (the two plan-boundary lifecycle edges exist only for that; a
+running action is still never interrupted).
+
+**Verification & recovery are separate from execution.** Every step
+records its own verification evidence (status, bounded message, check
+names — never raw file contents) into the record/history. Outcomes map
+honestly: all verified → `completed`; a verification failure or a
+partially applied plan → `needs_attention`; nothing ran → `failed`;
+rejection/boundary-cancel → `cancelled`. After a **zero-execution**
+failure (preview/denied), the service may propose ONE replan of the
+remaining work; a trusted digest check drops any step that repeats an
+already-succeeded *or* already-failed mutation, and a recovered plan
+always reports `needs_attention` — never a false "completed".
+
 ## Audit
 
 `ai_core/audit.py` appends one JSON object per task to
@@ -1191,8 +1294,12 @@ detector/window suites, the `wait_stopped` shutdown contract and the
 21-module security pin — and v0.11 adds **35 more** (session-context
 recording/bounds/clearing, action-vs-chat routing, routing-honesty
 prompt clauses, window conversational/stale-TTS/clear-control tests,
-the sliced stop-aware bus-wait fix) — for a total of **1073 tests
-(1071 passed, 2 skipped)**. The v0.9 additions were: the six voice-stack suites
+the sliced stop-aware bus-wait fix) — and v0.12 adds **36 more**
+(plan schema + key-hoisting sanitisation, capability discovery/cache,
+planning service outcomes and credential scrubbing, manager plan
+flows with real sandbox pipelines, presenter plan-state rendering, the
+CRLF read-verification regression) — for a total of **1109 tests
+(1107 passed, 2 skipped)**. The v0.9 additions were: the six voice-stack suites
 (registry, detection, conversation, capture, recognition, voice output),
 the window voice-cycle suite (real `GLib.idle_add` marshalling pumped
 on the default main context, all devices/models/LLM faked), the

@@ -1,4 +1,4 @@
-"""Speech recognition for the companion (v0.11.0) — local, lazy, honest.
+"""Speech recognition for the companion (v0.12.0) — local, lazy, honest.
 
 Runs **faster-whisper** (a local CTranslate2 Whisper port) over the
 in-memory PCM from :mod:`companion.voice_input`.  Design rules:

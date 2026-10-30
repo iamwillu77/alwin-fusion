@@ -1,4 +1,4 @@
-"""Companion window: the GTK4 view for the Alwin character (v0.11.0).
+"""Companion window: the GTK4 view for the Alwin character (v0.12.0).
 
 A lightweight, persistent window that shows the character, a speech
 bubble, a minimal task status and a small control row.  It is a **thin
@@ -705,18 +705,30 @@ class CompanionWindow:
 
         The deterministic parser — the SAME validator the task pipeline
         starts from — decides whether an utterance is a desktop action.
-        Actions take the unchanged validate → permission → approval →
-        verification path; parser-unsupported text (and bare `exit`)
-        becomes a conversational turn that never creates a task record.
-        Voice cannot bypass anything: anything actionable still goes
-        through the full pipeline, and the predicate fails CLOSED
-        (routing errors treat the text as an action).
+        v0.12 adds a deterministic *task-goal gate*: an unsupported
+        sentence that clearly asks for a desktop task (file/report/
+        analysis wording) is routed to the manager, where the planning
+        service either structures it into a validated plan, asks a
+        clarifying question, or honestly declines (never executes).
+        Parser-supported requests keep the unchanged validate →
+        permission → approval → verification path; everything else is
+        conversational. The predicate fails CLOSED (routing errors
+        treat the text as an action).
         """
         try:
             intent = parse_command(text).intent
         except Exception:  # noqa: BLE001 - never crash a turn
             return True
-        return intent not in (UNSUPPORTED, EXIT)
+        if intent not in (UNSUPPORTED, EXIT):
+            return True
+        # Unsupported → is this a *task goal* worth planning? (Cheap,
+        # deterministic, English — same language basis as the parser.)
+        try:
+            from ai_core.task_planning import looks_like_task_goal
+
+            return looks_like_task_goal(text)
+        except Exception:  # noqa: BLE001 - fail CLOSED to planning
+            return True
 
     def _wake_enabled(self) -> bool:
         return bool(self._settings.get("wake_word_enabled", False))

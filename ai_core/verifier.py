@@ -195,12 +195,23 @@ class Verifier:
             resolved = self._resolve(action, "read")
             is_file = self._add(checks, "is_file", resolved.is_file(), str(resolved))
             if is_file and isinstance(execution.data.get("content"), str):
-                actual = resolved.read_text(encoding="utf-8", errors="replace")
+                # Read EXACTLY like the executor does (raw bytes +
+                # replace): Path.read_text() would normalize CRLF to
+                # LF and make every Windows-line-ending file (any
+                # csv.writer output) falsely fail with "file changed
+                # while reading" (real bug found by the v0.12 planner
+                # verification against a real CRLF fixture).
+                try:
+                    actual = resolved.read_bytes().decode(
+                        "utf-8", errors="replace")
+                except OSError:
+                    actual = None
                 self._add(
                     checks,
                     "content_matches",
                     actual == execution.data.get("content"),
-                    f"{len(actual)} chars re-read",
+                    f"{len(actual) if actual is not None else 0} chars "
+                    "re-read",
                 )
             ok = is_file and all(c["passed"] for c in checks)
             return VerificationResult(

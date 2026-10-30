@@ -27,6 +27,7 @@ from ai_core.planner import (
     describe_action,
     plan_from_intent,
     plan_via_llm,
+    validate_action,
 )
 from ai_core.verifier import Verifier
 from integrations import build_default_dispatcher
@@ -399,6 +400,23 @@ class TaskPipeline:
                 clean_command=clean_command,
             )
 
+        return self._preview_planned(
+            action, report, clean_command, dry_run
+        )
+
+    def _preview_planned(
+        self,
+        action: dict,
+        report: TaskReport,
+        clean_command: str,
+        dry_run: bool,
+    ) -> TaskPreview:
+        """Stages 2.5-3 for an already-planned action (shared core).
+
+        Used by :meth:`preview` (after parse/plan) and by
+        :meth:`preview_action` (plan steps, v0.12).  Same permission
+        check, same proposal text, same digest — never executes.
+        """
         # ---- Stage 3: permission check -------------------------------- #
         decision = self.checker.check_action(action)
         report.permission = decision.as_dict()
@@ -441,6 +459,43 @@ class TaskPipeline:
             plan_digest=plan_digest(action),
             clean_command=clean_command,
         )
+
+    def preview_action(
+        self,
+        action: dict,
+        *,
+        clean_command: str = "",
+        dry_run: bool = False,
+    ) -> TaskPreview:
+        """Stages 2.5-3 for an ALREADY-VALIDATED plan step (v0.12).
+
+        The action arrives from :func:`ai_core.task_plan.validate_plan`
+        (closed-set validated) and is **re-validated here** — the
+        permission check, proposal text and digest are computed exactly
+        as in :meth:`preview`, so a plan step can never be previewed
+        under looser rules than a typed command.  Never executes.
+        """
+        task_id = self._new_task_id()
+        clean = clean_command or ""
+        report = TaskReport(
+            task_id=task_id,
+            status=STATUS_FAILED,
+            command=clean,
+            dry_run=dry_run,
+        )
+        try:
+            action = validate_action(action)
+        except PlanValidationError as exc:
+            report.status = STATUS_UNSUPPORTED
+            report.error = str(exc)
+            return TaskPreview(
+                report=report, action=None, permission=None,
+                proposal=None, requires_approval=False,
+                status=STATUS_UNSUPPORTED, error=str(exc),
+                plan_digest="", clean_command=clean,
+            )
+        report.action = action
+        return self._preview_planned(action, report, clean, dry_run)
 
     def run_previewed(
         self,

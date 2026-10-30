@@ -32,7 +32,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 # --------------------------------------------------------------------------- #
 # States
@@ -83,11 +83,22 @@ TRANSITIONS: Dict[str, frozenset] = {
     # Cancel between approval and the actual start of execution: the
     # worker checks the cancel flag right before dispatching.
     STATE_APPROVED: frozenset({STATE_EXECUTING, STATE_CANCELLED}),
-    STATE_EXECUTING: frozenset({STATE_VERIFYING, STATE_FAILED}),
+    # v0.12: EXECUTING -> CANCELLED exists ONLY for plan-boundary
+    # cancellation (the controller checks the cancel flag BETWEEN
+    # steps, when nothing is running).  The single-action guard in
+    # TaskRecord.request_cancel still refuses cancellation while an
+    # action executes, so this edge never interrupts a running action.
+    STATE_EXECUTING: frozenset(
+        {STATE_VERIFYING, STATE_FAILED, STATE_CANCELLED}
+    ),
     # From verifying there is no path back to executing: verification
     # never re-runs an action, it only judges the recorded result.
+    # v0.12 adds VERIFYING -> CANCELLED for the same plan-boundary
+    # reason (a plan may be cancelled while its outcome is being
+    # summarized between steps).
     STATE_VERIFYING: frozenset(
-        {STATE_COMPLETED, STATE_FAILED, STATE_NEEDS_ATTENTION}
+        {STATE_COMPLETED, STATE_FAILED, STATE_NEEDS_ATTENTION,
+         STATE_CANCELLED}
     ),
     STATE_COMPLETED: frozenset(),
     STATE_FAILED: frozenset(),
@@ -148,6 +159,11 @@ class TaskRecord:
     result_message: Optional[str] = None
     verification: Optional[dict] = None  # {status, message, checks:[{name,passed}]}
     report_status: Optional[str] = None  # raw pipeline status (audit/debug)
+
+    # v0.12: the validated multi-step plan driving this record (worker-
+    # only runtime state; deliberately NOT serialized to history —
+    # history keeps only the curated fields below).
+    task_plan: Any = None
     error: Optional[str] = None
     notes: List[str] = field(default_factory=list)
 

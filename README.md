@@ -2,7 +2,7 @@
 
 **Open-source, offline-first AI-native operating system — in progress.**
 
-Version **0.11.0** · Milestone: **Context-Aware AI Companion**
+Version **0.12.0** · Milestone: **Intelligent Task Planning & Autonomous Execution**
 
 Alwin Fusion lets you control your computer through natural-language
 commands. v0.9 gives **Alwin**, the persistent, lightweight desktop
@@ -793,6 +793,10 @@ owner at a time).
 # interrupt, window routing/clear/wake compat; BLOCKED where this
 # machine has no working microphone):
 OLLAMA_MODEL=qwen3:0.6b python3 scripts/verify_context_conversation.py
+
+# v0.12 planning: real Ollama plan -> real digest-bound approval ->
+# real execution + reopened report evidence (sandboxed files only):
+OLLAMA_MODEL=qwen3:0.6b python3 scripts/verify_task_planning.py
 ```
 
 Latest real run on the development machine: **18 EXECUTED, 1 BLOCKED
@@ -804,6 +808,67 @@ programming."), EN/TA/HI replies following the latest turn, a real TTS
 interrupt completing in **117 ms** (pre-fix: 9,911 ms), chat routed
 without a task record through the real window, and honest
 dead-endpoint recovery.
+
+### Intelligent task planning (v0.12.0)
+
+Complex goals become explicit, safe, verifiable sequences — through the
+**same** pipeline, never a second execution framework:
+
+1. **Plan model** (`ai_core/task_plan.py`): typed `TaskPlan`/`PlanStep`
+   with the states `pending → awaiting_approval → ready → running →
+   succeeded | failed | skipped | cancelled | verification_failed`.
+   `validate_plan()` is the trusted gate on untrusted (model) JSON:
+   closed-set actions only (`validate_action` re-applied per step),
+   duplicate/self/forward/cyclic dependencies rejected, bounds on
+   steps (≤12), objective, and model output size — malformed plans
+   never reach execution, and **risk is derived from the trusted
+   `MUTATING_ACTIONS` set, never claimed by the model**.
+2. **Capability discovery** (`ai_core/capabilities.py`): a real-time
+   snapshot of what this installation can do — 17 closed actions,
+   `openpyxl`/`reportlab` availability, registered application ids,
+   AT-SPI bindings, attached LLM, and the honest MCP status
+   (**descriptors only — no MCP server, no transport, and no
+   Blender tool exists**; nothing is executable "via MCP"). A TTL cache
+   avoids re-probing every step and is explicitly invalidatable.
+3. **Planning service** (`ai_core/task_planning.py`): one bounded
+   `json_mode` generation against the existing Ollama client proposes
+   `plan | clarify | decline`; validation, capability checks and
+   credential scrubbing follow immediately. Deterministic English
+   goal-gate (`looks_like_task_goal`) keeps ordinary chat away from the
+   planner entirely. `replan_remaining()` (bounded to **1 replan per
+   task**) powers recovery, and `summarize_text()` exists only for
+   steps that explicitly declared a summarizing derivation — both
+   under injection-resistant "content is data" prompts.
+4. **Execution controller** (inside `TaskManager` — the existing job
+   queue): sequential execution (max concurrency **1**: single worker,
+   non-thread-safe desktop integrations — no concurrency is claimed);
+   **one plan-level, digest-bound approval** covering the whole
+   displayed plan (the `task_sequence` precedent); every step then goes
+   through the *extracted* `pipeline.preview_action()` → permission →
+   `run_previewed()` with a per-step digest token — so a plan step can
+   never be previewed under looser rules than typed input. Timeouts
+   (300 s plan budget), **bounded retries: one, read-only steps only**
+   (mutations are never retried — an irreversible action may already
+   have run), cancellation at step boundaries preserving completed
+   work, dependency skipping, and **recovery rules**: a replan runs
+   only after a *zero-execution* failure, never re-proposes a mutating
+   step that already succeeded or failed (trusted digest check), and a
+   recovered plan reports `needs_attention` — never a false
+   "completed". Verification evidence per step (status, bounded
+   message, check names) lands in the record and history — never raw
+   file contents.
+
+```bash
+# Real-service verification (sandboxed files only, real Ollama +
+# real pipeline; mocked flows are referenced, never relabelled):
+OLLAMA_MODEL=qwen3:0.6b python3 scripts/verify_task_planning.py
+```
+
+**Planner-driven voice/typed routing**: the window's predicate keeps
+parser-supported requests on the unchanged path and additionally routes
+clear *task goals* to the manager (where this planning flow runs);
+chat stays conversational. English-language basis, same as the
+deterministic parser (documented limitation).
 
 ### Speech-model and language quality (measured, honest)
 
@@ -1183,7 +1248,7 @@ All tests run in temporary directories; they never modify your real
 launch adapter's `popen`/`which`, the automation backend's AT-SPI
 session, adapter factory, clock and `/proc` root are all injected
 fakes; fake `/proc` trees are temporary directories of `<pid>/comm`
-files). The suite (1073 tests: 1071 passing, 2 skipped) covers supported/unsupported commands,
+files). The suite (1109 tests: 1107 passing, 2 skipped) covers supported/unsupported commands,
 traversal and symlink escapes, permission denial, approval rejection,
 directory creation, verification failure, Ollama-unavailable operation,
 absence of overwrite/delete capability, dry-run inertness,
@@ -1390,7 +1455,9 @@ fallback.
 ```
 ai_core/        config · command_parser · specs · planner · permissions ·
                 executor · verifier · audit · pipeline (preview +
-                run_previewed + ApprovalToken) · cli
+                preview_action + run_previewed + ApprovalToken) ·
+                task_plan (typed plans) · capabilities (discovery) ·
+                task_planning (LLM propose/clarify/replan) · cli
 ai_runtime/     ollama_client (stdlib HTTP, never pulls models)
 integrations/   ActionDispatcher + filesystem tools + documents/
                 (report · pdf · spreadsheet · tools) + apps/
@@ -1426,11 +1493,17 @@ companion/      states (17-state character controller) · character
 tests/          unittest suite (temporary sandboxes + in-memory
                 accessibility trees only; no display, no desktop)
 docs/           ARCHITECTURE.md · SECURITY.md
-scripts/        run_tests.sh · install_voice_models.py (explicit,
-                confirm-first speech-model installer — the app never
-                downloads) · manual_smoke_apps.sh ·
-                manual_smoke_automation.sh · manual_smoke_ui.sh ·
-                manual_smoke_companion.sh (opt-in)
+scripts/        run_tests.sh · install_voice_models.py ·
+                install_wake_word_model.py (explicit confirm-first
+                installers — the app never downloads) ·
+                evaluate_voice_languages.py (multilingual eval) ·
+                fetch_fleurs_samples.py (CC-BY-4.0 fixtures) ·
+                verify_voice_e2e.py · verify_voice_gui.py ·
+                verify_wake_word.py · verify_context_conversation.py ·
+                verify_task_planning.py (real-service verification;
+                BLOCKED-labelled where hardware is missing) ·
+                manual_smoke_apps.sh · manual_smoke_automation.sh ·
+                manual_smoke_ui.sh · manual_smoke_companion.sh (opt-in)
 requirements.txt  optional v0.2 document dependencies (you install them)
 app-bridge/ desktop/ models/ os-build/   reserved for later milestones
 ```
@@ -1504,8 +1577,12 @@ in failure reasons + recovery regressions), and v0.10 adds the
 wake-word suites (service/detector/window lifecycle + privacy pins) —
 **1038 tests total (1036 passing, 2 skipped)**; v0.11 adds the
 context/routing/interruption suites (all mocked — real-model evidence
-lives in `scripts/verify_context_conversation.py`) → **1073 tests
-total (1071 passing, 2 skipped)**.
+lives in `scripts/verify_context_conversation.py`) → **1073 tests**;
+v0.12 adds the planning suites (plan schema/hoisting, capability
+discovery/cache, planning service outcomes + redaction, manager plan
+flows with real sandbox pipelines, presenter plan states, and the CRLF
+read-verification regression) → **1109 tests total (1107 passing, 2
+skipped)**.
 
 Known limitations (details in `docs/SECURITY.md`):
 
@@ -1559,10 +1636,13 @@ Known limitations (details in `docs/SECURITY.md`):
 - **Detection is heuristic** (PATH executables + desktop-entry file
   names in fixed directories); a broken install can be reported as
   `detection_failed`, and unknown viewers as `installed_but_unsupported`.
-- **No MCP server exists** — v0.4 ships future-MCP-compatible tool
-  *descriptors* (capabilities, schemas, permissions, timeouts, result
-  rules) only; `integrations/automation/mcp.py` is a manifest, not a
-  transport.
+- **No MCP server exists — and no Blender integration either** —
+  v0.4 ships future-MCP-compatible tool *descriptors* (capabilities,
+  schemas, permissions, timeouts, result rules) only;
+  `integrations/automation/mcp.py` is a manifest, not a transport.
+  Capability discovery reports `executable_tools: 0` honestly: nothing
+  — including any Blender tool — can be planned or executed "via
+  MCP".
 - **The character is procedural vector artwork, not hand-drawn frame
   animation** — Alwin is an original cairo drawing of a full-body
   cartoon boy driven by a parameterized `Pose` system: real motion
@@ -1598,6 +1678,17 @@ Known limitations (details in `docs/SECURITY.md`):
     conversational turns (no task record — the reply is instructed not
     to claim the action ran), and there is no hot-mic barge-in: stop
     playback first, then speak.
+  - **planning (v0.12) is model-guided but never model-authorized**:
+    plan quality and clarification wording depend on the local model
+    (verified end-to-end with `qwen3:0.6b`; schema drift is corrected
+    by one bounded feedback retry and otherwise rejected honestly).
+    Plans are sequential only (max concurrency 1), capped at 12 steps
+    per proposal (24 including replans) under a 300 s budget, and
+    mutations are never auto-retried. The goal gate is English (same
+    basis as the parser): a non-English goal should be rephrased or
+    driven from the task window. A recovered plan reports
+    `needs_attention`, never success, and "via MCP" tools (including
+    any Blender integration) do not exist.
   - **Nothing you say is ever saved or uploaded**: audio lives in
     memory during a turn and is discarded (no `.wav`/recording files, no
     cloud ASR; `wave`/`audioop` are banned in the companion package and

@@ -1,6 +1,6 @@
 # Alwin Fusion — Security Model and Limitations
 
-Version: 0.11.0 — Milestone: Context-Aware AI Companion
+Version: 0.12.0 — Milestone: Intelligent Task Planning & Autonomous Execution
 
 This document states what the prototype defends against, how, and —
 importantly — **what it does not defend against**. Passing tests does
@@ -387,6 +387,45 @@ types. Its own security properties and the new surface it introduces:
   reporting complete success when a required step failed (tested).
 * **One task at a time.** The manager refuses a second submission
   while one is running, so there is no queue to race or confuse.
+
+**Task planning surface (v0.12).** The planning layer reuses every
+trusted stage above and adds these specific properties (tested):
+
+* **The plan is untrusted until validated.** Model output is JSON data:
+  `validate_plan()` re-applies the closed action allowlist to every
+  step, enforces dependency rules and bounds, derives risk from the
+  trusted `MUTATING_ACTIONS` set (a proposal cannot bless itself as
+  safe), and only *sanitises* mechanical key misplacement (hoisting)
+  — every hoisted value is still fully validated. No model-generated
+  code, shell or function name is ever executed: tool selection is
+  "declared capability + validated input" only.
+* **The LLM proposes; trusted code authorizes.** Authorization stays
+  outside the model: one digest-bound approval covers the whole
+  displayed plan (what the user saw is what runs), every step is
+  permission-checked again at preview time and executed under a
+  per-step digest token, and `ai_core.capabilities` reports honestly
+  what exists (including **MCP = descriptors only, zero executable
+  MCP tools — no Blender integration exists**).
+* **Nothing bypasses through voice or chat.** The window's routing
+  predicate is the deterministic parser plus a lexical goal gate —
+  both funnel into the same `manager.submit()` path; chat never
+  reaches the manager (no record), and a goal cannot skip validation.
+  Clarify/decline outcomes are honest records ("nothing was
+  executed"), never silent failures.
+* **Recovery cannot repeat side effects.** Mutations are never
+  retried (one bounded retry exists for read-only steps only); a replan
+  runs only after a zero-execution failure and a trusted digest check
+  drops any proposal that repeats an already-succeeded *or
+  already-failed* mutation; recovered plans report `needs_attention`,
+  never `completed`.
+* **Untrusted content stays untrusted.** Summarizing derivations quote
+  file contents to the local model under an explicit "data, never
+  instructions" prompt; report contents built from them are plain
+  display/file text, never commands. Plans are runtime-only:
+  `TaskRecord.task_plan` is deliberately excluded from serialization,
+  history keeps only curated step/status/verification fields, and
+  credential-looking text in planning reasons is scrubbed exactly like
+  reply-failure reasons (mirrored redactor in `task_planning`).
 
 ### 3d. Companion presentation (v0.6/v0.7/v0.8/v0.9) and its new attack surface
 

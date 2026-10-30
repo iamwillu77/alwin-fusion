@@ -63,6 +63,29 @@ class TestVerificationSuccess(VerifierTestCase):
         self.assertEqual(result.status, STATUS_PASSED)
         self.assertIn("content_matches", [c["name"] for c in result.checks])
 
+    def test_crlf_file_reads_verify_truthfully(self):
+        # v0.12 real-bug regression: the executor decodes RAW bytes
+        # while the verifier used Path.read_text() (newline
+        # normalization) — so any CRLF file (csv.writer output, Windows
+        # exports) falsely failed with "file changed while reading".
+        path = self.sandbox.doc_path("windows.csv")
+        path.write_bytes(b"month,amount\r\n2026-01,120.50\r\n")
+        action = validate_action(
+            {"action": "read_file", "path": "Documents/windows.csv"}
+        )
+        execution = self.executor.execute(action, dry_run=False)
+        self.assertEqual(
+            execution.data["content"],
+            "month,amount\r\n2026-01,120.50\r\n",
+            "content stays verbatim (raw bytes decoded, no newline "
+            "massaging)",
+        )
+        result = self.verifier.verify(action, execution)
+        self.assertEqual(result.status, STATUS_PASSED,
+                         "a CRLF file must not look 'changed while "
+                         "reading'")
+        self.assertIn("content_matches", [c["name"] for c in result.checks])
+
     def test_list_directory_verified(self):
         self.sandbox.doc_path("x.txt").write_text("1")
         action = validate_action({"action": "list_directory", "path": "Documents"})
