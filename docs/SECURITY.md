@@ -1,6 +1,6 @@
 # Alwin Fusion — Security Model and Limitations
 
-Version: 0.21.0 — Milestone: Voice & Hands-Free Reliability
+Version: 0.22.0 — Milestone: Final Integration, Security & Release Readiness
 
 This document states what the prototype defends against, how, and —
 importantly — **what it does not defend against**. Passing tests does
@@ -1587,6 +1587,37 @@ New surface introduced by v0.6, stated honestly:
       as BLOCKED/UNVERIFIED with their exact causes — never converted
       into passes, and no package, model or desktop setting was
       installed or changed to make a check pass.
+55. **Cross-module boundary audit (v0.22) — the seams hold.**
+    * *One execution seam, two reviewed call sites.* Source-wide
+      search finds exactly `ai_core/executor.py` (the pipeline entry)
+      and `integrations/automation/sequence.py` (per-step
+      re-dispatch through the SAME wired dispatcher, gated by its own
+      `check_action` permission re-check); everything registered in
+      the dispatcher is a member of the closed `ACTION_SCHEMA`
+      (AST-pinned), every registered MUTATING action declares
+      `requires_approval=True`, and unknown actions fail validation
+      before any handler exists. No shell/python-eval/synthetic-input
+      path exists outside the registry argv launcher (pinned by the
+      per-package security suites).
+    * *Approval cannot be synthesized.* The only `ApprovalToken`
+      constructions are the single-action preview and the plan-step
+      loop, both bound to the digest computed at preview time;
+      `ai_core/scheduler.py` contains no approve API and no approval
+      token (source-pinned), and `TaskManager.approve` still requires
+      the awaiting state — scheduler, voice, memory and resume all
+      reach execution only through the same gates (re-pinned).
+    * *Version and dependency source of truth.* A single
+      `ai_core.__version__` feeds all three entry points and the docs
+      (pinned); `requirements.txt` stays optional-docs-only and
+      `ai_core` imports only stdlib + first-party modules (AST-pinned),
+      so a clean core cannot silently depend on a third-party package.
+    * *Both persistent stores stay honest at startup.* Fresh state
+      dirs create `memory.db`/`scheduler.db` owner-only; existing DBs
+      reopen in place; a corrupt scheduler DB is REFUSED byte-for-byte
+      (never silently recreated or downgraded); clearing memory never
+      touches scheduler state; a closed scheduler/store refuses new
+      work with an honest error (all pinned in
+      tests/test_release_readiness.py).
 
 ## Reporting security issues
 

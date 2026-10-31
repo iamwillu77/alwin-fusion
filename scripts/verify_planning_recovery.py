@@ -334,6 +334,15 @@ def item9_cancel_audit(config):
 
 
 def rerun_all():
+    # v0.22 orchestration guard: when an OUTER verification script is
+    # rerunning this one, skip OUR nested reruns (the outer runner
+    # exercises every script directly — the nesting only multiplies
+    # wall time without adding evidence).  Honest note, never a fake
+    # pass of the outer legs.
+    if os.environ.get("ALWIN_VERIFY_NESTED"):
+        print("[verify] nested run: inner regression reruns skipped "
+              "(the outer runner reruns them directly)", flush=True)
+        return True
     print("== rerunning ALL existing verification scripts ==",
           flush=True)
     ok = True

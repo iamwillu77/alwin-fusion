@@ -2,7 +2,7 @@
 
 **Open-source, offline-first AI-native operating system — in progress.**
 
-Version **0.21.0** · Milestone: **Voice & Hands-Free Reliability**
+Version **0.22.0** · Milestone: **Final Integration, Security & Release Readiness**
 
 Alwin Fusion lets you control your computer through natural-language
 commands. v0.9 gives **Alwin**, the persistent, lightweight desktop
@@ -476,7 +476,8 @@ execution and verification stay where they were.
   | Dependency | Enables | If missing |
   |---|---|---|
   | `faster-whisper` (+ an explicitly installed model) | speech recognition | the mic button explains what to install; **no transcript is ever invented** |
-  | `espeakng-loader` / `espeak-ng` (15 verified voices) | spoken replies (opt-in) | replies stay text-only; status says "espeak-ng is not installed" honestly |
+  | `vosk` + the wake-word model (`scripts/install_wake_word_model.py`, opt-in) | hands-free wake word (default **off**) | wake settings explain it; push-to-talk keeps working |
+  | `espeakng-loader` / `espeak-ng` (15 verified voices) | spoken replies (opt-in) | replies stay text-only; status says "espeak-ng is not installed" honestly (v0.21: falls back to the OS espeak-ng library + distro voice data when only those are installed — read-only lookup, never a download) |
   | `langdetect` (small, optional) | full statistical text detection | detection degrades to script + recognizer hint (reported honestly; mixed-script input stays "uncertain") |
   | GStreamer with `autoaudiosrc`/`alsasink` (present on a normal GNOME desktop) | microphone capture + audio playback | clear "no audio device" errors; everything else keeps working |
   | a working microphone | push-to-talk input | honest "microphone unavailable" bubble; typing still works |
@@ -488,6 +489,33 @@ execution and verification stay where they were.
   loads with `local_files_only=True`. Hardware-dependent behaviour (real
   mic, real speakers) depends on your machine; every test in the suite
   fakes or injects these layers.
+
+### Installation targets & packaging (v0.22.0, honest)
+
+Alwin Fusion ships **no packaging format** (no wheel, no setup.py, no
+pyproject — verified in this milestone): the supported launch method is
+running the repository directly —
+
+```bash
+python3 -m companion [--check|--smoke|--version]   # the character + voice UI
+python3 -m taskui [--companion]                     # task window (+ companion)
+python3 -m ai_core.cli [--check|--version|...]      # headless CLI
+```
+
+State lives in `$ALWIN_STATE_DIR` (default `~/.alwin`): `memory.db`,
+`scheduler.db`, `audit.jsonl`, `task_history.jsonl` — all created
+owner-only (0700 dir / 0600 files) on first run; existing databases are
+reopened in place with their own migrations (never reset, never
+downgraded). `requirements.txt` declares only the optional document
+dependencies; the core runs on the standard library alone.
+
+**Supported and verified: Linux (Ubuntu 26.04-class) with GTK4/Wayland
+or X11 — all evidence in this repository was produced there.
+Windows and macOS are untested and unsupported as of v0.22.0**; the
+`os-build/`, `app-bridge/` and `desktop/` directories are reserved
+README placeholders, not shipping components. `python3 -m …` entry
+points are the only launch targets that are exercised by the health
+checks and verification scripts.
 
 ## Quick start
 
@@ -1575,6 +1603,53 @@ binding limit (capture init itself was still verified directly).
 microphone — no human speaker exists in an automated session; physical
 mic speech remains open until tested by a person. No audio or
 transcript is ever saved by any of these checks.
+
+  spilling over into an honest UNVERIFIED for the spoken-mic step.
+
+### Final integration, security & release readiness (v0.22.0)
+
+The final milestone adds **no features** — it proves the seams. A
+cross-module audit (14 end-to-end paths: conversation, voice, wake,
+NL→plan, approval, desktop execution, partial-failure workflow,
+resume, memory, scheduler reminder/task, file create/replace,
+readiness reporting, shutdown-under-load) found no alternate execution
+path or unsynthesizable approval, and the findings are now pinned as
+`tests/test_release_readiness.py` (24 tests):
+
+* **One execution seam, two reviewed call sites.** Source-wide: only
+  the executor and the sequence runner's per-step re-dispatch (same
+  wired dispatcher, own `check_action` gate) call `.dispatch(`; every
+  registered action is in the closed `ACTION_SCHEMA`; every registered
+  mutating action requires approval; the scheduler module provably
+  contains no approve API.
+* **Version source of truth**: a single `ai_core.__version__` feeds
+  all three entry points and the docs (pinned, plus a real
+  `--version` invocation).
+* **Dependency inventory pinned**: `requirements.txt` = the two
+  optional document packages only; `ai_core` AST-pinned to stdlib +
+  first-party imports; `taskui`'s only third-party import is `gi`;
+  missing optional deps (faster-whisper, document libs) raise bounded,
+  actionable errors — asserted with the real missing packages on this
+  host.
+* **Startup lifecycle**: fresh state dirs create both owner-only
+  databases; existing DBs reopen in place; a corrupt scheduler DB is
+  refused byte-for-byte (never recreated or downgraded); clearing
+  memory never touches scheduler state; closed stores refuse new work
+  honestly; voice cancellation provably cannot deliver a stale result
+  (barrier-controlled race test).
+* **Health-check contracts**: `companion --check` exits non-zero on
+  any failed expectation (contract + real run pinned); `taskui
+  --check` is a documented informational status report from the same
+  version source.
+* **Packaging honesty**: no packaging format exists — the supported,
+  exercised entry points are `python3 -m companion | taskui |
+  ai_core.cli`; evidence is **Linux/GTK4 only** (Windows/macOS
+  untested), documented in *Installation targets & packaging*.
+
+Environment blockers remain recorded, never "fixed": `faster-whisper`
+missing, vosk wake model absent, live mic line clipping (peak 1.0 with
+nobody speaking), LibreOffice a11y disabled. Nothing was installed,
+downloaded or reconfigured to turn a BLOCKED check into a pass.
 
 ### Speech-model and language quality (measured, honest)
 

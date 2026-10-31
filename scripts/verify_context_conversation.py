@@ -352,6 +352,7 @@ def section_gui():
         return False
 
     SILENCE_BUBBLE = "didn't hear anything"
+    DEP_MARKERS = ("is not installed", "package is missing")
 
     def after_turn():
         if stage["turn"] == 0:
@@ -360,6 +361,19 @@ def section_gui():
             gen_calls = len(llm.calls)
             ok1 = (subs == [] and gen_calls >= 1
                    and SILENCE_BUBBLE not in bubble)
+            # v0.22: a turn that never ran because the ASR package is
+            # absent is ENVIRONMENT-BLOCKED (same root cause the mic
+            # leg already reports) — never counted as a pass, never
+            # mislabelled as a product failure.
+            dep_blocked = any(m in (bubble or "")
+                              for m in DEP_MARKERS)
+            if not ok1 and dep_blocked:
+                stage["dep_blocked"] = True
+                report("gui", "turn 1: chat routed without a task AND "
+                       "replied", "BLOCKED",
+                       f"ASR dependency unavailable: {bubble[:80]!r}")
+                finish()
+                return False
             report("gui", "turn 1: chat routed without a task AND replied",
                    "EXECUTED" if ok1 else "FAILED",
                    f"subs={subs!r} generations={gen_calls} "
@@ -379,9 +393,13 @@ def section_gui():
         systems = [c["system"] for c in llm.calls]
         has_ctx = any("Tell me about Python programming." in s
                       for s in systems[1:])
-        report("gui", "turn 2 prompt carried turn 1 (real Ollama)",
-               "EXECUTED" if has_ctx else "FAILED",
-               f"{len(systems)} real generations")
+        if stage.get("dep_blocked"):
+            report("gui", "turn 2 prompt carried turn 1 (real Ollama)",
+                   "BLOCKED", "turn 1 never ran (ASR package absent)")
+        else:
+            report("gui", "turn 2 prompt carried turn 1 (real Ollama)",
+                   "EXECUTED" if has_ctx else "FAILED",
+                   f"{len(systems)} real generations")
         # Clear control (real handler) then confirm prompt is clean.
         try:
             window._on_clear_context()

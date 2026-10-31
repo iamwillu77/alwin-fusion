@@ -491,9 +491,15 @@ def item10_reruns():
             report("10 rerun", script, "BLOCKED", "script not found")
             continue
         try:
+            # v0.22: signal nested runs so scripts with their own
+            # rerun chains (reliability, planning) skip their INNER
+            # reruns here — this outer list already exercises every
+            # script directly, and the nesting multiplies wall time
+            # without adding evidence.
+            nested_env = dict(os.environ, ALWIN_VERIFY_NESTED="1")
             proc = subprocess.run(
                 [sys.executable, path], cwd=REPO, capture_output=True,
-                text=True, timeout=3000)
+                text=True, timeout=3000, env=nested_env)
         except subprocess.TimeoutExpired:
             report("10 rerun", script, "FAILED", "timed out")
             ok = False

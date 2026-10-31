@@ -1,6 +1,6 @@
 # Alwin Fusion — Architecture
 
-Version: 0.21.0 — Milestone: Voice & Hands-Free Reliability
+Version: 0.22.0 — Milestone: Final Integration, Security & Release Readiness
 
 Alwin Fusion is an open-source, offline-first AI-native operating
 system in the making. This document describes what exists today, how
@@ -1857,6 +1857,38 @@ read-only status line plus the manage dialog.
 CLI flags: `--dry-run`, `--llm`, `--root DIR` (repeatable),
 `--ai-status`, `--show-config`, `--version`, `--help`.
 
+**Release-readiness layer (v0.22).** No new subsystem — cross-module
+contracts are now pinned as tests (`tests/test_release_readiness.py`):
+
+- *Version source of truth*: a single `ai_core.__version__` feeds the
+  companion/taskui/CLI `--version` outputs and the docs headers (all
+  four pinned to agree).
+- *Execution boundary*: exactly TWO `.dispatch(` call sites exist in
+  the tree (the executor, and the sequence runner's per-step
+  re-dispatch through the same wired dispatcher with its own
+  `check_action` gate); every registered action ∈ `ACTION_SCHEMA`;
+  every registered mutating action declares `requires_approval=True`;
+  `ai_core/scheduler.py` provably contains no approve API/token.
+- *Dependency inventory*: `requirements.txt` is pinned to the two
+  optional document packages; `ai_core` is AST-pinned to stdlib +
+  first-party imports only (a clean core cannot silently require a
+  third-party package); `taskui`'s only third-party import is `gi`.
+  Missing optional deps (faster-whisper, document libs) surface as
+  bounded, actionable errors — asserted.
+- *Startup lifecycle*: fresh state dirs create both owner-only
+  databases; existing databases reopen in place; a corrupt scheduler
+  DB is refused byte-for-byte (never recreated/downgraded); memory
+  clear-all never touches scheduler state; closed scheduler/store
+  refuse new work honestly.
+- *Health checks*: `companion --check` exits non-zero on any failed
+  expectation (contract pinned + one real run); `taskui --check` is a
+  documented informational status report versioned from the same
+  source.
+- *Packaging*: none exists — `python3 -m companion|taskui|ai_core.cli`
+  are the supported, exercised entry points; Linux/GTK4 evidence only
+  (Windows/macOS untested), documented in README "Installation
+  targets".
+
 ## Testing
 
 `scripts/run_tests.sh` runs the unittest suite (stdlib only). Every
@@ -1969,7 +2001,18 @@ the full legal-transition matrix plus illegal/same-phase/bounded-log
 behaviour of `_set_phase`, espeak system-fallback resolution and
 no-download/no-shell pins, no-audio-persistence and no-synthetic-input
 AST pins, default-off wake pin) — for **1489 passed, 2 skipped (2897
-subtests)**. The v0.9 additions were: the six voice-stack suites
+subtests)**; the v0.22 suite adds **24 more**
+(`tests/test_release_readiness.py`: version source-of-truth across all
+entry points + docs, dispatcher registry ⊆ ACTION_SCHEMA, mutating ⇒
+requires_approval (and read-only ⇒ not), exactly-two-reviewed-dispatch
+call sites with the sequence gate, scheduler-has-no-approve source
+pin, fresh/existing/corrupt state-dir lifecycle for BOTH databases,
+memory-clear vs scheduler isolation, closed-store honest refusal,
+requirements.txt inventory pin, ai_core stdlib-only + taskui gi-only
+AST pins, missing-optional-dependency honest errors (real missing
+faster-whisper), --check exit contract + real runs, skipped-dependents-
+never-completed, barrier-controlled stale-voice-result suppression)
+— for **1513 passed, 2 skipped (2897 subtests)**. The v0.9 additions were: the six voice-stack suites
 (registry, detection, conversation, capture, recognition, voice output),
 the window voice-cycle suite (real `GLib.idle_add` marshalling pumped
 on the default main context, all devices/models/LLM faked), the
